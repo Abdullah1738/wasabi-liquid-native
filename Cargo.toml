@@ -12,3 +12,8 @@ crate-type = ["rlib"]
 path = "src/lib.rs"
 
 [dependencies]
+
+[workspace]
+members = [".", "crates/address"]
+default-members = [".", "crates/address"]
+resolver = "3"

@@ -1,0 +1,11 @@
+[package]
+name = "wasabi-liquid-native-address"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT"
+publish = false
+description = "Profile-bound confidential Liquid address parsing and construction"
+
+[dependencies]
+elements = { git = "https://github.com/Abdullah1738/rust-elements.git", rev = "9709e5c39db913344c085588f36b190ff7b08957", default-features = false }
