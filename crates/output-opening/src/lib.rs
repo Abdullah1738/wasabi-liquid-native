@@ -18,7 +18,9 @@ use zeroize::Zeroize;
 ///
 /// This type deliberately does not implement `Debug`, `Copy`, or `Clone` so
 /// private output facts are not accidentally formatted or duplicated through
-/// those traits.
+/// those traits. Its accessors borrow every recovered field; any copies made by
+/// a caller become caller-owned private data and require an appropriate
+/// lifecycle outside this crate.
 pub struct OpenedOutput {
     asset_id: [u8; 32],
     value: u64,
@@ -41,9 +43,9 @@ impl OpenedOutput {
         &self.asset_id
     }
 
-    /// Returns the explicit amount in the asset's indivisible unit.
-    pub const fn value(&self) -> u64 {
-        self.value
+    /// Borrows the explicit amount in the asset's indivisible unit.
+    pub const fn value(&self) -> &u64 {
+        &self.value
     }
 
     /// Returns the asset blinding factor bytes.
@@ -54,21 +56,6 @@ impl OpenedOutput {
     /// Returns the value blinding factor bytes.
     pub const fn value_blinding_factor(&self) -> &[u8; 32] {
         &self.value_blinding_factor
-    }
-
-    /// Consumes the result and returns all recovered fields.
-    ///
-    /// The returned blinding-factor arrays become caller-owned private data and
-    /// the caller is responsible for clearing them after use.
-    pub fn into_parts(mut self) -> ([u8; 32], u64, [u8; 32], [u8; 32]) {
-        let parts = (
-            self.asset_id,
-            self.value,
-            self.asset_blinding_factor,
-            self.value_blinding_factor,
-        );
-        self.zeroize();
-        parts
     }
 
     fn zeroize(&mut self) {
@@ -125,21 +112,24 @@ pub fn open_confidential_output<C: Signing + Verification>(
     output: &TxOut,
     blinding_key: &SecretKey,
 ) -> Result<OpenedOutput, OutputOpenError> {
+    let range_proof_is_absent = output.witness.rangeproof.as_ref().is_none();
     output
         .unblind_with_key(secp, blinding_key)
         .map(OpenedOutput::from_secrets)
-        .map_err(OutputOpenError::from)
+        .map_err(|error| map_unblind_error(error, range_proof_is_absent))
 }
 
-impl From<UnblindError> for OutputOpenError {
-    fn from(error: UnblindError) -> Self {
-        match error {
-            UnblindError::NotConfidential => Self::NotConfidential,
-            UnblindError::MissingNonce => Self::MissingNonce,
-            UnblindError::MissingRangeproof => Self::MissingRangeProof,
-            UnblindError::RangeProofMessage(_) | UnblindError::Rewind(_) => Self::InvalidOpening,
-            _ => Self::InvalidOpening,
+fn map_unblind_error(error: UnblindError, range_proof_is_absent: bool) -> OutputOpenError {
+    match error {
+        UnblindError::NotConfidential => OutputOpenError::NotConfidential,
+        UnblindError::MissingNonce => OutputOpenError::MissingNonce,
+        UnblindError::MissingRangeproof if range_proof_is_absent => {
+            OutputOpenError::MissingRangeProof
         }
+        UnblindError::MissingRangeproof
+        | UnblindError::RangeProofMessage(_)
+        | UnblindError::Rewind(_) => OutputOpenError::InvalidOpening,
+        _ => OutputOpenError::InvalidOpening,
     }
 }
 

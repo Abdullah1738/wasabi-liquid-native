@@ -35,7 +35,7 @@ fn opens_confidential_output_without_consuming_receiver_key() {
     let opened = open_confidential_output(&secp, &output, &receiver_key).unwrap();
 
     assert_eq!(opened.asset_id(), &asset.to_byte_array());
-    assert_eq!(opened.value(), value);
+    assert_eq!(opened.value(), &value);
     assert_eq!(
         opened.asset_blinding_factor(),
         &tweak_bytes(asset_blinding_factor.into_inner())
@@ -48,18 +48,31 @@ fn opens_confidential_output_without_consuming_receiver_key() {
     let reopened = open_confidential_output(&secp, &output, &receiver_key).unwrap();
     assert_eq!(reopened.asset_id(), opened.asset_id());
     assert_eq!(reopened.value(), opened.value());
-    let (reopened_asset, reopened_value, reopened_asset_blind, reopened_value_blind) =
-        reopened.into_parts();
-    assert_eq!(reopened_asset, asset.to_byte_array());
-    assert_eq!(reopened_value, value);
-    assert_eq!(
-        reopened_asset_blind,
-        tweak_bytes(asset_blinding_factor.into_inner())
-    );
-    assert_eq!(
-        reopened_value_blind,
-        tweak_bytes(value_blinding_factor.into_inner())
-    );
+
+    // A present proof with a short embedded message is invalid, not missing.
+    let mut short_message_output = output;
+    let shared_secret = short_message_output
+        .nonce
+        .shared_secret(&receiver_key)
+        .unwrap();
+    short_message_output.witness.rangeproof = RangeProof::new(
+        &secp,
+        TxOut::RANGEPROOF_MIN_VALUE,
+        short_message_output.value.commitment().unwrap(),
+        value,
+        value_blinding_factor.into_inner(),
+        &[0x41; 32],
+        short_message_output.script_pubkey.as_bytes(),
+        shared_secret,
+        TxOut::RANGEPROOF_EXP_SHIFT,
+        TxOut::RANGEPROOF_MIN_PRIV_BITS,
+        short_message_output.asset.commitment().unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        open_confidential_output(&secp, &short_message_output, &receiver_key),
+        Err(OutputOpenError::InvalidOpening)
+    ));
 }
 
 #[test]
