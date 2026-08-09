@@ -7,11 +7,11 @@ Wallet.
 
 This repository contains frozen reference contract material, a dependency-free
 `no_std` Rust representation crate, a bounded Liquid address crate, and an
-internal confidential-output opening crate. The root crate defines only
-fixed-width constants, nullable callback types, and `repr(C)` structures. It
-builds only as an `rlib` and defines no C export, native operation, wallet
-integration, PSET processor, signer, blinding provider, or production
-capability.
+internal confidential-output opening crate, plus an internal transaction
+amount-proof validator. The root crate defines only fixed-width constants,
+nullable callback types, and `repr(C)` structures. It builds only as an `rlib`
+and defines no C export, native operation, wallet integration, PSET processor,
+signer, blinding provider, or production capability.
 
 The files under `contracts/v24/nonlinkable-reference/` define a frozen ABI
 shape for implementation work. They are deliberately outside an `include/`
@@ -48,6 +48,16 @@ that fork pins exact `liquid-wasabi/rust-secp256k1-zkp` commit
 These internal crates do not establish output blinding, transaction
 construction, signing, persistence, recovery, wallet integration, release, or
 production readiness.
+
+The internal `wasabi-liquid-native-transaction-validation` crate binds ordered
+previous outputs to the transaction's exact input outpoints, validates the
+pinned library's confidential range proofs, surjection proofs, and commitment
+balance, and only then permits opening a selected output through its validated
+wrapper. Coinbase, issuance, and peg-in inputs are explicitly unsupported in
+this slice, and empty or duplicate-input shapes are rejected. Validation does
+not authenticate node or chain identity, previous-output provenance, current
+unspentness, scripts, signatures, confirmations, or wallet ownership, so it is
+not by itself authority to credit a wallet balance.
 
 ## Product boundary
 

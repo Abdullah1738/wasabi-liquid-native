@@ -14,6 +14,16 @@ path = "src/lib.rs"
 [dependencies]
 
 [workspace]
-members = [".", "crates/address", "crates/output-opening"]
-default-members = [".", "crates/address", "crates/output-opening"]
+members = [
+    ".",
+    "crates/address",
+    "crates/output-opening",
+    "crates/transaction-validation",
+]
+default-members = [
+    ".",
+    "crates/address",
+    "crates/output-opening",
+    "crates/transaction-validation",
+]
 resolver = "3"

@@ -360,6 +360,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasabi-liquid-native-transaction-validation"
+version = "0.1.0"
+dependencies = [
+ "elements",
+ "wasabi-liquid-native-output-opening",
+]
+
+[[package]]
 name = "wasi"
 version = "0.11.1+wasi-snapshot-preview1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
