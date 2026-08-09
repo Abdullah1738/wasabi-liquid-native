@@ -1,0 +1,114 @@
+kind	name	parent	offset	size	align	value	ownership	rule
+abi	major	-	-	2	-	24	-	Consumer requires exact major 24.
+abi	minor	-	-	2	-	0	-	Consumer accepts exact minor 0 only.
+abi	pointer_width	-	-	1	-	8	-	Only 64-bit targets are legal.
+abi	endianness	-	-	1	-	1	-	Value 1 means little-endian; all others reject.
+type	wln_status_v24	-	-	4	4	signed-int32	value	Zero is success; listed negative values are failures; positive and unknown values reject.
+type	wln_borrowed_buffer_v24	-	-	16	8	-	borrowed	Caller retains storage and immutability for call duration; library never frees or retains it.
+field	data	wln_borrowed_buffer_v24	0	8	8	pointer	borrowed	NULL iff length is zero; points to length readable bytes.
+field	length	wln_borrowed_buffer_v24	8	8	8	u64	value	At most 268435456; checked before pointer arithmetic.
+type	wln_owned_buffer_v24	-	-	32	8	-	library-to-caller	Returned nonempty storage is released only by wln_result_release_v24 or wln_diagnostic_release_v24; context release never releases caller-held output.
+field	data	wln_owned_buffer_v24	0	8	8	pointer	library-owned	NULL iff capacity is zero; never caller-freed directly.
+field	length	wln_owned_buffer_v24	8	8	8	u64	value	At most capacity and the field-specific cap.
+field	capacity	wln_owned_buffer_v24	16	8	8	u64	value	Allocator allocation size; at least length.
+field	owner_cookie	wln_owned_buffer_v24	24	8	8	u64	linear-token	Nonzero live cookie is authenticated and bound to exact mapped-library generation allocator record and allocation; copied cookies do not create ownership.
+type	wln_handle_v24	-	-	16	8	-	linear	Created once and released once; stale generation rejects.
+field	value	wln_handle_v24	0	8	8	u64	linear-token	Zero is invalid.
+field	generation	wln_handle_v24	8	8	8	u64	linear-token	Nonzero and matched against library handle table.
+type	wln_allocator_v24	-	-	64	8	-	borrowed-context	Caller retains struct callbacks and context through failed-create diagnostic release and until every associated handle result and diagnostic cookie is released.
+field	struct_size	wln_allocator_v24	0	4	4	u32	value	Exactly 64.
+field	flags	wln_allocator_v24	4	4	4	u32	value	Exactly zero in minor 0.
+field	context	wln_allocator_v24	8	8	8	pointer	borrowed	Opaque caller context.
+field	allocate	wln_allocator_v24	16	8	8	function-pointer	borrowed	Required; returns aligned storage or NULL.
+field	reallocate	wln_allocator_v24	24	8	8	function-pointer	borrowed	Required for frozen struct layout but never called by ABI v24 minor-0 private staging; NULL retains old storage and successful non-NULL completion consumes old storage so no later old-address read write zero or free is permitted.
+field	free	wln_allocator_v24	32	8	8	function-pointer	borrowed	Required; receives the exact allocation size and alignment.
+field	reserved	wln_allocator_v24	40	24	8	u64[3]	value	All zero on input and output.
+type	wln_call_context_v24	-	-	96	8	-	borrowed	Valid only for the dynamic extent of one create or invoke call.
+field	struct_size	wln_call_context_v24	0	4	4	u32	value	Exactly 96.
+field	abi_major	wln_call_context_v24	4	2	2	u16	value	Exactly 24; every other value including 13, 14, 15, and 19 is WLN_STATUS_ABI_MISMATCH_V24 before callback or output write.
+field	abi_minor	wln_call_context_v24	6	2	2	u16	value	Exactly 0.
+field	flags	wln_call_context_v24	8	4	4	u32	value	Exactly zero in minor 0.
+field	reserved0	wln_call_context_v24	12	4	4	u32	value	Zero.
+field	allocator	wln_call_context_v24	16	8	8	pointer	borrowed	Required and points to a valid wln_allocator_v24 retained through context release.
+field	is_cancelled	wln_call_context_v24	24	8	8	function-pointer	borrowed	Optional; NULL means unavailable; 0 continues 1 cancels and 2 through 255 are callback-protocol errors at each of five safe-point classes; no exception or unwind crosses the C boundary.
+field	cancel_context	wln_call_context_v24	32	8	8	pointer	borrowed	Must be NULL when is_cancelled is NULL; otherwise retained through every associated owner and serialized by exact callback/context domain.
+field	relative_timeout_ns	wln_call_context_v24	40	8	8	u64	value	Zero disables the deadline; otherwise 1 through 3600000000000 nanoseconds captured against the native RID clock at call entry.
+field	trace_id	wln_call_context_v24	48	16	1	bytes16	value	All zero means absent; otherwise opaque and never security-authoritative.
+field	reserved	wln_call_context_v24	64	32	8	u64[4]	value	All zero.
+type	wln_diagnostic_v24	-	-	96	8	-	library-to-caller	Caller uses WLN_DIAGNOSTIC_INIT_V24; library returns canonical empty diagnostic or bounded owned fields; dedicated release zeroes the complete struct.
+field	struct_size	wln_diagnostic_v24	0	4	4	u32	value	Exactly 96 for an output parameter; a complete all-zero struct is legal only as an already-released input to wln_diagnostic_release_v24.
+field	domain	wln_diagnostic_v24	4	2	2	u16	value	Exactly the Section-5.2 mapping: 0 success 1 ABI 2 KERNEL or 3 SYSTEM; no other domain exists.
+field	severity	wln_diagnostic_v24	6	2	2	u16	value	Exactly zero for success or 3 for every completed error; 1 and 2 are unassigned.
+field	code	wln_diagnostic_v24	8	4	4	u32	value	Exactly zero for success or the unique Section-5.2 code for status; alternate same-domain codes reject.
+field	flags	wln_diagnostic_v24	12	4	4	u32	value	Exactly zero; sensitive-message/context bits remain declared for ABI layout compatibility but no v24 diagnostic may set them.
+field	message	wln_diagnostic_v24	16	32	8	wln_owned_buffer_v24	library-to-caller	Success is canonical empty; completed error is the exact nonempty ASCII message for status in Section 5.2 with one live owner cookie.
+field	context	wln_diagnostic_v24	48	32	8	wln_owned_buffer_v24	library-to-caller	Always canonical empty NULL zero zero zero; v24 defines no diagnostic context type or fields.
+field	reserved	wln_diagnostic_v24	80	16	8	u64[2]	value	All zero.
+type	wln_result_v24	-	-	160	8	-	library-to-caller	Caller uses WLN_RESULT_INIT_V24; PRE_DISPATCH_NO_WRITE leaves all bytes identical and has no release while exactly one release follows each COMPLETED_OWNED_RESULT success or failure.
+field	struct_size	wln_result_v24	0	4	4	u32	value	Exactly 160 for invoke output; a complete all-zero struct is legal only as an already-released input to wln_result_release_v24.
+field	status	wln_result_v24	4	4	4	wln_status_v24	value	For a completed result matches function return exactly; pre-dispatch rejection leaves initializer status OK byte-identical and is not a result.
+field	operation	wln_result_v24	8	4	4	u32	value	A completed result echoes one known operation 1 through 3; unknown operations leave initializer operation zero byte-identical and create no result.
+field	flags	wln_result_v24	12	4	4	u32	value	Exactly zero in minor 0.
+field	payload	wln_result_v24	16	32	8	wln_owned_buffer_v24	library-to-caller	Success uses exact operation output CBE16; failure is canonical empty.
+field	diagnostic	wln_result_v24	48	96	8	wln_diagnostic_v24	library-to-caller	Success is canonical empty; failure is a bounded error diagnostic.
+field	reserved	wln_result_v24	144	16	8	u64[2]	value	All zero.
+type	wln_abi_descriptor_v24	-	-	128	8	-	library-static	Immutable storage valid for library mapping lifetime; consumer never frees pointers.
+field	struct_size	wln_abi_descriptor_v24	0	4	4	u32	value	Exactly 128.
+field	abi_major	wln_abi_descriptor_v24	4	2	2	u16	value	Exactly 24; every other value including 13, 14, 15, and 19 is ABI_MISMATCH before context creation.
+field	abi_minor	wln_abi_descriptor_v24	6	2	2	u16	value	Exactly 0.
+field	pointer_width	wln_abi_descriptor_v24	8	1	1	u8	value	Exactly 8.
+field	endianness	wln_abi_descriptor_v24	9	1	1	u8	value	Exactly 1 for little-endian.
+field	status_width	wln_abi_descriptor_v24	10	1	1	u8	value	Exactly 4.
+field	flags_width	wln_abi_descriptor_v24	11	1	1	u8	value	Exactly 4.
+field	feature_flags	wln_abi_descriptor_v24	12	4	4	u32	value	Exactly zero in minor 0.
+field	max_input_bytes	wln_abi_descriptor_v24	16	8	8	u64	value	Exactly 268435456.
+field	max_output_bytes	wln_abi_descriptor_v24	24	8	8	u64	value	Exactly 268435456.
+field	abi_header_sha256	wln_abi_descriptor_v24	32	8	8	pointer	library-static	Points to exactly 32 bytes matching this header file.
+field	abi_layout_sha256	wln_abi_descriptor_v24	40	8	8	pointer	library-static	Points to exactly 32 bytes matching this TSV file.
+field	shared_identity_digest	wln_abi_descriptor_v24	48	8	8	pointer	library-static	Points to the exactly 32-byte release shared identity digest.
+field	shared_identity_digest_length	wln_abi_descriptor_v24	56	4	4	u32	value	Exactly 32.
+field	reserved0	wln_abi_descriptor_v24	60	4	4	u32	value	Zero.
+field	reserved_identity	wln_abi_descriptor_v24	64	16	8	u64[2]	value	All zero; no release manifest package checkpoint policy pin or seal identity is embedded in role-1 bytes.
+field	reserved	wln_abi_descriptor_v24	80	48	8	u64[6]	value	All zero.
+status	WLN_STATUS_OK_V24	wln_status_v24	-	-	-	0	value	Only success value.
+status	WLN_STATUS_INVALID_ARGUMENT_V24	wln_status_v24	-	-	-	-1	value	Null, size, alias, reserved, or ownership precondition failed.
+status	WLN_STATUS_ABI_MISMATCH_V24	wln_status_v24	-	-	-	-2	value	Major, minor, layout, or descriptor mismatch.
+status	WLN_STATUS_INVALID_ENCODING_V24	wln_status_v24	-	-	-	-3	value	CBE16 or operation grammar invalid.
+status	WLN_STATUS_LIMIT_EXCEEDED_V24	wln_status_v24	-	-	-	-4	value	Declared cap exceeded before allocation.
+status	WLN_STATUS_AUTHORITY_REJECTED_V24	wln_status_v24	-	-	-	-5	value	Trust, membership, threshold, or policy rejected.
+status	WLN_STATUS_CRYPTOGRAPHIC_PROOF_REJECTED_V24	wln_status_v24	-	-	-	-6	value	Commitment range proof surjection proof opening proof or provider HMAC rejected.
+status	WLN_STATUS_PROVIDER_BINDING_REJECTED_V24	wln_status_v24	-	-	-	-7	value	Signed provider row secret envelope public descriptor device epoch or storage qualification rejected.
+status	WLN_STATUS_NO_VALID_PLAN_V24	wln_status_v24	-	-	-	-8	value	No finite balance change or synthetic-charge fixed point satisfies the exact request.
+status	WLN_STATUS_CANCELLED_V24	wln_status_v24	-	-	-	-9	value	Cancellation observed at a documented safe point.
+status	WLN_STATUS_DEADLINE_EXCEEDED_V24	wln_status_v24	-	-	-	-10	value	Monotonic deadline expired at a documented safe point.
+status	WLN_STATUS_OUT_OF_MEMORY_V24	wln_status_v24	-	-	-	-11	value	Allocator returned NULL or checked size cannot be represented.
+status	WLN_STATUS_IO_ERROR_V24	wln_status_v24	-	-	-	-12	value	Exact local provider retrieval or required allocator backing operation failed.
+status	WLN_STATUS_INTERNAL_ERROR_V24	wln_status_v24	-	-	-	-13	value	Invariant failure; no retry or fallback implied.
+status	WLN_STATUS_BUSY_V24	wln_status_v24	-	-	-	-14	value	Ordinary caller code found an active call live result or diagnostic owner or a RELEASING handle; caller-visible output bytes stay unchanged; callback-origin entry never uses BUSY.
+status	WLN_STATUS_CALLBACK_PROTOCOL_ERROR_V24	wln_status_v24	-	-	-	-15	value	Cancellation returned 2 through 255 a language adapter contained an exception or any export was entered while the current thread was inside a caller callback.
+operation	WLN_OP_ORDINARY_PLAN_V24	wln_operation_v24	-	-	-	1	value	Derived from OPERATION_REGISTRY_V24.tsv; accepts only ORDINARY_PLAN_REQUEST_V3 type 0x0A01 grammar d51cd3c2d4701ff11b91072266b7fc3d0ba972fa0446b70f15bde184007a4294 and returns only ORDINARY_PLAN_V3 type 0x0A02 grammar fb05f26a7f7ccfe8e45c4a0a177f3cb0d55830d64a3ef81c7187d8bc8a6c55db.
+operation	WLN_OP_ORDINARY_BUILD_PSET_V24	wln_operation_v24	-	-	-	2	value	Derived from OPERATION_REGISTRY_V24.tsv; accepts only ORDINARY_BUILD_REQUEST_V3 type 0x0A03 grammar 130b7bd6f36bdd90c406aaa2c284a510f0a80ce22d19e03e0fc872128e0db6ab and returns only ORDINARY_CONSTRUCTED_V3 type 0x0A04 grammar 644345c897e6b790b3a0fd2f1679d81de29d13adaeb94de404b5f1100197ca66.
+operation	WLN_OP_ORDINARY_BLIND_V24	wln_operation_v24	-	-	-	3	value	Derived from OPERATION_REGISTRY_V24.tsv; accepts only ORDINARY_BLIND_REQUEST_V3 type 0x0A05 grammar fd8d7304492e7bc13a8a2418097bfbf2c41bc05ea71317b17e626fd46d37f4ac and returns only ORDINARY_BLINDED_V3 type 0x0A06 grammar a583129aaee1147081ccfac1b89c4fa7a3e89ddd85747f1e895be294f1ac6971; result is unsigned and broadcast ineligible.
+function	wln_abi_get_descriptor_v24	-	-	-	-	-	caller-output	Callback-origin guard runs first and returns CALLBACK_PROTOCOL_ERROR with out_descriptor byte-identical; otherwise out_descriptor is required and initialized NULL and on success receives one immutable library-static descriptor.
+function	wln_context_create_v24	-	-	-	-	-	linear-create	Callback-origin guard runs first and leaves outputs byte-identical; otherwise configuration includes exact release identity KERNEL_EXPERIMENT_ASSERTION_V1 PREPROVISIONED_CONFIDENTIALITY_PROVIDER_CONFIG_V1 and KERNEL_STATIC_NETWORK_POLICY_V1; all RID provider resources are finalized before a handle is published; out_handle starts invalid and failure may return a releasable diagnostic.
+function	wln_context_release_v24	-	-	-	-	-	linear-release	Callback-origin entry returns CALLBACK_PROTOCOL_ERROR byte-identically; ordinary entry uses LIVE RELEASING CONSUMED: active owner or RELEASING returns BUSY; success performs no caller callback or diagnostic staging zeroizes bounded private state consumes and zeroes the handle; all-zero handle plus initialized diagnostic is idempotent OK.
+function	wln_invoke_v24	-	-	-	-	-	borrowed-to-owned	Callback-origin guard runs first and leaves all 160 out_result bytes byte-identical; otherwise input/context are borrowed and out_result uses WLN_RESULT_INIT_V24 and receives the only live output ownership.
+function	wln_result_release_v24	-	-	-	-	-	atomic-linear-release	Callback-origin guard runs first and changes no bytes cookies or free count; otherwise prevalidates the complete result ownership group all-or-none; only an all-valid set is consumed freed and zeroed; complete all-zero succeeds.
+function	wln_diagnostic_release_v24	-	-	-	-	-	atomic-linear-release	Callback-origin guard runs first and changes no bytes cookies or free count; otherwise prevalidates the complete standalone diagnostic ownership group all-or-none; canonical empty and complete all-zero succeed.
+function	wln_abi_can_unload_v24	-	-	-	-	-	borrowed-output	Callback-origin guard runs first and leaves the output byte-identical; otherwise writes one only when this mapped-library generation has zero handles cookies calls callbacks release owners and provider prepublication owners; host must not unload on zero or call failure.
+invariant	owner_cookie_registry	-	-	-	-	-	library-generation	Stale copied cross-library cross-generation unknown or type-confused cookies reject without freeing; no value-based fallback allocator lookup is legal.
+invariant	atomic_release_group	-	-	-	-	-	library-generation	Every returned result or standalone diagnostic has one registry group id; buffers are field-bound and pairwise disjoint; nested result diagnostics cannot be released separately; validation and multi-cookie consume are atomic under one registry lock before any zero or free callback.
+invariant	call_entry_ranges	-	-	-	-	-	call	Create and invoke require checked aligned nonwrapping pairwise-disjoint context allocator borrowed-input and output-struct ranges before callback parse output initialization or write.
+invariant	allocator_return_ranges	-	-	-	-	-	call	Every callback allocation is aligned nonwrapping and disjoint from call-entry ranges and every live allocation; hostile overlap is never dereferenced freed registered or exposed.
+invariant	diagnostic_zero_flags	-	-	-	-	-	library-generation	Every emitted diagnostic has flags zero and canonical-empty context; parsing a nonzero diagnostic flag is INVALID_ENCODING and releasing a live standalone or result-nested diagnostic with any nonzero flag is INVALID_ARGUMENT with bytes cookies registry and free count unchanged; zeroization of every nonempty capacity is unconditional and never selected by a flag.
+invariant	provider_prepublication_owner	-	-	-	-	-	library-generation	One PROVIDER_PREPUBLICATION_OWNER_V1 exists before the first provider acquisition and remains unload-visible through ACQUIRING and CLEANING until every registered RID resource is finalized and the owner reaches SUCCEEDED or FAILED; no handle is published while it exists.
+invariant	relative_timeout_clock	-	-	-	-	-	call	Timeout is a bounded relative duration captured by native QueryPerformanceCounter CLOCK_MONOTONIC or mach_continuous_time; elapsed greater than or equal expires and clock regression fails closed.
+invariant	library_unload	-	-	-	-	-	host	Unloading executable bytes before wln_abi_can_unload_v24 returns OK and one is forbidden while LIVE or RELEASING handles callbacks calls cookies diagnostics release owners or provider prepublication owners exist.
+invariant	native_provider_binding	-	-	-	-	-	library-generation	Fixed secret envelope and bounded public descriptor are bound to exact release-signed RID row handle generation device epoch record revision storage qualification experiment assertion static network policy and mapped library; only bounded native-private bytes remain after create; zero platform provider handles sessions references locators or response buffers remain; raw SLIP-77 keys ABFs and VBFs never cross the ABI and are zeroized before call return and handle release.
+invariant	stateless_pipeline	-	-	-	-	-	handle	No request plan PSET proof phase replay cache nonce counter or advancing object is retained; deterministic domain-separated PRFs make identical valid bytes return identical success bytes within one live handle generation; failure changes no semantic state.
+invariant	key_separation	-	-	-	-	-	provider	Operations 1 through 3 may derive only bounded read-only SLIP-77 unblinding material; no ABI operation can derive a spend-signing private key emit a signature finalize a spend or create a broadcast transaction.
+invariant	recovery_fence	-	-	-	-	-	provider	Any imported restored migrated personal production or device-changed provider record rejects; v24 has no recovery path or spend authority and no chain observation changes that fact.
+invariant	kernel_capabilities	-	-	-	-	-	release	Ordinary wallet recovery production signing and multiparty transaction capabilities are all false; descriptor feature_flags are zero and no report manifest extension or configuration may claim otherwise.
+invariant	invoke_outcome_classes	-	-	-	-	-	call	PRE_DISPATCH_NO_WRITE leaves WLN_RESULT_INIT_V24 byte-identical and creates no release obligation; COMPLETED_OWNED_RESULT atomically publishes one legal operation-1-through-3 result and requires exactly one result release.
+invariant	callback_domains	-	-	-	-	-	library-generation	Every export checks thread-local callback-origin depth before validation lookup output write registry or callback-domain acquisition and returns CALLBACK_PROTOCOL_ERROR for same/cross-handle entry; allocator and cancellation tuples remain separately serialized; the early guard prevents A-to-C/C-to-A acquisition while different top-level domains may run concurrently.
+invariant	context_release_lifecycle	-	-	-	-	-	handle	LIVE RELEASING CONSUMED is the complete automaton; no provider close diagnostic allocation close-failed partial-close or retryable-close state exists; busy is retryable all-zero is idempotent and release performs zero caller callbacks on every RID.
