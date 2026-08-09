@@ -1,11 +1,12 @@
 [package]
-name = "wasabi-liquid-native-address"
+name = "wasabi-liquid-native-output-opening"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.96"
 license = "MIT"
 publish = false
-description = "Profile-bound confidential Liquid address parsing and construction"
+description = "Confidential Liquid output opening for Wasabi Liquid"
 
 [dependencies]
 elements = { git = "https://github.com/liquid-wasabi/rust-elements.git", rev = "aeed87e94d3f5dd429a55c16492dca24b5fac16f", default-features = false }
+zeroize = { version = "1.8", default-features = false }
