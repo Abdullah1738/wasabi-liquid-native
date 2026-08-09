@@ -1,0 +1,14 @@
+[package]
+name = "wasabi-liquid-native-ordinary-pset"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT"
+publish = false
+description = "Ordinary multiasset Liquid PSET construction for Wasabi Liquid"
+
+[dependencies]
+elements = { git = "https://github.com/liquid-wasabi/rust-elements.git", rev = "cf140ac973e791b8b17d0c9c0929023b7f5c672b", default-features = false }
+wasabi-liquid-native-address = { path = "../address" }
+wasabi-liquid-native-output-opening = { path = "../output-opening" }
+zeroize = { version = "1.8", default-features = false }

@@ -352,6 +352,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasabi-liquid-native-ordinary-pset"
+version = "0.1.0"
+dependencies = [
+ "elements",
+ "wasabi-liquid-native-address",
+ "wasabi-liquid-native-output-opening",
+ "zeroize",
+]
+
+[[package]]
 name = "wasabi-liquid-native-output-opening"
 version = "0.1.0"
 dependencies = [

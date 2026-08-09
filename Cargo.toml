@@ -17,12 +17,14 @@ path = "src/lib.rs"
 members = [
     ".",
     "crates/address",
+    "crates/ordinary-pset",
     "crates/output-opening",
     "crates/transaction-validation",
 ]
 default-members = [
     ".",
     "crates/address",
+    "crates/ordinary-pset",
     "crates/output-opening",
     "crates/transaction-validation",
 ]
