@@ -10,7 +10,7 @@
 //! wallet ownership.
 
 use core::fmt;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use elements::secp256k1_zkp::{All, Secp256k1, SecretKey};
 use elements::{OutPoint, Transaction, TxOut, VerificationError};
@@ -19,31 +19,31 @@ use wasabi_liquid_native_output_opening::{
 };
 
 /// A transaction whose amount proofs and commitment balance were validated
-/// against the retained exact outpoint and previous-output slices.
+/// against the retained exact outpoint-keyed previous outputs.
 ///
-/// The immutable borrows prevent the transaction or its validation inputs from
-/// changing while this value exists. This type deliberately does not implement
-/// `Debug`, `Copy`, or `Clone`.
-pub struct AmountProofValidatedTransaction<'transaction, 'spent> {
+/// The immutable transaction borrow and owned previous-output map prevent the
+/// validated inputs from changing while this value exists. This type
+/// deliberately does not implement `Debug`, `Copy`, or `Clone`.
+pub struct AmountProofValidatedTransaction<'transaction> {
     transaction: &'transaction Transaction,
-    spent_outpoints: &'spent [OutPoint],
-    spent_outputs: &'spent [TxOut],
+    previous_outputs: BTreeMap<OutPoint, TxOut>,
 }
 
-impl<'transaction, 'spent> AmountProofValidatedTransaction<'transaction, 'spent> {
+impl<'transaction> AmountProofValidatedTransaction<'transaction> {
     /// Borrows the validated transaction.
     pub const fn transaction(&self) -> &Transaction {
         self.transaction
     }
 
-    /// Borrows the outpoints used to bind validation inputs.
-    pub const fn spent_outpoints(&self) -> &[OutPoint] {
-        self.spent_outpoints
+    /// Borrows the exact outpoint-keyed previous outputs used for validation.
+    pub const fn previous_outputs(&self) -> &BTreeMap<OutPoint, TxOut> {
+        &self.previous_outputs
     }
 
-    /// Borrows the previous outputs used for validation.
-    pub const fn spent_outputs(&self) -> &[TxOut] {
-        self.spent_outputs
+    /// Borrows the previous output associated with one transaction input.
+    pub fn input_previous_output(&self, input_index: usize) -> Option<(&OutPoint, &TxOut)> {
+        let outpoint = &self.transaction.input.get(input_index)?.previous_output;
+        Some((outpoint, self.previous_outputs.get(outpoint)?))
     }
 
     /// Opens one output from this amount-proof-validated transaction.
@@ -71,7 +71,7 @@ impl<'transaction, 'spent> AmountProofValidatedTransaction<'transaction, 'spent>
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TransactionValidationError {
-    /// Input, outpoint, and previous-output counts differ.
+    /// Input and previous-output counts differ.
     InputCountMismatch,
     /// The transaction has no inputs or no outputs.
     EmptyTransaction,
@@ -79,8 +79,8 @@ pub enum TransactionValidationError {
     UnsupportedCoinbase,
     /// The transaction spends the same previous output more than once.
     DuplicatePreviousOutput,
-    /// A supplied outpoint does not match the transaction input at that index.
-    PreviousOutputMismatch,
+    /// No supplied previous output is keyed by a transaction input's outpoint.
+    PreviousOutputMissing,
     /// Issuance inputs require a later validation slice.
     UnsupportedIssuance,
     /// Peg-in inputs require a later validation slice.
@@ -104,7 +104,7 @@ impl fmt::Display for TransactionValidationError {
             Self::EmptyTransaction => "transaction has no inputs or no outputs",
             Self::UnsupportedCoinbase => "coinbase transaction validation is unavailable",
             Self::DuplicatePreviousOutput => "transaction repeats a previous output",
-            Self::PreviousOutputMismatch => "transaction previous output mismatch",
+            Self::PreviousOutputMissing => "transaction previous output is missing",
             Self::UnsupportedIssuance => "transaction issuance validation is unavailable",
             Self::UnsupportedPegin => "transaction peg-in validation is unavailable",
             Self::MissingRangeProof => "transaction range proof is missing",
@@ -146,8 +146,8 @@ impl std::error::Error for ValidatedOutputOpenError {
     }
 }
 
-/// Validates one transaction against exact ordered input outpoints and previous
-/// outputs.
+/// Validates one transaction against an exact outpoint-keyed previous-output
+/// map, resolving each output in transaction input order.
 ///
 /// Coinbase, issuance, and peg-in inputs are rejected until their additional
 /// amount and provenance requirements are implemented. Success validates
@@ -156,12 +156,11 @@ impl std::error::Error for ValidatedOutputOpenError {
 /// authenticate the connected node, chain, previous-output source, current
 /// unspentness, scripts, signatures, confirmations, and wallet ownership before
 /// crediting funds.
-pub fn validate_transaction_amount_proofs<'transaction, 'spent>(
+pub fn validate_transaction_amount_proofs<'transaction>(
     secp: &Secp256k1<All>,
     transaction: &'transaction Transaction,
-    spent_outpoints: &'spent [OutPoint],
-    spent_outputs: &'spent [TxOut],
-) -> Result<AmountProofValidatedTransaction<'transaction, 'spent>, TransactionValidationError> {
+    previous_outputs: BTreeMap<OutPoint, TxOut>,
+) -> Result<AmountProofValidatedTransaction<'transaction>, TransactionValidationError> {
     if transaction.input.is_empty() || transaction.output.is_empty() {
         return Err(TransactionValidationError::EmptyTransaction);
     }
@@ -192,29 +191,36 @@ pub fn validate_transaction_amount_proofs<'transaction, 'spent>(
         return Err(TransactionValidationError::DuplicatePreviousOutput);
     }
 
-    if transaction.input.len() != spent_outpoints.len()
-        || transaction.input.len() != spent_outputs.len()
-    {
+    if transaction.input.len() != previous_outputs.len() {
         return Err(TransactionValidationError::InputCountMismatch);
     }
 
     if transaction
         .input
         .iter()
-        .zip(spent_outpoints)
-        .any(|(input, outpoint)| input.previous_output != *outpoint)
+        .any(|input| !previous_outputs.contains_key(&input.previous_output))
     {
-        return Err(TransactionValidationError::PreviousOutputMismatch);
+        return Err(TransactionValidationError::PreviousOutputMissing);
     }
 
+    let ordered_previous_outputs = transaction
+        .input
+        .iter()
+        .map(|input| {
+            previous_outputs
+                .get(&input.previous_output)
+                .expect("previous-output membership checked above")
+                .clone()
+        })
+        .collect::<Vec<_>>();
+
     transaction
-        .verify_tx_amt_proofs(secp, spent_outputs)
+        .verify_tx_amt_proofs(secp, &ordered_previous_outputs)
         .map_err(map_verification_error)?;
 
     Ok(AmountProofValidatedTransaction {
         transaction,
-        spent_outpoints,
-        spent_outputs,
+        previous_outputs,
     })
 }
 

@@ -49,15 +49,15 @@ These internal crates do not establish output blinding, transaction
 construction, signing, persistence, recovery, wallet integration, release, or
 production readiness.
 
-The internal `wasabi-liquid-native-transaction-validation` crate binds ordered
-previous outputs to the transaction's exact input outpoints, validates the
-pinned library's confidential range proofs, surjection proofs, and commitment
-balance, and only then permits opening a selected output through its validated
-wrapper. Coinbase, issuance, and peg-in inputs are explicitly unsupported in
-this slice, and empty or duplicate-input shapes are rejected. Validation does
-not authenticate node or chain identity, previous-output provenance, current
-unspentness, scripts, signatures, confirmations, or wallet ownership, so it is
-not by itself authority to credit a wallet balance.
+The internal `wasabi-liquid-native-transaction-validation` crate owns an exact
+outpoint-keyed previous-output set, resolves it in transaction input order,
+validates the pinned library's confidential range proofs, surjection proofs,
+and commitment balance, and only then permits opening a selected output through
+its validated wrapper. Coinbase, issuance, and peg-in inputs are explicitly
+unsupported in this slice, and empty or duplicate-input shapes are rejected.
+Validation does not authenticate node or chain identity, previous-output
+provenance, current unspentness, scripts, signatures, confirmations, or wallet
+ownership, so it is not by itself authority to credit a wallet balance.
 
 ## Product boundary
 

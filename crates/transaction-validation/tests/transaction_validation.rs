@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use elements::confidential::{Asset, AssetBlindingFactor, Nonce, Value, ValueBlindingFactor};
 use elements::secp256k1_zkp::{Secp256k1, SecretKey, rand::thread_rng};
 use elements::{
@@ -19,25 +21,28 @@ fn validates_explicit_amounts_and_binds_previous_outpoint() {
         vec![explicit_output(asset, 900), TxOut::new_fee(100, asset)],
     );
 
-    let spent_outpoints = [outpoint];
-    let spent_outputs = [spent_output];
-    let validated =
-        validate_transaction_amount_proofs(&secp, &transaction, &spent_outpoints, &spent_outputs)
-            .unwrap();
+    let validated = validate_transaction_amount_proofs(
+        &secp,
+        &transaction,
+        previous_output_map([(outpoint, spent_output)]),
+    )
+    .unwrap();
 
     assert!(core::ptr::eq(validated.transaction(), &transaction));
-    assert_eq!(validated.spent_outpoints(), &[outpoint]);
-    assert_eq!(validated.spent_outputs().len(), 1);
+    assert_eq!(validated.previous_outputs().len(), 1);
+    assert_eq!(
+        validated.input_previous_output(0).map(|(key, _)| *key),
+        Some(outpoint),
+    );
 
     let different_outpoint = OutPoint::new(Txid::from_byte_array([0x32; 32]), 2);
     assert!(matches!(
         validate_transaction_amount_proofs(
             &secp,
             &transaction,
-            &[different_outpoint],
-            &[explicit_output(asset, 1_000)],
+            previous_output_map([(different_outpoint, explicit_output(asset, 1_000))]),
         ),
-        Err(TransactionValidationError::PreviousOutputMismatch)
+        Err(TransactionValidationError::PreviousOutputMissing)
     ));
 }
 
@@ -72,11 +77,12 @@ fn validates_confidential_output_before_opening_it() {
         vec![confidential_output, TxOut::new_fee(100, asset)],
     );
 
-    let spent_outpoints = [outpoint];
-    let spent_outputs = [spent_output];
-    let validated =
-        validate_transaction_amount_proofs(&secp, &transaction, &spent_outpoints, &spent_outputs)
-            .unwrap();
+    let validated = validate_transaction_amount_proofs(
+        &secp,
+        &transaction,
+        previous_output_map([(outpoint, spent_output)]),
+    )
+    .unwrap();
     let opened = validated.open_output(&secp, 0, &receiver_key).unwrap();
 
     assert_eq!(opened.asset_id(), &asset.to_byte_array());
@@ -123,8 +129,7 @@ fn rejects_missing_proof_and_unbalanced_amounts() {
         validate_transaction_amount_proofs(
             &secp,
             &missing_proof,
-            &[outpoint],
-            core::slice::from_ref(&spent_output),
+            previous_output_map([(outpoint, spent_output.clone())]),
         ),
         Err(TransactionValidationError::MissingRangeProof)
     ));
@@ -139,8 +144,7 @@ fn rejects_missing_proof_and_unbalanced_amounts() {
         validate_transaction_amount_proofs(
             &secp,
             &missing_surjection_proof,
-            &[outpoint],
-            core::slice::from_ref(&spent_output),
+            previous_output_map([(outpoint, spent_output.clone())]),
         ),
         Err(TransactionValidationError::MissingSurjectionProof)
     ));
@@ -150,7 +154,11 @@ fn rejects_missing_proof_and_unbalanced_amounts() {
         vec![explicit_output(asset, 901), TxOut::new_fee(100, asset)],
     );
     assert!(matches!(
-        validate_transaction_amount_proofs(&secp, &unbalanced, &[outpoint], &[spent_output]),
+        validate_transaction_amount_proofs(
+            &secp,
+            &unbalanced,
+            previous_output_map([(outpoint, spent_output)]),
+        ),
         Err(TransactionValidationError::BalanceMismatch)
     ));
 }
@@ -166,14 +174,14 @@ fn rejects_empty_coinbase_and_duplicate_input_shapes() {
         output: vec![],
     };
     assert!(matches!(
-        validate_transaction_amount_proofs(&secp, &empty, &[], &[]),
+        validate_transaction_amount_proofs(&secp, &empty, BTreeMap::new()),
         Err(TransactionValidationError::EmptyTransaction)
     ));
 
     let null_outpoint = OutPoint::null();
     let coinbase = transaction(null_outpoint, vec![explicit_output(asset, 1_000)]);
     assert!(matches!(
-        validate_transaction_amount_proofs(&secp, &coinbase, &[], &[]),
+        validate_transaction_amount_proofs(&secp, &coinbase, BTreeMap::new()),
         Err(TransactionValidationError::UnsupportedCoinbase)
     ));
 
@@ -184,7 +192,7 @@ fn rejects_empty_coinbase_and_duplicate_input_shapes() {
     );
     duplicate.input.push(duplicate.input[0].clone());
     assert!(matches!(
-        validate_transaction_amount_proofs(&secp, &duplicate, &[], &[]),
+        validate_transaction_amount_proofs(&secp, &duplicate, BTreeMap::new()),
         Err(TransactionValidationError::DuplicatePreviousOutput)
     ));
 }
@@ -201,7 +209,7 @@ fn rejects_count_mismatch_empty_outputs_issuance_and_pegin() {
     );
 
     assert!(matches!(
-        validate_transaction_amount_proofs(&secp, &ordinary, &[], &[]),
+        validate_transaction_amount_proofs(&secp, &ordinary, BTreeMap::new()),
         Err(TransactionValidationError::InputCountMismatch)
     ));
 
@@ -210,8 +218,7 @@ fn rejects_count_mismatch_empty_outputs_issuance_and_pegin() {
         validate_transaction_amount_proofs(
             &secp,
             &no_outputs,
-            &[outpoint],
-            core::slice::from_ref(&spent_output)
+            previous_output_map([(outpoint, spent_output)]),
         ),
         Err(TransactionValidationError::EmptyTransaction)
     ));
@@ -219,16 +226,57 @@ fn rejects_count_mismatch_empty_outputs_issuance_and_pegin() {
     let mut issuance = ordinary.clone();
     issuance.input[0].asset_issuance.amount = Value::Explicit(1);
     assert!(matches!(
-        validate_transaction_amount_proofs(&secp, &issuance, &[], &[]),
+        validate_transaction_amount_proofs(&secp, &issuance, BTreeMap::new()),
         Err(TransactionValidationError::UnsupportedIssuance)
     ));
 
     let mut pegin = ordinary;
     pegin.input[0].is_pegin = true;
     assert!(matches!(
-        validate_transaction_amount_proofs(&secp, &pegin, &[], &[]),
+        validate_transaction_amount_proofs(&secp, &pegin, BTreeMap::new()),
         Err(TransactionValidationError::UnsupportedPegin)
     ));
+}
+
+#[test]
+fn associates_previous_outputs_by_outpoint_in_transaction_input_order() {
+    let secp = Secp256k1::new();
+    let asset = AssetId::LIQUIDTESTNET_BTC;
+    let first_input = OutPoint::new(Txid::from_byte_array([0x82; 32]), 1);
+    let second_input = OutPoint::new(Txid::from_byte_array([0x81; 32]), 0);
+    let mut transaction = transaction(
+        first_input,
+        vec![explicit_output(asset, 900), TxOut::new_fee(100, asset)],
+    );
+    transaction.input.push(TxIn {
+        previous_output: second_input,
+        is_pegin: false,
+        script_sig: Script::new(),
+        sequence: Sequence::MAX,
+        asset_issuance: Default::default(),
+        witness: Default::default(),
+    });
+
+    let validated = validate_transaction_amount_proofs(
+        &secp,
+        &transaction,
+        previous_output_map([
+            (second_input, explicit_output(asset, 700)),
+            (first_input, explicit_output(asset, 300)),
+        ]),
+    )
+    .unwrap();
+
+    let first = validated.input_previous_output(0).unwrap();
+    let second = validated.input_previous_output(1).unwrap();
+    assert_eq!(
+        (*first.0, first.1.value),
+        (first_input, Value::Explicit(300))
+    );
+    assert_eq!(
+        (*second.0, second.1.value),
+        (second_input, Value::Explicit(700))
+    );
 }
 
 fn explicit_output(asset: AssetId, value: u64) -> TxOut {
@@ -255,4 +303,10 @@ fn transaction(outpoint: OutPoint, outputs: Vec<TxOut>) -> Transaction {
         }],
         output: outputs,
     }
+}
+
+fn previous_output_map<const N: usize>(
+    entries: [(OutPoint, TxOut); N],
+) -> BTreeMap<OutPoint, TxOut> {
+    entries.into_iter().collect()
 }
