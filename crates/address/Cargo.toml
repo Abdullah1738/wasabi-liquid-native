@@ -8,4 +8,4 @@ publish = false
 description = "Profile-bound confidential Liquid address parsing and construction"
 
 [dependencies]
-elements = { git = "https://github.com/liquid-wasabi/rust-elements.git", rev = "aeed87e94d3f5dd429a55c16492dca24b5fac16f", default-features = false }
+elements = { git = "https://github.com/liquid-wasabi/rust-elements.git", rev = "cf140ac973e791b8b17d0c9c0929023b7f5c672b", default-features = false }

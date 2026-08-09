@@ -279,6 +279,49 @@ fn associates_previous_outputs_by_outpoint_in_transaction_input_order() {
     );
 }
 
+#[test]
+fn accepts_only_provably_unspendable_explicit_zero_outputs() {
+    let secp = Secp256k1::new();
+    let asset = AssetId::LIQUIDTESTNET_BTC;
+    let outpoint = OutPoint::new(Txid::from_byte_array([0x91; 32]), 0);
+    let spent_output = explicit_output(asset, 1_000);
+    let mut zero_output = explicit_output(asset, 0);
+    zero_output.script_pubkey = Script::from(vec![0x6a]);
+    let valid = transaction(
+        outpoint,
+        vec![
+            explicit_output(asset, 900),
+            TxOut::new_fee(100, asset),
+            zero_output.clone(),
+        ],
+    );
+
+    validate_transaction_amount_proofs(
+        &secp,
+        &valid,
+        previous_output_map([(outpoint, spent_output.clone())]),
+    )
+    .unwrap();
+
+    zero_output.script_pubkey = Script::from(vec![0x51]);
+    let invalid = transaction(
+        outpoint,
+        vec![
+            explicit_output(asset, 900),
+            TxOut::new_fee(100, asset),
+            zero_output,
+        ],
+    );
+    assert!(matches!(
+        validate_transaction_amount_proofs(
+            &secp,
+            &invalid,
+            previous_output_map([(outpoint, spent_output)]),
+        ),
+        Err(TransactionValidationError::InvalidAmount)
+    ));
+}
+
 fn explicit_output(asset: AssetId, value: u64) -> TxOut {
     TxOut {
         asset: Asset::Explicit(asset),
