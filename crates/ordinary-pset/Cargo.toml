@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.96"
 license = "MIT"
 publish = false
-description = "Ordinary multiasset Liquid PSET construction for Wasabi Liquid"
+description = "Ordinary multiasset Liquid PSET construction and signing for Wasabi Liquid"
 
 [dependencies]
 elements = { git = "https://github.com/liquid-wasabi/rust-elements.git", rev = "cf140ac973e791b8b17d0c9c0929023b7f5c672b", default-features = false }

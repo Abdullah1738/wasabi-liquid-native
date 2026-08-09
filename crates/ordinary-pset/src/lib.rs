@@ -29,6 +29,13 @@ use wasabi_liquid_native_address::ConfidentialLiquidAddress;
 use wasabi_liquid_native_output_opening::OpenedOutput;
 use zeroize::Zeroize;
 
+mod signing;
+
+pub use signing::{
+    FinalizedOrdinaryTransaction, OrdinaryP2wpkhSigner, OrdinarySigningError,
+    OrdinarySigningFailure, SignedOrdinaryPset,
+};
+
 /// Maximum inputs accepted by the ordinary-wallet constructor.
 ///
 /// This matches the complete surjection-proof input-domain limit used by the
@@ -352,7 +359,17 @@ impl PreparedOrdinaryPset {
 ///
 /// This type deliberately does not implement `Debug`, `Copy`, or `Clone` and
 /// exposes no mutable PSET access. It contains no retained input openings or
-/// output blinding private keys. Signing and finalization remain unavailable.
+/// output blinding private keys. Signing is available only through its
+/// product-owned consuming transition.
+/// Arbitrary deserialized PSETs cannot enter this trusted type-state:
+///
+/// ```compile_fail
+/// use elements::pset::PartiallySignedTransaction;
+/// use wasabi_liquid_native_ordinary_pset::BlindedOrdinaryPset;
+///
+/// let untrusted = PartiallySignedTransaction::new_v2();
+/// let trusted: BlindedOrdinaryPset = untrusted.into();
+/// ```
 pub struct BlindedOrdinaryPset {
     pset: PartiallySignedTransaction,
     confidential_output_indices: Vec<usize>,
@@ -523,7 +540,7 @@ fn is_supported_native_witness_script(script: &Script) -> bool {
     script.is_v0_p2wpkh()
 }
 
-fn validate_blinded_pset(
+pub(crate) fn validate_blinded_pset(
     secp: &Secp256k1<All>,
     pset: &PartiallySignedTransaction,
     confidential_output_indices: &[usize],

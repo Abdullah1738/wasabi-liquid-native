@@ -8,10 +8,10 @@ Wallet.
 This repository contains frozen reference contract material, a dependency-free
 `no_std` Rust representation crate, and internal crates for bounded Liquid
 addresses, confidential-output opening, transaction amount-proof validation,
-and ordinary multiasset PSET construction. The root crate defines only
-fixed-width constants, nullable callback types, and `repr(C)` structures. It
-builds only as an `rlib` and defines no C export, native operation, wallet
-integration, signer, or production capability.
+ordinary multiasset PSET construction, and ordinary P2WPKH signing. The root
+crate defines only fixed-width constants, nullable callback types, and
+`repr(C)` structures. It builds only as an `rlib` and defines no C export,
+native operation, wallet integration, or production capability.
 
 The files under `contracts/v24/nonlinkable-reference/` define a frozen ABI
 shape for implementation work. They are deliberately outside an `include/`
@@ -46,7 +46,7 @@ All four Liquid implementation crates pin exact
 that fork pins exact `liquid-wasabi/rust-secp256k1-zkp` commit
 `06ea6e06da81d2e3a51733c8d9b5f6c5fa248c2e`.
 
-These internal crates do not establish signing, persistence, recovery, wallet
+These internal crates do not establish persistence, recovery, wallet
 integration, release, or production readiness.
 
 The internal `wasabi-liquid-native-transaction-validation` crate owns an exact
@@ -73,10 +73,25 @@ ordinary Rust drop behavior; this slice does not claim those temporary copies
 are overwritten. A consuming transition blinds every non-fee output over the
 exact final input domain, validates the transaction proofs, PSET binding proofs,
 and commitment balance, and retains no input openings or generated output
-blinding keys in the result. The blinded result exposes no signing,
-finalization, extraction-for-broadcast, or submission path. Connected-chain
-identity, fee-asset identity, previous-output provenance, unspentness, incoming
-transaction proof validation, and ownership remain separate prerequisites.
+blinding keys in the result. Connected-chain identity, fee-asset identity,
+previous-output provenance, unspentness, incoming transaction proof validation,
+and ownership remain separate prerequisites.
+
+The same crate provides a consuming ordinary P2WPKH signing transition. A
+caller-owned signer supplies only compressed public keys and ECDSA signatures;
+the crate never requests or stores private keys. Before requesting any
+signature, every public key is matched to the exact previous-output script.
+Digests use the previous output's exact explicit value or confidential value
+commitment and explicitly enable `SIGHASH_ALL|SIGHASH_RANGEPROOF`. Returned
+signatures must be low-S and verify before the crate constructs the exact
+two-item native witness. The result retains an immutable signed PSET for local
+review or persistence, then consumes it into a broadcast-form transaction that
+omits the PSET maps' explicit recipient asset and amount metadata. Finalization
+rechecks exact transaction-field preservation, every signature, output proofs,
+and commitment balance. A failure returns the unchanged blinded capability for
+an explicit retry-or-discard decision. No arbitrary PSET import, signature
+injection, node policy check, transaction submission, or broadcast acceptance
+claim exists.
 
 ## Product boundary
 
