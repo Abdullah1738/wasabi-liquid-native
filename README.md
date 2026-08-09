@@ -40,7 +40,7 @@ exposes no C symbol or key-derivation path. Output opening alone does not prove
 transaction validity, chain inclusion, unspentness, commitment balance, or the
 transaction-level surjection proofs. Script ownership and blinding-key
 provenance also remain separate prerequisites before wallet credit.
-Both internal crates pin exact `liquid-wasabi/rust-elements` commit
+All three internal crates pin exact `liquid-wasabi/rust-elements` commit
 `aeed87e94d3f5dd429a55c16492dca24b5fac16f`, with default features disabled;
 that fork pins exact `liquid-wasabi/rust-secp256k1-zkp` commit
 `06ea6e06da81d2e3a51733c8d9b5f6c5fa248c2e`.
