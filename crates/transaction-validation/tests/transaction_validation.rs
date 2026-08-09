@@ -173,12 +173,7 @@ fn rejects_empty_coinbase_and_duplicate_input_shapes() {
     let null_outpoint = OutPoint::null();
     let coinbase = transaction(null_outpoint, vec![explicit_output(asset, 1_000)]);
     assert!(matches!(
-        validate_transaction_amount_proofs(
-            &secp,
-            &coinbase,
-            &[null_outpoint],
-            &[explicit_output(asset, 1_000)],
-        ),
+        validate_transaction_amount_proofs(&secp, &coinbase, &[], &[]),
         Err(TransactionValidationError::UnsupportedCoinbase)
     ));
 
@@ -189,12 +184,7 @@ fn rejects_empty_coinbase_and_duplicate_input_shapes() {
     );
     duplicate.input.push(duplicate.input[0].clone());
     assert!(matches!(
-        validate_transaction_amount_proofs(
-            &secp,
-            &duplicate,
-            &[repeated_outpoint, repeated_outpoint],
-            &[explicit_output(asset, 1_000), explicit_output(asset, 1_000)],
-        ),
+        validate_transaction_amount_proofs(&secp, &duplicate, &[], &[]),
         Err(TransactionValidationError::DuplicatePreviousOutput)
     ));
 }
@@ -229,19 +219,14 @@ fn rejects_count_mismatch_empty_outputs_issuance_and_pegin() {
     let mut issuance = ordinary.clone();
     issuance.input[0].asset_issuance.amount = Value::Explicit(1);
     assert!(matches!(
-        validate_transaction_amount_proofs(
-            &secp,
-            &issuance,
-            &[outpoint],
-            core::slice::from_ref(&spent_output),
-        ),
+        validate_transaction_amount_proofs(&secp, &issuance, &[], &[]),
         Err(TransactionValidationError::UnsupportedIssuance)
     ));
 
     let mut pegin = ordinary;
     pegin.input[0].is_pegin = true;
     assert!(matches!(
-        validate_transaction_amount_proofs(&secp, &pegin, &[outpoint], &[spent_output]),
+        validate_transaction_amount_proofs(&secp, &pegin, &[], &[]),
         Err(TransactionValidationError::UnsupportedPegin)
     ));
 }

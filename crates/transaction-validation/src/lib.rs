@@ -10,6 +10,7 @@
 //! wallet ownership.
 
 use core::fmt;
+use std::collections::BTreeSet;
 
 use elements::secp256k1_zkp::{All, Secp256k1, SecretKey};
 use elements::{OutPoint, Transaction, TxOut, VerificationError};
@@ -165,6 +166,32 @@ pub fn validate_transaction_amount_proofs<'transaction, 'spent>(
         return Err(TransactionValidationError::EmptyTransaction);
     }
 
+    if transaction
+        .input
+        .iter()
+        .any(|input| input.previous_output.is_null())
+    {
+        return Err(TransactionValidationError::UnsupportedCoinbase);
+    }
+
+    if transaction.input.iter().any(elements::TxIn::has_issuance) {
+        return Err(TransactionValidationError::UnsupportedIssuance);
+    }
+
+    if transaction.input.iter().any(elements::TxIn::is_pegin) {
+        return Err(TransactionValidationError::UnsupportedPegin);
+    }
+
+    let mut seen_outpoints = BTreeSet::new();
+    if transaction
+        .input
+        .iter()
+        .map(|input| input.previous_output)
+        .any(|outpoint| !seen_outpoints.insert(outpoint))
+    {
+        return Err(TransactionValidationError::DuplicatePreviousOutput);
+    }
+
     if transaction.input.len() != spent_outpoints.len()
         || transaction.input.len() != spent_outputs.len()
     {
@@ -178,30 +205,6 @@ pub fn validate_transaction_amount_proofs<'transaction, 'spent>(
         .any(|(input, outpoint)| input.previous_output != *outpoint)
     {
         return Err(TransactionValidationError::PreviousOutputMismatch);
-    }
-
-    if transaction
-        .input
-        .iter()
-        .any(|input| input.previous_output.is_null())
-    {
-        return Err(TransactionValidationError::UnsupportedCoinbase);
-    }
-
-    if spent_outpoints
-        .iter()
-        .enumerate()
-        .any(|(index, outpoint)| spent_outpoints[..index].contains(outpoint))
-    {
-        return Err(TransactionValidationError::DuplicatePreviousOutput);
-    }
-
-    if transaction.input.iter().any(elements::TxIn::has_issuance) {
-        return Err(TransactionValidationError::UnsupportedIssuance);
-    }
-
-    if transaction.input.iter().any(elements::TxIn::is_pegin) {
-        return Err(TransactionValidationError::UnsupportedPegin);
     }
 
     transaction
