@@ -1,0 +1,5 @@
+version = 4
+
+[[package]]
+name = "wasabi-liquid-native-abi-v24-types"
+version = "0.1.0"
