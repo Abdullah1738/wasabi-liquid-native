@@ -38,8 +38,8 @@ product-owned result that omits formatting and duplication traits, retains no
 caller key or operation state, clears its stored opening fields on drop, and
 exposes no C symbol or key-derivation path. Output opening alone does not prove
 transaction validity, chain inclusion, unspentness, commitment balance, or the
-transaction-level surjection proofs; those checks remain separate prerequisites
-before wallet credit.
+transaction-level surjection proofs. Script ownership and blinding-key
+provenance also remain separate prerequisites before wallet credit.
 Both internal crates pin exact `liquid-wasabi/rust-elements` commit
 `aeed87e94d3f5dd429a55c16492dca24b5fac16f`, with default features disabled;
 that fork pins exact `liquid-wasabi/rust-secp256k1-zkp` commit

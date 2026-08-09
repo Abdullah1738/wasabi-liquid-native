@@ -3,9 +3,10 @@
 
 //! Confidential Liquid output opening with an explicitly borrowed blinding key.
 //!
-//! This crate exposes no C symbols, derives no keys, and retains no caller key
-//! or output-opening state. Opening an output does not independently establish
-//! transaction validity, chain inclusion, or transaction-level proof validity.
+//! This crate exposes no C symbols, derives no keys, and retains no hidden
+//! caller key or operation state beyond the returned result. Opening an output
+//! does not independently establish transaction validity, chain inclusion, or
+//! transaction-level proof validity.
 
 use core::fmt;
 
@@ -26,6 +27,15 @@ pub struct OpenedOutput {
 }
 
 impl OpenedOutput {
+    fn from_secrets(secrets: TxOutSecrets) -> Self {
+        Self {
+            asset_id: secrets.asset.to_byte_array(),
+            value: secrets.value,
+            asset_blinding_factor: tweak_bytes(secrets.asset_bf.into_inner()),
+            value_blinding_factor: tweak_bytes(secrets.value_bf.into_inner()),
+        }
+    }
+
     /// Returns the consensus-order asset identifier bytes.
     pub const fn asset_id(&self) -> &[u8; 32] {
         &self.asset_id
@@ -104,10 +114,11 @@ impl std::error::Error for OutputOpenError {}
 
 /// Opens one confidential output using a borrowed receiver blinding key.
 ///
-/// The caller retains ownership of `blinding_key`. The function keeps no state
-/// after returning and maps dependency errors to privacy-redacted categories.
-/// It does not verify transaction-level surjection proofs, commitment balance,
-/// chain inclusion, or whether the output is currently unspent; callers must
+/// The caller retains ownership of `blinding_key`. The function retains no
+/// hidden state after returning and maps dependency errors to privacy-redacted
+/// categories. It does not verify transaction-level surjection proofs,
+/// commitment balance, chain inclusion, whether the output is currently
+/// unspent, script ownership, or blinding-key provenance; callers must
 /// establish those facts separately before crediting a wallet balance.
 pub fn open_confidential_output<C: Signing + Verification>(
     secp: &Secp256k1<C>,
@@ -116,19 +127,8 @@ pub fn open_confidential_output<C: Signing + Verification>(
 ) -> Result<OpenedOutput, OutputOpenError> {
     output
         .unblind_with_key(secp, blinding_key)
-        .map(OpenedOutput::from)
+        .map(OpenedOutput::from_secrets)
         .map_err(OutputOpenError::from)
-}
-
-impl From<TxOutSecrets> for OpenedOutput {
-    fn from(secrets: TxOutSecrets) -> Self {
-        Self {
-            asset_id: secrets.asset.to_byte_array(),
-            value: secrets.value,
-            asset_blinding_factor: tweak_bytes(secrets.asset_bf.into_inner()),
-            value_blinding_factor: tweak_bytes(secrets.value_bf.into_inner()),
-        }
-    }
 }
 
 impl From<UnblindError> for OutputOpenError {
