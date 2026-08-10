@@ -20,6 +20,7 @@ members = [
     "crates/ordinary-pset",
     "crates/output-opening",
     "crates/transaction-validation",
+    "crates/wallet-facts",
 ]
 default-members = [
     ".",
@@ -27,5 +28,10 @@ default-members = [
     "crates/ordinary-pset",
     "crates/output-opening",
     "crates/transaction-validation",
+    "crates/wallet-facts",
 ]
 resolver = "3"
+
+[patch.crates-io]
+digest = { git = "https://github.com/liquid-wasabi/traits.git", rev = "113c5ba12876e332335e49d1462a2c96c9928006" }
+secp256k1-zkp-sys = { git = "https://github.com/liquid-wasabi/rust-secp256k1-zkp.git", rev = "06ea6e06da81d2e3a51733c8d9b5f6c5fa248c2e" }

@@ -40,11 +40,36 @@ exposes no C symbol or key-derivation path. Output opening alone does not prove
 transaction validity, chain inclusion, unspentness, commitment balance, or the
 transaction-level surjection proofs. Script ownership and blinding-key
 provenance also remain separate prerequisites before wallet credit.
-All four Liquid implementation crates pin exact
+All five Liquid implementation crates pin exact
 `liquid-wasabi/rust-elements` commit
-`cf140ac973e791b8b17d0c9c0929023b7f5c672b`, with default features disabled;
+`85b423a3cd69ea5409c0fbcfda1ccbced6a25d27`, with default features and the
+ambient global secp context disabled;
 that fork pins exact `liquid-wasabi/rust-secp256k1-zkp` commit
 `06ea6e06da81d2e3a51733c8d9b5f6c5fa248c2e`.
+
+The internal `wasabi-liquid-native-wallet-facts` crate derives a bounded
+external/internal native P2WPKH public-script catalog, accepts only atomically
+bounded candidate batches, validates each transaction against its exact
+previous-transaction set, and opens only fully confidential outputs matching
+that catalog. The caller supplies cryptographically secure context randomness;
+the context seed, SLIP-77 derivation buffers, hash state and finalization
+temporaries, and derived blinding keys follow scoped erasure paths. Exact asset,
+amount, public-key, coordinate, outpoint, and witness-inclusive transaction
+bindings are returned as observations only. The crate does not claim chain
+inclusion, current unspentness, confirmations, balance credit, persistence, or
+recovery. SHA-256 finalization is pinned to exact
+`liquid-wasabi/traits` commit
+`113c5ba12876e332335e49d1462a2c96c9928006` so the full truncated-output
+temporary is erased when zeroization is enabled.
+
+`ci/check-dependency-capabilities.sh` exact-diffs the locked, all-target
+normal/build graph for the whole default workspace against its reviewed
+snapshot. It also applies semantic checks for the exact narrow library
+revisions and feature sets, and separately snapshots each active dependency
+edge with its alias, normal/build kind, target condition, source, and
+repo-relative workspace path. It rejects ambient randomness, legacy Elements
+Miniscript, JSON contract support, and unrelated compiler or serialization
+capabilities.
 
 These internal crates do not establish persistence, recovery, wallet
 integration, release, or production readiness.

@@ -1,0 +1,41 @@
+arrayvec v0.7.8|
+base58ck v0.1.101|std
+bech32 v0.11.1|alloc,default,std
+bitcoin v0.32.102|encoding,std
+bitcoin-consensus-encoding v1.1.0|alloc,hex,std
+bitcoin-internals v0.6.0|alloc,default,std
+bitcoin-io v0.1.101|alloc,std
+bitcoin-private v0.1.0|default
+bitcoin-units v0.1.101|alloc,encoding,std
+bitcoin_hashes v0.14.101|alloc,bitcoin-io,io,std
+bitcoin_hashes v1.2.0|alloc,default,hex,std
+block-buffer v0.12.1|zeroize
+cc v1.4.2|
+cfg-if v1.0.4|
+cpufeatures v0.3.0|
+crypto-common v0.2.2|
+digest v0.11.3 (https://github.com/liquid-wasabi/traits.git?rev=113c5ba12876e332335e49d1462a2c96c9928006#113c5ba1)|block-api,default,zeroize
+elements v0.27.0 (https://github.com/liquid-wasabi/rust-elements.git?rev=85b423a3cd69ea5409c0fbcfda1ccbced6a25d27#85b423a3)|
+find-msvc-tools v0.1.10|
+hex-conservative v0.2.2|alloc,std
+hex-conservative v1.2.0|alloc,default,std
+hex_lit v0.1.1|
+hybrid-array v0.4.14|
+libc v0.2.189|
+miniscript v12.3.7|no-std
+rand v0.8.7|
+rand_core v0.6.4|
+secp256k1 v0.29.1|alloc,default,hashes,rand,std
+secp256k1-sys v0.10.1|alloc,default,std
+secp256k1-zkp v0.11.1 (https://github.com/liquid-wasabi/rust-secp256k1-zkp.git?rev=06ea6e06da81d2e3a51733c8d9b5f6c5fa248c2e#06ea6e06)|actual-rand,hashes,rand,std
+secp256k1-zkp-sys v0.10.0 (https://github.com/liquid-wasabi/rust-secp256k1-zkp.git?rev=06ea6e06da81d2e3a51733c8d9b5f6c5fa248c2e#06ea6e06)|std
+sha2 v0.11.0|zeroize
+shlex v2.0.1|default,std
+typenum v1.20.1|const-generics
+wasabi-liquid-native-abi-v24-types v0.1.0 (workspace)|
+wasabi-liquid-native-address v0.1.0 (workspace)|
+wasabi-liquid-native-ordinary-pset v0.1.0 (workspace)|
+wasabi-liquid-native-output-opening v0.1.0 (workspace)|
+wasabi-liquid-native-transaction-validation v0.1.0 (workspace)|
+wasabi-liquid-native-wallet-facts v0.1.0 (workspace)|
+zeroize v1.9.0|

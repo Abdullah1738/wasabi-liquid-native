@@ -1,0 +1,23 @@
+name: Dependency capabilities
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  default-workspace:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.96.0 --profile minimal
+      - name: Select pinned Rust toolchain
+        run: rustup override set 1.96.0
+      - name: Check dependency capabilities
+        run: ./ci/check-dependency-capabilities.sh
+      - name: Test dependency capability gate
+        run: python3 ci/test-dependency-capability-gate.py
