@@ -411,20 +411,31 @@ $decoder_uniqueness_mir"
             echo "archive or symbol inspection tool is unavailable" >&2
             exit 1
         fi
+        if ! rustc_bin="$(command -v rustc)"; then
+            echo "wallet-facts symbol inspection requires Rust 1.96.0" >&2
+            exit 1
+        fi
+        case "$("$rustc_bin" --version 2>/dev/null)" in
+            rustc\ 1.96.0\ *) ;;
+            *)
+                echo "wallet-facts symbol inspection requires Rust 1.96.0" >&2
+                exit 1
+                ;;
+        esac
+        symbol_checker="$scratch/check-rust-rlib-symbols"
+        RUSTC_BOOTSTRAP=wasabi_liquid_symbol_gate "$rustc_bin" \
+            --crate-name wasabi_liquid_symbol_gate \
+            --edition=2024 \
+            ci/check-rust-rlib-symbols.rs \
+            -o "$symbol_checker"
+        "$symbol_checker" --self-test
         ar t "$wire_archive" >"$scratch/wallet-facts-wire.archive"
         if ! grep -Eq '\.o$' "$scratch/wallet-facts-wire.archive"; then
             echo "wallet-facts wire release archive has no object members" >&2
             exit 1
         fi
         nm -g "$wire_archive" >"$scratch/wallet-facts-wire.symbols" 2>"$scratch/wallet-facts-wire.nm-stderr"
-        unmangled_symbols="$(
-            awk '
-                NF >= 3 && $2 ~ /^[TWDBR]$/ &&
-                    $3 !~ /^__?ZN/ && $3 !~ /^_?_R/ { print }
-            ' "$scratch/wallet-facts-wire.symbols"
-        )"
-        if [ -n "$unmangled_symbols" ]; then
-            printf '%s\n' "$unmangled_symbols" >&2
+        if ! "$symbol_checker" "$scratch/wallet-facts-wire.symbols"; then
             echo "wallet-facts wire release archive exposes an unmangled global symbol" >&2
             exit 1
         fi
