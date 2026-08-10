@@ -21,6 +21,8 @@ static_assertions::assert_not_impl_any!(PreparedTransactionId: Copy, Clone, std:
 static_assertions::assert_not_impl_any!(PreparedCandidateOrder: Copy, Clone, std::fmt::Debug);
 static_assertions::assert_not_impl_any!(DescriptorCatalog: Copy, Clone, std::fmt::Debug);
 static_assertions::assert_not_impl_any!(CandidateBatch: Copy, Clone, std::fmt::Debug);
+static_assertions::assert_not_impl_any!(ObservedTransactionInput: Copy, Clone, std::fmt::Debug);
+static_assertions::assert_not_impl_any!(ObservedWalletTransaction: Copy, Clone, std::fmt::Debug);
 static_assertions::assert_not_impl_any!(ObservedOwnedOutput: Copy, Clone, std::fmt::Debug);
 static_assertions::assert_not_impl_any!(ObservedWalletBatch: Copy, Clone, std::fmt::Debug);
 
@@ -287,8 +289,45 @@ fn observes_two_validated_assets_without_retaining_blinding_material() {
     let batch = observe_owned_outputs(&catalog, BorrowedSlip77::new(&slip77), &candidate).unwrap();
 
     assert_eq!(scoped_secret_key_drop_count() - drops_before, 2);
+    assert_eq!(batch.transactions().len(), 1);
     assert_eq!(batch.outputs().len(), 2);
     assert!(!batch.is_empty());
+    let observed_transaction = &batch.transactions()[0];
+    assert_eq!(
+        observed_transaction.transaction_id(),
+        &fixture.transaction.txid().to_byte_array()
+    );
+    assert_eq!(
+        observed_transaction.transaction_witness_binding(),
+        &sha256::Hash::hash(&fixture.transaction_bytes).to_byte_array()
+    );
+    assert_eq!(observed_transaction.inputs().len(), 2);
+    assert_eq!(
+        observed_transaction
+            .inputs()
+            .iter()
+            .map(|input| (
+                *input.previous_transaction_id(),
+                input.previous_output_index()
+            ))
+            .collect::<Vec<_>>(),
+        fixture
+            .transaction
+            .input
+            .iter()
+            .map(|input| {
+                (
+                    input.previous_output.txid.to_byte_array(),
+                    input.previous_output.vout,
+                )
+            })
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(batch.transactions.capacity(), batch.transactions.len());
+    assert_eq!(
+        observed_transaction.inputs.capacity(),
+        observed_transaction.inputs.len()
+    );
     let secp = Secp256k1::new();
     let external_blinding_public_key = derived_blinding_key(
         catalog_entry(&catalog, DescriptorBranch::External, 0),
@@ -335,6 +374,14 @@ fn observes_two_validated_assets_without_retaining_blinding_material() {
             assert_eq!(output.script_pubkey().len(), 22);
             assert_eq!(output.spend_public_key().len(), 33);
             assert_eq!(output.blinding_public_key().len(), 33);
+            assert_eq!(
+                output.transaction_id(),
+                observed_transaction.transaction_id()
+            );
+            assert_eq!(
+                output.transaction_witness_binding(),
+                observed_transaction.transaction_witness_binding()
+            );
             (
                 output.branch(),
                 output.derivation_index(),
@@ -383,6 +430,290 @@ fn opens_reverse_candidate_input_directly_in_final_outpoint_order() {
     assert_eq!(
         observed_order,
         vec![(lower_id, 0), (lower_id, 1), (higher_id, 0), (higher_id, 1),]
+    );
+    assert_eq!(
+        batch
+            .transactions()
+            .iter()
+            .map(|transaction| *transaction.transaction_id())
+            .collect::<Vec<_>>(),
+        vec![lower_id, higher_id]
+    );
+    for observed in batch.transactions() {
+        assert_eq!(observed.inputs().len(), 2);
+        assert_eq!(
+            observed
+                .inputs()
+                .iter()
+                .map(|input| input.previous_output_index())
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+    }
+    assert_eq!(
+        batch.transactions()[0].inputs()[0].previous_transaction_id(),
+        batch.transactions()[1].inputs()[0].previous_transaction_id()
+    );
+}
+
+#[test]
+fn preserves_nonmonotonic_consensus_input_order() {
+    let catalog = test_catalog(1);
+    let slip77 = synthetic_material(b"wallet-facts nonmonotonic input order material");
+    let fixture = confidential_fixture_with_input_order(&catalog, &slip77, [1, 0]);
+    let candidates = fixture.candidate_batch();
+
+    let batch = observe_owned_outputs(&catalog, BorrowedSlip77::new(&slip77), &candidates).unwrap();
+
+    assert_eq!(batch.transactions().len(), 1);
+    assert_eq!(
+        batch.transactions()[0]
+            .inputs()
+            .iter()
+            .map(|input| input.previous_output_index())
+            .collect::<Vec<_>>(),
+        vec![1, 0]
+    );
+}
+
+#[test]
+fn observes_empty_spend_only_and_mixed_batches_without_assigning_chain_order() {
+    struct PanicOnRandomness;
+
+    impl rand::RngCore for PanicOnRandomness {
+        fn next_u32(&mut self) -> u32 {
+            panic!("a no-owned-output batch must not request randomness")
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            panic!("a no-owned-output batch must not request randomness")
+        }
+
+        fn fill_bytes(&mut self, _: &mut [u8]) {
+            panic!("a no-owned-output batch must not request randomness")
+        }
+
+        fn try_fill_bytes(&mut self, _: &mut [u8]) -> Result<(), rand::Error> {
+            panic!("a no-owned-output batch must not request randomness")
+        }
+    }
+
+    impl rand::CryptoRng for PanicOnRandomness {}
+
+    let catalog = test_catalog(1);
+    let unowned_catalog =
+        DescriptorCatalog::derive(MAINNET_PUBLIC_DESCRIPTOR, DescriptorNetwork::Mainnet, 1)
+            .unwrap();
+    let slip77 = synthetic_material(b"wallet-facts spend-only observation material");
+    let fixture = confidential_fixture(&catalog, &slip77);
+    let empty_candidates = CandidateBatch::new(&[]).unwrap();
+    let derivations_before = derivation_call_count();
+    let candidate_decodes_before = candidate_transaction_decode_count();
+    let previous_decodes_before = previous_transaction_decode_count();
+    let empty = super::observe_owned_outputs(
+        &catalog,
+        BorrowedSlip77::new(&slip77),
+        &empty_candidates,
+        &mut PanicOnRandomness,
+    )
+    .unwrap();
+    assert!(empty.is_empty());
+    assert!(empty.transactions().is_empty());
+    assert!(empty.outputs().is_empty());
+    assert_eq!(derivation_call_count(), derivations_before);
+    assert_eq!(
+        candidate_transaction_decode_count(),
+        candidate_decodes_before
+    );
+    assert_eq!(previous_transaction_decode_count(), previous_decodes_before);
+
+    let spend_only = confidential_fixture(&unowned_catalog, &slip77);
+    let spend_derivations_before = derivation_call_count();
+    let candidate_decodes_before = candidate_transaction_decode_count();
+    let previous_decodes_before = previous_transaction_decode_count();
+    let spend_batch = super::observe_owned_outputs(
+        &catalog,
+        BorrowedSlip77::new(&slip77),
+        &spend_only.candidate_batch(),
+        &mut PanicOnRandomness,
+    )
+    .unwrap();
+    assert_eq!(
+        candidate_transaction_decode_count() - candidate_decodes_before,
+        2
+    );
+    assert_eq!(
+        previous_transaction_decode_count() - previous_decodes_before,
+        2
+    );
+    assert_eq!(derivation_call_count(), spend_derivations_before);
+    assert_eq!(spend_batch.transactions().len(), 1);
+    assert!(spend_batch.outputs().is_empty());
+    assert!(!spend_batch.is_empty());
+    assert_eq!(
+        spend_batch.transactions()[0].transaction_id(),
+        &spend_only.transaction.txid().to_byte_array()
+    );
+    assert_eq!(spend_batch.transactions()[0].inputs().len(), 2);
+    let successful_input_drops = observed_transaction_input_drop_count();
+    let successful_transaction_drops = observed_wallet_transaction_drop_count();
+    drop(spend_batch);
+    assert_eq!(
+        observed_transaction_input_drop_count() - successful_input_drops,
+        2
+    );
+    assert_eq!(
+        observed_wallet_transaction_drop_count() - successful_transaction_drops,
+        1
+    );
+
+    let mixed_candidates =
+        CandidateBatch::new(&[fixture.borrowed(), spend_only.borrowed()]).unwrap();
+    let candidate_decodes_before = candidate_transaction_decode_count();
+    let previous_decodes_before = previous_transaction_decode_count();
+    let mixed =
+        observe_owned_outputs(&catalog, BorrowedSlip77::new(&slip77), &mixed_candidates).unwrap();
+    assert_eq!(
+        candidate_transaction_decode_count() - candidate_decodes_before,
+        4
+    );
+    assert_eq!(
+        previous_transaction_decode_count() - previous_decodes_before,
+        4
+    );
+    assert_eq!(mixed.transactions().len(), 2);
+    assert_eq!(mixed.transactions.capacity(), mixed.transactions.len());
+    assert_eq!(mixed.outputs().len(), 2);
+    assert!(!mixed.is_empty());
+    assert!(
+        mixed
+            .transactions()
+            .windows(2)
+            .all(|pair| pair[0].transaction_id() < pair[1].transaction_id())
+    );
+}
+
+#[test]
+fn rejects_duplicate_inputs_and_same_txid_witness_variants_before_returning_facts() {
+    let catalog = test_catalog(1);
+    let slip77 = synthetic_material(b"wallet-facts duplicate input material");
+    let fixture = confidential_fixture(&catalog, &slip77);
+    let fact_drops_before = (
+        observed_transaction_input_drop_count(),
+        observed_wallet_transaction_drop_count(),
+        observed_owned_output_drop_count(),
+    );
+
+    let mut duplicate_input = fixture.transaction.clone();
+    duplicate_input.input[1] = duplicate_input.input[0].clone();
+    let duplicate_input_bytes = serialize(&duplicate_input);
+    let duplicate_input_candidates = CandidateBatch::new(&[BorrowedCandidateTransaction::new(
+        &duplicate_input_bytes,
+        std::slice::from_ref(&fixture.previous_transaction_bytes),
+    )])
+    .unwrap();
+    assert!(matches!(
+        observe_owned_outputs(
+            &catalog,
+            BorrowedSlip77::new(&slip77),
+            &duplicate_input_candidates,
+        ),
+        Err(WalletObservationError::TransactionValidation)
+    ));
+
+    let mut witness_variant = fixture.transaction.clone();
+    witness_variant.input[0]
+        .witness
+        .script_witness
+        .push([0x01, 0x02, 0x03]);
+    let witness_variant_bytes = serialize(&witness_variant);
+    assert_eq!(witness_variant.txid(), fixture.transaction.txid());
+    assert_ne!(witness_variant_bytes, fixture.transaction_bytes);
+    let witness_variants = CandidateBatch::new(&[
+        fixture.borrowed(),
+        BorrowedCandidateTransaction::new(
+            &witness_variant_bytes,
+            std::slice::from_ref(&fixture.previous_transaction_bytes),
+        ),
+    ])
+    .unwrap();
+    assert!(matches!(
+        observe_owned_outputs(&catalog, BorrowedSlip77::new(&slip77), &witness_variants,),
+        Err(WalletObservationError::DuplicateTransaction)
+    ));
+    assert_eq!(
+        (
+            observed_transaction_input_drop_count(),
+            observed_wallet_transaction_drop_count(),
+            observed_owned_output_drop_count(),
+        ),
+        fact_drops_before
+    );
+}
+
+#[test]
+fn unsupported_candidate_shapes_reject_before_returning_facts() {
+    let catalog = test_catalog(1);
+    let slip77 = synthetic_material(b"wallet-facts unsupported shape material");
+    let fixture = confidential_fixture(&catalog, &slip77);
+    let facts_before = (
+        observed_transaction_input_drop_count(),
+        observed_wallet_transaction_drop_count(),
+        observed_owned_output_drop_count(),
+    );
+
+    let mut empty = fixture.transaction.clone();
+    empty.output.clear();
+    let mut issuance = fixture.transaction.clone();
+    issuance.input[0].asset_issuance.amount = Value::Explicit(1);
+    let mut pegin = fixture.transaction.clone();
+    pegin.input[0].is_pegin = true;
+    let mut invalid_proof = fixture.transaction.clone();
+    invalid_proof.output[0].witness.rangeproof = RangeProof::EMPTY;
+
+    for transaction in [empty, issuance, pegin, invalid_proof] {
+        let bytes = serialize(&transaction);
+        let candidates = CandidateBatch::new(&[BorrowedCandidateTransaction::new(
+            &bytes,
+            std::slice::from_ref(&fixture.previous_transaction_bytes),
+        )])
+        .unwrap();
+        assert!(matches!(
+            observe_owned_outputs(&catalog, BorrowedSlip77::new(&slip77), &candidates,),
+            Err(WalletObservationError::TransactionValidation)
+        ));
+    }
+
+    let mut zero_input = fixture.transaction.clone();
+    zero_input.input.clear();
+    let zero_input_bytes = serialize(&zero_input);
+    let zero_input_candidates =
+        CandidateBatch::new(&[BorrowedCandidateTransaction::new(&zero_input_bytes, &[])]).unwrap();
+    assert!(matches!(
+        observe_owned_outputs(
+            &catalog,
+            BorrowedSlip77::new(&slip77),
+            &zero_input_candidates,
+        ),
+        Err(WalletObservationError::TransactionValidation)
+    ));
+
+    let mut coinbase = fixture.transaction.clone();
+    coinbase.input = vec![input(OutPoint::null())];
+    let coinbase_bytes = serialize(&coinbase);
+    let coinbase_candidates =
+        CandidateBatch::new(&[BorrowedCandidateTransaction::new(&coinbase_bytes, &[])]).unwrap();
+    assert!(
+        observe_owned_outputs(&catalog, BorrowedSlip77::new(&slip77), &coinbase_candidates,)
+            .is_err()
+    );
+    assert_eq!(
+        (
+            observed_transaction_input_drop_count(),
+            observed_wallet_transaction_drop_count(),
+            observed_owned_output_drop_count(),
+        ),
+        facts_before
     );
 }
 
@@ -444,6 +775,8 @@ fn late_owned_output_opening_failure_destroys_earlier_observation() {
     let candidate = fixture.candidate_batch();
     let key_drops_before = scoped_secret_key_drop_count();
     let output_drops_before = observed_owned_output_drop_count();
+    let input_drops_before = observed_transaction_input_drop_count();
+    let transaction_drops_before = observed_wallet_transaction_drop_count();
     let prepared_drops_before = prepared_candidate_drop_count();
 
     assert!(matches!(
@@ -452,7 +785,52 @@ fn late_owned_output_opening_failure_destroys_earlier_observation() {
     ));
     assert_eq!(scoped_secret_key_drop_count() - key_drops_before, 2);
     assert_eq!(observed_owned_output_drop_count() - output_drops_before, 1);
+    assert_eq!(
+        observed_transaction_input_drop_count() - input_drops_before,
+        2
+    );
+    assert_eq!(
+        observed_wallet_transaction_drop_count() - transaction_drops_before,
+        1
+    );
     assert_eq!(prepared_candidate_drop_count() - prepared_drops_before, 1);
+}
+
+#[test]
+fn later_candidate_opening_failure_destroys_all_earlier_facts() {
+    let catalog = test_catalog(1);
+    let slip77 = synthetic_material(b"wallet-facts valid earlier candidate material");
+    let wrong = synthetic_material(b"wallet-facts invalid later candidate material");
+    let valid = confidential_fixture(&catalog, &slip77);
+    let mut invalid = confidential_fixture_with_second_blinder(&catalog, &slip77, &wrong);
+    for lock_time in 1..=u32::MAX {
+        invalid.transaction.lock_time = LockTime::from_consensus(lock_time);
+        if invalid.transaction.txid().to_byte_array() > valid.transaction.txid().to_byte_array() {
+            break;
+        }
+    }
+    assert!(invalid.transaction.txid().to_byte_array() > valid.transaction.txid().to_byte_array());
+    invalid.transaction_bytes = serialize(&invalid.transaction);
+    let candidates = CandidateBatch::new(&[invalid.borrowed(), valid.borrowed()]).unwrap();
+    let key_drops_before = scoped_secret_key_drop_count();
+    let output_drops_before = observed_owned_output_drop_count();
+    let input_drops_before = observed_transaction_input_drop_count();
+    let transaction_drops_before = observed_wallet_transaction_drop_count();
+
+    assert!(matches!(
+        observe_owned_outputs(&catalog, BorrowedSlip77::new(&slip77), &candidates),
+        Err(WalletObservationError::OwnedOutputOpening)
+    ));
+    assert_eq!(scoped_secret_key_drop_count() - key_drops_before, 4);
+    assert_eq!(observed_owned_output_drop_count() - output_drops_before, 3);
+    assert_eq!(
+        observed_transaction_input_drop_count() - input_drops_before,
+        4
+    );
+    assert_eq!(
+        observed_wallet_transaction_drop_count() - transaction_drops_before,
+        2
+    );
 }
 
 #[test]
@@ -484,6 +862,28 @@ fn blinding_key_derivation_erases_state_on_success_error_and_unwind() {
     });
     assert!(unwind.is_err());
     assert_eq!(derivation_secret_buffer_drop_count() - buffers_before, 4);
+
+    let catalog = test_catalog(1);
+    let fixture = confidential_fixture(&catalog, &slip77);
+    let input_drops_before = observed_transaction_input_drop_count();
+    let transaction_drops_before = observed_wallet_transaction_drop_count();
+    set_derivation_test_mode(DerivationTestMode::PanicAfterOuter);
+    let unwind = std::panic::catch_unwind(|| {
+        let _ = observe_owned_outputs(
+            &catalog,
+            BorrowedSlip77::new(&slip77),
+            &fixture.candidate_batch(),
+        );
+    });
+    assert!(unwind.is_err());
+    assert_eq!(
+        observed_transaction_input_drop_count() - input_drops_before,
+        2
+    );
+    assert_eq!(
+        observed_wallet_transaction_drop_count() - transaction_drops_before,
+        1
+    );
 }
 
 #[test]
@@ -592,6 +992,11 @@ fn context_randomization_consumes_and_erases_one_seed() {
     assert_eq!(context_randomization_seed_drop_count() - drops_before, 1);
 
     let drops_before = context_randomization_seed_drop_count();
+    let fact_drops_before = (
+        observed_transaction_input_drop_count(),
+        observed_wallet_transaction_drop_count(),
+        observed_owned_output_drop_count(),
+    );
     assert!(matches!(
         super::observe_owned_outputs(
             &catalog,
@@ -602,8 +1007,21 @@ fn context_randomization_consumes_and_erases_one_seed() {
         Err(WalletObservationError::ContextRandomnessUnavailable)
     ));
     assert_eq!(context_randomization_seed_drop_count() - drops_before, 1);
+    assert_eq!(
+        (
+            observed_transaction_input_drop_count(),
+            observed_wallet_transaction_drop_count(),
+            observed_owned_output_drop_count(),
+        ),
+        fact_drops_before
+    );
 
     let drops_before = context_randomization_seed_drop_count();
+    let fact_drops_before = (
+        observed_transaction_input_drop_count(),
+        observed_wallet_transaction_drop_count(),
+        observed_owned_output_drop_count(),
+    );
     let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _ = super::observe_owned_outputs(
             &catalog,
@@ -614,6 +1032,14 @@ fn context_randomization_consumes_and_erases_one_seed() {
     }));
     assert!(unwind.is_err());
     assert_eq!(context_randomization_seed_drop_count() - drops_before, 1);
+    assert_eq!(
+        (
+            observed_transaction_input_drop_count(),
+            observed_wallet_transaction_drop_count(),
+            observed_owned_output_drop_count(),
+        ),
+        fact_drops_before
+    );
 }
 
 #[test]
@@ -633,12 +1059,25 @@ fn proof_failure_rejects_the_entire_candidate_batch() {
 
     let derivations_before = derivation_call_count();
     let prepared_drops_before = prepared_candidate_drop_count();
+    let fact_drops_before = (
+        observed_transaction_input_drop_count(),
+        observed_wallet_transaction_drop_count(),
+        observed_owned_output_drop_count(),
+    );
     assert!(matches!(
         observe_owned_outputs(&catalog, BorrowedSlip77::new(&slip77), &candidates,),
         Err(WalletObservationError::TransactionValidation)
     ));
     assert_eq!(derivation_call_count(), derivations_before);
     assert_eq!(prepared_candidate_drop_count() - prepared_drops_before, 1);
+    assert_eq!(
+        (
+            observed_transaction_input_drop_count(),
+            observed_wallet_transaction_drop_count(),
+            observed_owned_output_drop_count(),
+        ),
+        fact_drops_before
+    );
 
     let mut mismatched_proof = fixture.transaction.clone();
     mismatched_proof.output[0].witness.rangeproof =
@@ -723,6 +1162,11 @@ fn previous_transaction_sets_and_duplicate_candidates_are_exact() {
 
 #[test]
 fn malformed_and_bounded_inputs_return_redacted_errors() {
+    assert_eq!(checked_total_input_count(7, 9).unwrap(), 16);
+    assert!(matches!(
+        checked_total_input_count(usize::MAX, 1),
+        Err(WalletObservationError::BatchLimit)
+    ));
     assert!(matches!(
         CandidateBatch::new(&[BorrowedCandidateTransaction::new(&[], &[])]),
         Err(WalletObservationError::TransactionLength)
@@ -786,6 +1230,54 @@ fn malformed_and_bounded_inputs_return_redacted_errors() {
         Err(WalletObservationError::PreviousTransactionSet)
     ));
     assert_eq!(candidate_payload_clone_count(), clones_before);
+
+    let exact_candidate_count = (0..MAX_CANDIDATE_TRANSACTIONS)
+        .map(|_| BorrowedCandidateTransaction::new(&one_byte, &[]))
+        .collect::<Vec<_>>();
+    let clones_before_exact = candidate_payload_clone_count();
+    let exact_candidate_batch = CandidateBatch::new(&exact_candidate_count).unwrap();
+    assert_eq!(
+        candidate_payload_clone_count() - clones_before_exact,
+        MAX_CANDIDATE_TRANSACTIONS
+    );
+    drop(exact_candidate_batch);
+
+    let exact_transaction = vec![0; MAX_TRANSACTION_BYTES];
+    let clones_before_exact = candidate_payload_clone_count();
+    let exact_transaction_batch =
+        CandidateBatch::new(&[BorrowedCandidateTransaction::new(&exact_transaction, &[])]).unwrap();
+    assert_eq!(candidate_payload_clone_count() - clones_before_exact, 1);
+    drop(exact_transaction_batch);
+
+    let exact_aggregate_payloads = (0..(MAX_BATCH_BYTES / MAX_TRANSACTION_BYTES))
+        .map(|_| vec![0; MAX_TRANSACTION_BYTES])
+        .collect::<Vec<_>>();
+    let exact_aggregate_candidates = exact_aggregate_payloads
+        .iter()
+        .map(|payload| BorrowedCandidateTransaction::new(payload, &[]))
+        .collect::<Vec<_>>();
+    let clones_before_exact = candidate_payload_clone_count();
+    let exact_aggregate_batch = CandidateBatch::new(&exact_aggregate_candidates).unwrap();
+    assert_eq!(
+        candidate_payload_clone_count() - clones_before_exact,
+        MAX_BATCH_BYTES / MAX_TRANSACTION_BYTES
+    );
+    drop(exact_aggregate_batch);
+
+    let exact_previous_count = (0..MAX_PREVIOUS_TRANSACTIONS_PER_BATCH)
+        .map(|_| vec![1])
+        .collect::<Vec<_>>();
+    let clones_before_exact = candidate_payload_clone_count();
+    let exact_previous_batch = CandidateBatch::new(&[BorrowedCandidateTransaction::new(
+        &one_byte,
+        &exact_previous_count,
+    )])
+    .unwrap();
+    assert_eq!(
+        candidate_payload_clone_count() - clones_before_exact,
+        MAX_PREVIOUS_TRANSACTIONS_PER_BATCH + 1
+    );
+    drop(exact_previous_batch);
 }
 
 struct ConfidentialFixture {
@@ -829,13 +1321,35 @@ fn synthetic_material(label: &[u8]) -> [u8; 32] {
 }
 
 fn confidential_fixture(catalog: &DescriptorCatalog, slip77: &[u8; 32]) -> ConfidentialFixture {
-    confidential_fixture_with_second_blinder(catalog, slip77, slip77)
+    confidential_fixture_with_second_blinder_and_input_order(catalog, slip77, slip77, [0, 1])
+}
+
+fn confidential_fixture_with_input_order(
+    catalog: &DescriptorCatalog,
+    slip77: &[u8; 32],
+    input_order: [u32; 2],
+) -> ConfidentialFixture {
+    confidential_fixture_with_second_blinder_and_input_order(catalog, slip77, slip77, input_order)
 }
 
 fn confidential_fixture_with_second_blinder(
     catalog: &DescriptorCatalog,
     slip77: &[u8; 32],
     second_output_slip77: &[u8; 32],
+) -> ConfidentialFixture {
+    confidential_fixture_with_second_blinder_and_input_order(
+        catalog,
+        slip77,
+        second_output_slip77,
+        [0, 1],
+    )
+}
+
+fn confidential_fixture_with_second_blinder_and_input_order(
+    catalog: &DescriptorCatalog,
+    slip77: &[u8; 32],
+    second_output_slip77: &[u8; 32],
+    input_order: [u32; 2],
 ) -> ConfidentialFixture {
     let first_asset = AssetId::from_byte_array(std::array::from_fn(|index| index as u8));
     let second_asset = AssetId::from_byte_array(std::array::from_fn(|index| 0x80_u8 + index as u8));
@@ -849,20 +1363,21 @@ fn confidential_fixture_with_second_blinder(
         ],
     };
     let previous_txid = previous.txid();
-    let spent_secrets = [
-        TxOutSecrets::new(
+    let spent_secrets = input_order.map(|output_index| match output_index {
+        0 => TxOutSecrets::new(
             first_asset,
             AssetBlindingFactor::zero(),
             1_000,
             ValueBlindingFactor::zero(),
         ),
-        TxOutSecrets::new(
+        1 => TxOutSecrets::new(
             second_asset,
             AssetBlindingFactor::zero(),
             2_000,
             ValueBlindingFactor::zero(),
         ),
-    ];
+        _ => unreachable!("test input order must reference the two fixture outputs"),
+    });
     let external = catalog_entry(catalog, DescriptorBranch::External, 0);
     let internal = catalog_entry(catalog, DescriptorBranch::Internal, 1);
     let secp = Secp256k1::new();
@@ -907,10 +1422,9 @@ fn confidential_fixture_with_second_blinder(
     let transaction = Transaction {
         version: 2,
         lock_time: LockTime::ZERO,
-        input: vec![
-            input(OutPoint::new(previous_txid, 0)),
-            input(OutPoint::new(previous_txid, 1)),
-        ],
+        input: input_order
+            .map(|output_index| input(OutPoint::new(previous_txid, output_index)))
+            .to_vec(),
         output: vec![
             first_output,
             second_output,

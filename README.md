@@ -50,14 +50,18 @@ that fork pins exact `liquid-wasabi/rust-secp256k1-zkp` commit
 The internal `wasabi-liquid-native-wallet-facts` crate derives a bounded
 external/internal native P2WPKH public-script catalog, accepts only atomically
 bounded candidate batches, validates each transaction against its exact
-previous-transaction set, and opens only fully confidential outputs matching
-that catalog. The caller supplies cryptographically secure context randomness;
-the context seed, SLIP-77 derivation buffers, hash state and finalization
-temporaries, and derived blinding keys follow scoped erasure paths. Exact asset,
-amount, public-key, coordinate, outpoint, and witness-inclusive transaction
-bindings are returned as observations only. The crate does not claim chain
-inclusion, current unspentness, confirmations, balance credit, persistence, or
-recovery. SHA-256 finalization is pinned to exact
+previous-transaction set, reports every validated transaction and its input
+outpoints in deterministic transaction-ID order, and opens only fully
+confidential outputs matching that catalog. Input order remains exact consensus
+transaction order; deterministic batch order is not chain order and input facts
+do not assert wallet ownership. The caller supplies cryptographically secure
+context randomness; the context seed, SLIP-77 derivation buffers, hash state and
+finalization temporaries, and derived blinding keys follow scoped erasure paths.
+Exact asset, amount, public-key, coordinate, outpoint, and witness-inclusive
+transaction bindings are returned as observations only. A spend-only candidate
+therefore remains observable even when it creates no owned output. The crate
+does not claim chain inclusion, current unspentness, confirmations, balance
+credit, persistence, or recovery. SHA-256 finalization is pinned to exact
 `liquid-wasabi/traits` commit
 `113c5ba12876e332335e49d1462a2c96c9928006` so the full truncated-output
 temporary is erased when zeroization is enabled.

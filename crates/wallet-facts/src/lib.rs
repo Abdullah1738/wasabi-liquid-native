@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-//! Bounded public-descriptor derivation and independently validated owned-output
-//! observations for the ordinary Liquid wallet.
+//! Bounded public-descriptor derivation and independently validated transaction,
+//! input, and owned-output observations for the ordinary Liquid wallet.
 //!
 //! This crate performs no network access and accepts no LWK wallet, update,
 //! store, PSET, signer, or broadcast type. The narrow upstream Bitcoin
@@ -350,7 +350,7 @@ impl Drop for CandidateTransaction {
 /// An owned candidate batch whose count and aggregate byte limits were checked
 /// atomically before any payload was copied.
 ///
-/// This type deliberately implements neither `Debug` nor `Clone`.
+/// This type deliberately implements neither `Debug`, `Clone`, nor `Copy`.
 pub struct CandidateBatch {
     candidates: Vec<CandidateTransaction>,
 }
@@ -488,6 +488,76 @@ impl From<ValidatedOutputOpenError> for WalletObservationError {
     }
 }
 
+/// One input outpoint from an independently amount-proof-validated transaction.
+///
+/// This public transaction fact intentionally implements neither `Debug`,
+/// `Clone`, nor `Copy`. It establishes no wallet ownership, chain inclusion,
+/// current unspentness, or spend authority.
+pub struct ObservedTransactionInput {
+    previous_transaction_id: [u8; 32],
+    previous_output_index: u32,
+}
+
+impl Drop for ObservedTransactionInput {
+    fn drop(&mut self) {
+        self.previous_transaction_id.zeroize();
+        self.previous_output_index.zeroize();
+        #[cfg(test)]
+        OBSERVED_TRANSACTION_INPUT_DROPS.with(|count| count.set(count.get() + 1));
+    }
+}
+
+impl ObservedTransactionInput {
+    /// Returns the consensus-order previous transaction identifier bytes.
+    pub const fn previous_transaction_id(&self) -> &[u8; 32] {
+        &self.previous_transaction_id
+    }
+
+    /// Returns the previous transaction output index.
+    pub const fn previous_output_index(&self) -> u32 {
+        self.previous_output_index
+    }
+}
+
+/// One independently amount-proof-validated candidate transaction.
+///
+/// Inputs retain exact consensus transaction order. This observation
+/// deliberately implements neither `Debug`, `Clone`, nor `Copy`, and it grants
+/// no chain ordering, wallet ownership, confirmation, UTXO, or balance-credit
+/// authority.
+pub struct ObservedWalletTransaction {
+    transaction_id: [u8; 32],
+    transaction_witness_binding: [u8; 32],
+    inputs: Vec<ObservedTransactionInput>,
+}
+
+impl Drop for ObservedWalletTransaction {
+    fn drop(&mut self) {
+        self.transaction_id.zeroize();
+        self.transaction_witness_binding.zeroize();
+        self.inputs.clear();
+        #[cfg(test)]
+        OBSERVED_WALLET_TRANSACTION_DROPS.with(|count| count.set(count.get() + 1));
+    }
+}
+
+impl ObservedWalletTransaction {
+    /// Returns the consensus-order transaction identifier bytes.
+    pub const fn transaction_id(&self) -> &[u8; 32] {
+        &self.transaction_id
+    }
+
+    /// Returns a single SHA-256 binding to the exact witness-inclusive bytes.
+    pub const fn transaction_witness_binding(&self) -> &[u8; 32] {
+        &self.transaction_witness_binding
+    }
+
+    /// Borrows inputs in exact consensus transaction order.
+    pub fn inputs(&self) -> &[ObservedTransactionInput] {
+        &self.inputs
+    }
+}
+
 /// One independently amount-proof-validated output matching the bounded public
 /// descriptor catalog.
 ///
@@ -576,10 +646,12 @@ impl ObservedOwnedOutput {
     }
 }
 
-/// An atomic deterministic batch of validated owned-output observations.
+/// An atomic deterministic batch of validated transaction and owned-output
+/// observations.
 ///
 /// This type deliberately implements neither `Debug` nor `Clone`.
 pub struct ObservedWalletBatch {
+    transactions: Vec<ObservedWalletTransaction>,
     outputs: Vec<ObservedOwnedOutput>,
 }
 
@@ -599,14 +671,21 @@ impl<'key> BorrowedSlip77<'key> {
 }
 
 impl ObservedWalletBatch {
+    /// Borrows every candidate transaction sorted by consensus-order transaction
+    /// identifier. This deterministic representation is not chain order.
+    pub fn transactions(&self) -> &[ObservedWalletTransaction] {
+        &self.transactions
+    }
+
     /// Borrows observations sorted by consensus-order transaction ID and vout.
     pub fn outputs(&self) -> &[ObservedOwnedOutput] {
         &self.outputs
     }
 
-    /// Returns whether the candidate batch contained no owned output.
+    /// Returns whether the candidate batch contained no transaction observation.
+    /// Output absence is reported separately by [`Self::outputs`].
     pub fn is_empty(&self) -> bool {
-        self.outputs.is_empty()
+        self.transactions.is_empty()
     }
 }
 
@@ -649,8 +728,10 @@ impl Drop for PreparedCandidateOrder {
 /// digests are cleared on every return or unwind path, the pinned SHA-256 state
 /// and finalization temporary are zeroized, and each scoped derived key is
 /// erased on every return path. The caller must supply a cryptographically
-/// secure random generator; exactly 32 bytes randomize the secp256k1 context
-/// before any blinding-key operation, and that seed is then erased. No
+/// secure random generator. When the batch has at least one owned output,
+/// exactly one call obtains 32 bytes to randomize the secp256k1 context before
+/// any blinding-key operation, and that seed is then erased. A batch with no
+/// owned outputs performs no random request or blinding-key derivation. No
 /// guarantee is made about compiler-made copies.
 pub fn observe_owned_outputs<R: RngCore + CryptoRng>(
     catalog: &DescriptorCatalog,
@@ -661,10 +742,11 @@ pub fn observe_owned_outputs<R: RngCore + CryptoRng>(
     let mut candidate_indices_by_id = BTreeMap::new();
     let public_validation_context = Secp256k1::new();
     let mut prepared_candidates = Vec::with_capacity(candidates.candidates.len());
+    let mut total_inputs = 0_usize;
     let mut total_owned_outputs = 0_usize;
 
     for (candidate_index, candidate) in candidates.candidates.iter().enumerate() {
-        let transaction = decode_transaction(&candidate.transaction)?;
+        let transaction = decode_candidate_transaction(&candidate.transaction)?;
         let transaction_id = Box::new(PreparedTransactionId(transaction.txid().to_byte_array()));
         if candidate_indices_by_id
             .insert(transaction_id, candidate_index)
@@ -675,12 +757,15 @@ pub fn observe_owned_outputs<R: RngCore + CryptoRng>(
 
         let previous_outputs =
             previous_outputs_for(&transaction, &candidate.previous_transactions)?;
-        validate_transaction_amount_proofs(
+        let validated = validate_transaction_amount_proofs(
             &public_validation_context,
             &transaction,
             previous_outputs,
         )?;
-        let owned_output_count = transaction
+        total_inputs =
+            checked_total_input_count(total_inputs, validated.transaction().input.len())?;
+        let owned_output_count = validated
+            .transaction()
             .output
             .iter()
             .filter(|output| {
@@ -693,7 +778,7 @@ pub fn observe_owned_outputs<R: RngCore + CryptoRng>(
             owned_output_indices: Vec::with_capacity(owned_output_count),
         };
 
-        for (output_index, output) in transaction.output.iter().enumerate() {
+        for (output_index, output) in validated.transaction().output.iter().enumerate() {
             if !catalog
                 .entries
                 .contains_key(output.script_pubkey.as_bytes())
@@ -732,35 +817,43 @@ pub fn observe_owned_outputs<R: RngCore + CryptoRng>(
         .extend(candidate_indices_by_id.into_values());
     debug_assert_eq!(candidate_order.0.len(), candidates.candidates.len());
 
-    if prepared_candidates
-        .iter()
-        .all(|candidate| candidate.owned_output_indices.is_empty())
-    {
-        return Ok(ObservedWalletBatch {
-            outputs: Vec::new(),
-        });
+    let mut secp = public_validation_context;
+    if total_owned_outputs != 0 {
+        let mut context_randomization_seed = ScopedContextRandomizationSeed([0; 32]);
+        rng.try_fill_bytes(&mut context_randomization_seed.0)
+            .map_err(|_| WalletObservationError::ContextRandomnessUnavailable)?;
+        secp.seeded_randomize(&context_randomization_seed.0);
+        drop(context_randomization_seed);
     }
 
-    let mut secp = public_validation_context;
-    let mut context_randomization_seed = ScopedContextRandomizationSeed([0; 32]);
-    rng.try_fill_bytes(&mut context_randomization_seed.0)
-        .map_err(|_| WalletObservationError::ContextRandomnessUnavailable)?;
-    secp.seeded_randomize(&context_randomization_seed.0);
-    drop(context_randomization_seed);
-
+    let mut transactions = Vec::with_capacity(candidates.candidates.len());
     let mut outputs = Vec::with_capacity(total_owned_outputs);
     for candidate_index in candidate_order.0.iter().copied() {
         let candidate = &candidates.candidates[candidate_index];
         let prepared = &prepared_candidates[candidate_index];
-        let transaction = decode_transaction(&candidate.transaction)?;
-        let transaction_id = transaction.txid();
-        let witness_binding = sha256::Hash::hash(&candidate.transaction).to_byte_array();
+        let transaction = decode_candidate_transaction(&candidate.transaction)?;
         let previous_outputs =
             previous_outputs_for(&transaction, &candidate.previous_transactions)?;
         let validated = validate_transaction_amount_proofs(&secp, &transaction, previous_outputs)?;
+        let validated_transaction = validated.transaction();
+        let transaction_id = validated_transaction.txid().to_byte_array();
+        let witness_binding = sha256::Hash::hash(&candidate.transaction).to_byte_array();
+        let mut inputs = Vec::with_capacity(validated_transaction.input.len());
+        for input in &validated_transaction.input {
+            inputs.push(ObservedTransactionInput {
+                previous_transaction_id: input.previous_output.txid.to_byte_array(),
+                previous_output_index: input.previous_output.vout,
+            });
+        }
+        debug_assert_eq!(inputs.len(), inputs.capacity());
+        let observed_transaction = ObservedWalletTransaction {
+            transaction_id,
+            transaction_witness_binding: witness_binding,
+            inputs,
+        };
 
         for output_index in prepared.owned_output_indices.iter().copied() {
-            let output = transaction
+            let output = validated_transaction
                 .output
                 .get(output_index as usize)
                 .ok_or(WalletObservationError::InvalidTransactionEncoding)?;
@@ -773,7 +866,7 @@ pub fn observe_owned_outputs<R: RngCore + CryptoRng>(
             let opened = validated.open_output(&secp, output_index as usize, &blinding_key.0)?;
             debug_assert!(outputs.len() < total_owned_outputs);
             outputs.push(ObservedOwnedOutput {
-                transaction_id: transaction_id.to_byte_array(),
+                transaction_id,
                 output_index,
                 transaction_witness_binding: witness_binding,
                 script_pubkey: entry.script_pubkey.clone(),
@@ -785,8 +878,24 @@ pub fn observe_owned_outputs<R: RngCore + CryptoRng>(
                 value: *opened.value(),
             });
         }
+        debug_assert!(transactions.len() < candidates.candidates.len());
+        transactions.push(observed_transaction);
     }
 
+    debug_assert_eq!(transactions.len(), candidates.candidates.len());
+    debug_assert_eq!(transactions.len(), transactions.capacity());
+    debug_assert_eq!(
+        transactions
+            .iter()
+            .map(|transaction| transaction.inputs.len())
+            .sum::<usize>(),
+        total_inputs
+    );
+    debug_assert!(
+        transactions
+            .windows(2)
+            .all(|pair| { pair[0].transaction_id.cmp(&pair[1].transaction_id).is_lt() })
+    );
     debug_assert_eq!(outputs.len(), total_owned_outputs);
     debug_assert!(outputs.windows(2).all(|pair| {
         pair[0]
@@ -795,7 +904,19 @@ pub fn observe_owned_outputs<R: RngCore + CryptoRng>(
             .then(pair[0].output_index.cmp(&pair[1].output_index))
             .is_le()
     }));
-    Ok(ObservedWalletBatch { outputs })
+    Ok(ObservedWalletBatch {
+        transactions,
+        outputs,
+    })
+}
+
+fn checked_total_input_count(
+    current: usize,
+    additional: usize,
+) -> Result<usize, WalletObservationError> {
+    current
+        .checked_add(additional)
+        .ok_or(WalletObservationError::BatchLimit)
 }
 
 fn derive_blinding_key(
@@ -887,6 +1008,10 @@ thread_local! {
     static CONTEXT_RANDOMIZATION_SEED_DROPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static CANDIDATE_PAYLOAD_CLONES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static OBSERVED_OWNED_OUTPUT_DROPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static OBSERVED_TRANSACTION_INPUT_DROPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static OBSERVED_WALLET_TRANSACTION_DROPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static CANDIDATE_TRANSACTION_DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PREVIOUS_TRANSACTION_DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static DERIVATION_TEST_MODE: std::cell::Cell<DerivationTestMode> = const {
         std::cell::Cell::new(DerivationTestMode::Normal)
     };
@@ -928,6 +1053,26 @@ fn observed_owned_output_drop_count() -> usize {
 }
 
 #[cfg(test)]
+fn observed_transaction_input_drop_count() -> usize {
+    OBSERVED_TRANSACTION_INPUT_DROPS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn observed_wallet_transaction_drop_count() -> usize {
+    OBSERVED_WALLET_TRANSACTION_DROPS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn candidate_transaction_decode_count() -> usize {
+    CANDIDATE_TRANSACTION_DECODES.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn previous_transaction_decode_count() -> usize {
+    PREVIOUS_TRANSACTION_DECODES.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
 #[derive(Clone, Copy)]
 enum DerivationTestMode {
     Normal,
@@ -960,13 +1105,25 @@ fn decode_transaction(bytes: &[u8]) -> Result<Transaction, WalletObservationErro
     Ok(transaction)
 }
 
+fn decode_candidate_transaction(bytes: &[u8]) -> Result<Transaction, WalletObservationError> {
+    #[cfg(test)]
+    CANDIDATE_TRANSACTION_DECODES.with(|count| count.set(count.get() + 1));
+    decode_transaction(bytes)
+}
+
+fn decode_previous_transaction(bytes: &[u8]) -> Result<Transaction, WalletObservationError> {
+    #[cfg(test)]
+    PREVIOUS_TRANSACTION_DECODES.with(|count| count.set(count.get() + 1));
+    decode_transaction(bytes)
+}
+
 fn previous_outputs_for(
     transaction: &Transaction,
     previous_transactions: &[Vec<u8>],
 ) -> Result<BTreeMap<OutPoint, TxOut>, WalletObservationError> {
     let mut previous_by_id = BTreeMap::<Txid, Transaction>::new();
     for bytes in previous_transactions {
-        let previous = decode_transaction(bytes)?;
+        let previous = decode_previous_transaction(bytes)?;
         let txid = previous.txid();
         if previous_by_id.insert(txid, previous).is_some() {
             return Err(WalletObservationError::PreviousTransactionSet);
@@ -996,9 +1153,7 @@ fn previous_outputs_for(
             .output
             .get(outpoint.vout as usize)
             .ok_or(WalletObservationError::PreviousTransactionMismatch)?;
-        if outputs.insert(outpoint, output.clone()).is_some() {
-            return Err(WalletObservationError::PreviousTransactionMismatch);
-        }
+        outputs.insert(outpoint, output.clone());
     }
     Ok(outputs)
 }
