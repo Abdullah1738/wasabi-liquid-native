@@ -454,6 +454,7 @@ name = "wasabi-liquid-native-transaction-validation"
 version = "0.1.0"
 dependencies = [
  "elements",
+ "rand",
  "wasabi-liquid-native-output-opening",
 ]
 

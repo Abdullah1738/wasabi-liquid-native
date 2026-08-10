@@ -1,9 +1,10 @@
 use super::*;
 
 use elements::confidential::{Asset, AssetBlindingFactor, Nonce, Value, ValueBlindingFactor};
+use elements::secp256k1_zkp::{PedersenCommitment, verify_commitments_sum_to_equal};
 use elements::{
-    Address, AddressParams, AssetId, LockTime, RangeProof, Script, Sequence, Transaction, TxIn,
-    TxOut, TxOutSecrets, TxOutWitness,
+    Address, AddressParams, AssetId, LockTime, RangeProof, RangeProofMessage, Script, Sequence,
+    Transaction, TxIn, TxOut, TxOutError, TxOutSecrets, TxOutWitness, VerificationError,
 };
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -718,6 +719,16 @@ fn unsupported_candidate_shapes_reject_before_returning_facts() {
 }
 
 #[test]
+fn owned_output_value_guard_requires_only_strict_positivity() {
+    assert_eq!(
+        require_positive_owned_output_value(&0),
+        Err(WalletObservationError::TransactionValidation),
+    );
+    assert_eq!(require_positive_owned_output_value(&1), Ok(()));
+    assert_eq!(require_positive_owned_output_value(&u64::MAX), Ok(()));
+}
+
+#[test]
 fn wrong_blinding_material_and_explicit_owned_outputs_fail_closed() {
     let catalog = test_catalog(1);
     let slip77 = synthetic_material(b"wallet-facts correct blinding material");
@@ -1095,6 +1106,163 @@ fn proof_failure_rejects_the_entire_candidate_batch() {
 }
 
 #[test]
+fn confidential_actual_zero_rejects_after_independent_proof_checks_without_facts() {
+    struct NoRandomnessExpected;
+
+    impl rand::RngCore for NoRandomnessExpected {
+        fn next_u32(&mut self) -> u32 {
+            unreachable!("first-pass validation failure must precede randomness")
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            unreachable!("first-pass validation failure must precede randomness")
+        }
+
+        fn fill_bytes(&mut self, _: &mut [u8]) {
+            unreachable!("first-pass validation failure must precede randomness")
+        }
+
+        fn try_fill_bytes(&mut self, _: &mut [u8]) -> Result<(), rand::Error> {
+            unreachable!("first-pass validation failure must precede randomness")
+        }
+    }
+
+    impl rand::CryptoRng for NoRandomnessExpected {}
+
+    let catalog = test_catalog(1);
+    let slip77 = synthetic_material(b"wallet-facts confidential zero material");
+    let valid = confidential_fixture(&catalog, &slip77);
+    let zero = confidential_actual_zero_fixture(&catalog, &slip77);
+    let previous: Transaction = deserialize(&zero.previous_transaction_bytes).unwrap();
+    let zero_output = &zero.transaction.output[0];
+    let secp = Secp256k1::new();
+    let entry = catalog_entry(&catalog, DescriptorBranch::External, 0);
+    let blinding_key = derived_blinding_key(entry, &slip77);
+    assert_eq!(zero_output.script_pubkey.as_bytes(), &entry.script_pubkey);
+    assert!(zero_output.script_pubkey.is_v0_p2wpkh());
+    assert!(zero_output.asset.is_confidential());
+    assert!(zero_output.value.is_confidential());
+    assert!(zero_output.nonce.is_confidential());
+    let opened = zero_output
+        .unblind_with_key(&secp, &blinding_key.0)
+        .unwrap();
+    assert_eq!(opened.value, 0);
+
+    let asset_generator = zero_output.asset.into_asset_gen(&secp).unwrap();
+    let public_range = zero_output
+        .witness
+        .rangeproof
+        .as_ref()
+        .unwrap()
+        .verify_inclusive(
+            &secp,
+            zero_output.value.commitment().unwrap(),
+            zero_output.script_pubkey.as_bytes(),
+            asset_generator,
+        )
+        .unwrap();
+    assert_eq!(*public_range.start(), 0);
+    assert!(public_range.contains(&0));
+
+    let surjection_domain = previous
+        .output
+        .iter()
+        .map(|output| output.asset.into_asset_gen(&secp).unwrap())
+        .collect::<Vec<_>>();
+    assert!(
+        zero_output
+            .witness
+            .surjection_proof
+            .as_ref()
+            .unwrap()
+            .verify(&secp, asset_generator, &surjection_domain,)
+    );
+    let balancing_output = &zero.transaction.output[1];
+    let balancing_asset_generator = balancing_output.asset.into_asset_gen(&secp).unwrap();
+    let balancing_range = balancing_output
+        .witness
+        .rangeproof
+        .as_ref()
+        .unwrap()
+        .verify_inclusive(
+            &secp,
+            balancing_output.value.commitment().unwrap(),
+            balancing_output.script_pubkey.as_bytes(),
+            balancing_asset_generator,
+        )
+        .unwrap();
+    assert_eq!(*balancing_range.start(), 1);
+    assert!(balancing_range.contains(&900));
+    assert!(
+        balancing_output
+            .witness
+            .surjection_proof
+            .as_ref()
+            .unwrap()
+            .verify(&secp, balancing_asset_generator, &surjection_domain,)
+    );
+
+    let input_commitments = previous
+        .output
+        .iter()
+        .map(|output| output_value_commitment(&secp, output))
+        .collect::<Vec<_>>();
+    let output_commitments = zero
+        .transaction
+        .output
+        .iter()
+        .map(|output| output_value_commitment(&secp, output))
+        .collect::<Vec<_>>();
+    assert!(verify_commitments_sum_to_equal(
+        &secp,
+        &input_commitments,
+        &output_commitments,
+    ));
+    assert_eq!(
+        zero.transaction
+            .verify_tx_amt_proofs(&secp, &previous.output),
+        Err(VerificationError::TxOutError(
+            0,
+            TxOutError::NonUnspendableZeroValue,
+        )),
+    );
+
+    let candidates = CandidateBatch::new(&[valid.borrowed(), zero.borrowed()]).unwrap();
+    let derivations_before = derivation_call_count();
+    let prepared_drops_before = prepared_candidate_drop_count();
+    let randomization_drops_before = context_randomization_seed_drop_count();
+    let fact_drops_before = (
+        observed_transaction_input_drop_count(),
+        observed_wallet_transaction_drop_count(),
+        observed_owned_output_drop_count(),
+    );
+    let mut rng = NoRandomnessExpected;
+    assert!(matches!(
+        super::observe_owned_outputs(
+            &catalog,
+            BorrowedSlip77::new(&slip77),
+            &candidates,
+            &mut rng,
+        ),
+        Err(WalletObservationError::TransactionValidation)
+    ));
+    assert_eq!(derivation_call_count(), derivations_before);
+    assert_eq!(prepared_candidate_drop_count() - prepared_drops_before, 1);
+    assert_eq!(
+        context_randomization_seed_drop_count(),
+        randomization_drops_before,
+    );
+    assert_eq!(
+        (
+            observed_transaction_input_drop_count(),
+            observed_wallet_transaction_drop_count(),
+            observed_owned_output_drop_count(),
+        ),
+        fact_drops_before,
+    );
+}
+
+#[test]
 fn previous_transaction_sets_and_duplicate_candidates_are_exact() {
     let catalog = test_catalog(1);
     let slip77 = synthetic_material(b"wallet-facts correct blinding material");
@@ -1301,6 +1469,21 @@ impl ConfidentialFixture {
     }
 }
 
+struct ConfidentialActualZeroFixture {
+    transaction: Transaction,
+    transaction_bytes: Vec<u8>,
+    previous_transaction_bytes: Vec<u8>,
+}
+
+impl ConfidentialActualZeroFixture {
+    fn borrowed(&self) -> BorrowedCandidateTransaction<'_> {
+        BorrowedCandidateTransaction::new(
+            &self.transaction_bytes,
+            std::slice::from_ref(&self.previous_transaction_bytes),
+        )
+    }
+}
+
 fn test_catalog(last_index: u32) -> DescriptorCatalog {
     DescriptorCatalog::derive(TEST_PUBLIC_DESCRIPTOR, DescriptorNetwork::Test, last_index).unwrap()
 }
@@ -1438,6 +1621,143 @@ fn confidential_fixture_with_second_blinder_and_input_order(
         transaction,
         first_asset,
         second_asset,
+    }
+}
+
+fn confidential_actual_zero_fixture(
+    catalog: &DescriptorCatalog,
+    slip77: &[u8; 32],
+) -> ConfidentialActualZeroFixture {
+    let asset = AssetId::LIQUIDTESTNET_BTC;
+    let previous = Transaction {
+        version: 2,
+        lock_time: LockTime::ZERO,
+        input: vec![],
+        output: vec![explicit_output(asset, 1_000, Script::from(vec![0x51]))],
+    };
+    let spent_secrets = [TxOutSecrets::new(
+        asset,
+        AssetBlindingFactor::zero(),
+        1_000,
+        ValueBlindingFactor::zero(),
+    )];
+    let secp = Secp256k1::new();
+    let entry = catalog_entry(catalog, DescriptorBranch::External, 0);
+    let owned_blinding_key = derived_blinding_key(entry, slip77);
+    let mut rng = StdRng::from_seed(synthetic_material(
+        b"wallet-facts confidential actual zero fixture randomness",
+    ));
+    let zero_abf = AssetBlindingFactor::new(&mut rng);
+    let zero_vbf = ValueBlindingFactor::new(&mut rng);
+    let zero_secrets = TxOutSecrets::new(asset, zero_abf, 0, zero_vbf);
+    let fee_secrets = TxOutSecrets::new(
+        asset,
+        AssetBlindingFactor::zero(),
+        100,
+        ValueBlindingFactor::zero(),
+    );
+    let balancing_abf = AssetBlindingFactor::new(&mut rng);
+    let balancing_vbf = ValueBlindingFactor::last(
+        &secp,
+        900,
+        balancing_abf,
+        &[spent_secrets[0].value_blind_inputs()],
+        &[
+            zero_secrets.value_blind_inputs(),
+            fee_secrets.value_blind_inputs(),
+        ],
+    );
+    let balancing_secrets = TxOutSecrets::new(asset, balancing_abf, 900, balancing_vbf);
+    let zero_output = confidential_output_with_range_minimum(
+        &mut rng,
+        &secp,
+        Script::from(entry.script_pubkey.clone()),
+        owned_blinding_key.0.public_key(&secp),
+        zero_secrets,
+        &spent_secrets,
+        0,
+    );
+    let balancing_receiver = SecretKey::new(&mut rng);
+    let balancing_output = confidential_output_with_range_minimum(
+        &mut rng,
+        &secp,
+        Script::from(vec![0x51]),
+        balancing_receiver.public_key(&secp),
+        balancing_secrets,
+        &spent_secrets,
+        1,
+    );
+    let transaction = Transaction {
+        version: 2,
+        lock_time: LockTime::from_consensus(7),
+        input: vec![input(OutPoint::new(previous.txid(), 0))],
+        output: vec![zero_output, balancing_output, TxOut::new_fee(100, asset)],
+    };
+
+    ConfidentialActualZeroFixture {
+        transaction_bytes: serialize(&transaction),
+        previous_transaction_bytes: serialize(&previous),
+        transaction,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn confidential_output_with_range_minimum(
+    rng: &mut StdRng,
+    secp: &Secp256k1<elements::secp256k1_zkp::All>,
+    script_pubkey: Script,
+    receiver_blinding_public_key: elements::secp256k1_zkp::PublicKey,
+    secrets: TxOutSecrets,
+    spent_secrets: &[TxOutSecrets],
+    range_minimum: u64,
+) -> TxOut {
+    let (asset, surjection_proof) = Asset::Explicit(secrets.asset)
+        .blind(rng, secp, secrets.asset_bf, spent_secrets)
+        .unwrap();
+    let message = RangeProofMessage::new(secrets.asset, secrets.asset_bf);
+    let asset_generator = message.commitment(secp);
+    let value = Value::new_confidential(secp, secrets.value, asset_generator, secrets.value_bf);
+    let value_commitment = value.commitment().unwrap();
+    let (nonce, shared_secret) = Nonce::new_confidential(rng, secp, &receiver_blinding_public_key);
+    let rangeproof = RangeProof::new(
+        secp,
+        range_minimum,
+        value_commitment,
+        secrets.value,
+        secrets.value_bf.into_inner(),
+        &message.to_byte_array(),
+        script_pubkey.as_bytes(),
+        shared_secret,
+        0,
+        52,
+        asset_generator,
+    )
+    .unwrap();
+
+    TxOut {
+        asset,
+        value,
+        nonce,
+        script_pubkey,
+        witness: TxOutWitness {
+            surjection_proof,
+            rangeproof,
+        },
+    }
+}
+
+fn output_value_commitment(
+    secp: &Secp256k1<elements::secp256k1_zkp::All>,
+    output: &TxOut,
+) -> PedersenCommitment {
+    match output.value {
+        Value::Explicit(value) => PedersenCommitment::new_unblinded(
+            secp,
+            value,
+            output.asset.into_asset_gen(secp).unwrap(),
+        ),
+        Value::Confidential(commitment) => commitment,
+        Value::Null => unreachable!("the fixture has no null output values"),
     }
 }
 

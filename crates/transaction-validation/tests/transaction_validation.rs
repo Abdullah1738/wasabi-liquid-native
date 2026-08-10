@@ -1,11 +1,14 @@
 use std::collections::BTreeMap;
 
 use elements::confidential::{Asset, AssetBlindingFactor, Nonce, Value, ValueBlindingFactor};
-use elements::secp256k1_zkp::{Secp256k1, SecretKey, rand::thread_rng};
+use elements::secp256k1_zkp::{
+    PedersenCommitment, Secp256k1, SecretKey, verify_commitments_sum_to_equal,
+};
 use elements::{
     AssetId, LockTime, OutPoint, RangeProof, Script, Sequence, SurjectionProof, Transaction, TxIn,
-    TxOut, TxOutSecrets, TxOutWitness, Txid,
+    TxOut, TxOutError, TxOutSecrets, TxOutWitness, Txid, VerificationError,
 };
+use rand::{SeedableRng, rngs::StdRng};
 use wasabi_liquid_native_transaction_validation::{
     TransactionValidationError, ValidatedOutputOpenError, validate_transaction_amount_proofs,
 };
@@ -48,7 +51,7 @@ fn validates_explicit_amounts_and_binds_previous_outpoint() {
 
 #[test]
 fn validates_confidential_output_before_opening_it() {
-    let mut rng = thread_rng();
+    let mut rng = test_rng();
     let secp = Secp256k1::new();
     let outpoint = OutPoint::new(Txid::from_byte_array([0x41; 32]), 0);
     let asset = AssetId::LIQUIDTESTNET_BTC;
@@ -95,7 +98,7 @@ fn validates_confidential_output_before_opening_it() {
 
 #[test]
 fn rejects_missing_proof_and_unbalanced_amounts() {
-    let mut rng = thread_rng();
+    let mut rng = test_rng();
     let secp = Secp256k1::new();
     let outpoint = OutPoint::new(Txid::from_byte_array([0x51; 32]), 1);
     let asset = AssetId::LIQUIDTESTNET_BTC;
@@ -320,6 +323,120 @@ fn accepts_only_provably_unspendable_explicit_zero_outputs() {
         ),
         Err(TransactionValidationError::InvalidAmount)
     ));
+}
+
+#[test]
+fn maps_spendable_confidential_zero_start_to_invalid_amount() {
+    let mut rng = test_rng();
+    let secp = Secp256k1::new();
+    let asset = AssetId::LIQUIDTESTNET_BTC;
+    let outpoint = OutPoint::new(Txid::from_byte_array([0xa1; 32]), 0);
+    let zero_vbf = ValueBlindingFactor::new(&mut rng);
+    let zero_output = confidential_value_output(
+        &mut rng,
+        &secp,
+        asset,
+        0,
+        zero_vbf,
+        Script::from(vec![0x51]),
+        0,
+        52,
+    );
+    let balancing_output = confidential_value_output(
+        &mut rng,
+        &secp,
+        asset,
+        900,
+        -zero_vbf,
+        Script::from(vec![0x51]),
+        1,
+        52,
+    );
+    let transaction = transaction(
+        outpoint,
+        vec![zero_output, balancing_output, TxOut::new_fee(100, asset)],
+    );
+    let spent_output = explicit_output(asset, 1_000);
+    let asset_generator = spent_output.asset.into_asset_gen(&secp).unwrap();
+    let input_commitment = PedersenCommitment::new_unblinded(&secp, 1_000, asset_generator);
+    let output_commitments = transaction
+        .output
+        .iter()
+        .map(|output| match output.value {
+            Value::Confidential(commitment) => commitment,
+            Value::Explicit(value) => {
+                PedersenCommitment::new_unblinded(&secp, value, asset_generator)
+            }
+            Value::Null => unreachable!("the regression transaction has no null values"),
+        })
+        .collect::<Vec<_>>();
+    assert!(verify_commitments_sum_to_equal(
+        &secp,
+        &[input_commitment],
+        &output_commitments,
+    ));
+    assert_eq!(
+        transaction.verify_tx_amt_proofs(&secp, std::slice::from_ref(&spent_output)),
+        Err(VerificationError::TxOutError(
+            0,
+            TxOutError::NonUnspendableZeroValue,
+        )),
+    );
+    assert_eq!(
+        validate_transaction_amount_proofs(
+            &secp,
+            &transaction,
+            previous_output_map([(outpoint, spent_output)]),
+        )
+        .err(),
+        Some(TransactionValidationError::InvalidAmount),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn confidential_value_output(
+    rng: &mut StdRng,
+    secp: &Secp256k1<elements::secp256k1_zkp::All>,
+    asset: AssetId,
+    value: u64,
+    value_blinding_factor: ValueBlindingFactor,
+    script_pubkey: Script,
+    range_minimum: u64,
+    minimum_private_bits: u8,
+) -> TxOut {
+    let asset_generator = Asset::Explicit(asset).into_asset_gen(secp).unwrap();
+    let confidential_value =
+        Value::new_confidential(secp, value, asset_generator, value_blinding_factor);
+    let value_commitment = confidential_value.commitment().unwrap();
+    let rangeproof = RangeProof::new(
+        secp,
+        range_minimum,
+        value_commitment,
+        value,
+        value_blinding_factor.into_inner(),
+        &[],
+        script_pubkey.as_bytes(),
+        SecretKey::new(rng),
+        0,
+        minimum_private_bits,
+        asset_generator,
+    )
+    .unwrap();
+
+    TxOut {
+        asset: Asset::Explicit(asset),
+        value: confidential_value,
+        nonce: Nonce::Null,
+        script_pubkey,
+        witness: TxOutWitness {
+            surjection_proof: SurjectionProof::EMPTY,
+            rangeproof,
+        },
+    }
+}
+
+fn test_rng() -> StdRng {
+    StdRng::from_seed([0x5a; 32])
 }
 
 fn explicit_output(asset: AssetId, value: u64) -> TxOut {

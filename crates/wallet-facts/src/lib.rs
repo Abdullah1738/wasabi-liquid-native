@@ -640,7 +640,7 @@ impl ObservedOwnedOutput {
         &self.asset_id
     }
 
-    /// Returns the asset amount in its indivisible unit.
+    /// Returns the strictly positive asset amount in its indivisible unit.
     pub const fn value(&self) -> u64 {
         self.value
     }
@@ -864,6 +864,7 @@ pub fn observe_owned_outputs<R: RngCore + CryptoRng>(
             let blinding_key = derive_blinding_key(slip77_master_key.bytes, &entry.script_pubkey)?;
             let blinding_public_key = blinding_key.0.public_key(&secp).serialize();
             let opened = validated.open_output(&secp, output_index as usize, &blinding_key.0)?;
+            require_positive_owned_output_value(opened.value())?;
             debug_assert!(outputs.len() < total_owned_outputs);
             outputs.push(ObservedOwnedOutput {
                 transaction_id,
@@ -908,6 +909,14 @@ pub fn observe_owned_outputs<R: RngCore + CryptoRng>(
         transactions,
         outputs,
     })
+}
+
+fn require_positive_owned_output_value(value: &u64) -> Result<(), WalletObservationError> {
+    if *value == 0 {
+        Err(WalletObservationError::TransactionValidation)
+    } else {
+        Ok(())
+    }
 }
 
 fn checked_total_input_count(
