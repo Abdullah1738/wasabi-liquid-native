@@ -90,7 +90,9 @@ fn is_llvm_anonymous_data_symbol(symbol_type: char, name: &str) -> bool {
 }
 
 fn is_permitted_defined_global(symbol_type: char, name: &str) -> bool {
-    rustc_demangle::try_demangle(name).is_ok() || is_llvm_anonymous_data_symbol(symbol_type, name)
+    rustc_demangle::try_demangle(name).is_ok()
+        || is_llvm_anonymous_data_symbol(symbol_type, name)
+        || (symbol_type == 'V' && name == "DW.ref.rust_eh_personality")
 }
 
 fn rejected_lines(input: &str) -> Vec<String> {
@@ -135,6 +137,7 @@ fn self_test() -> Result<(), String> {
          0000000000000000 R anon.f99fed1169e43e329df3b547af841277.0.llvm.4185876869160636025\n\
          0000000000000000 D anon.0123456789abcdef0123456789abcdef.4.llvm.7\n\
          0000000000000000 S _anon.0123456789abcdef0123456789abcdef.4.llvm.7\n\
+         0000000000000000 V DW.ref.rust_eh_personality\n\
                           U plain_undefined_symbol\n\
          archive.rlib(member.o): w weak_undefined_symbol\n\
          archive.rlib(member.o): v weak_undefined_object\n",
@@ -154,6 +157,9 @@ fn self_test() -> Result<(), String> {
         "0000000000000000 N plain_debug_export\n",
         "0000000000000000 P plain_unwind_export\n",
         "0000000000000000 S plain_data_export\n",
+        "0000000000000000 T DW.ref.rust_eh_personality\n",
+        "0000000000000000 D DW.ref.rust_eh_personality\n",
+        "0000000000000000 V DW.ref.rust_eh_personality.extra\n",
         "0000000000000000 T wallet_facts_export\n",
         "0000000000000000 T _ZNwallet_facts_export\n",
         "0000000000000000 T _Rwallet_facts_export\n",
