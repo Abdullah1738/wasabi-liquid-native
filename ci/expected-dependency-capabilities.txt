@@ -38,4 +38,5 @@ wasabi-liquid-native-ordinary-pset v0.1.0 (workspace)|
 wasabi-liquid-native-output-opening v0.1.0 (workspace)|
 wasabi-liquid-native-transaction-validation v0.1.0 (workspace)|
 wasabi-liquid-native-wallet-facts v0.1.0 (workspace)|
+wasabi-liquid-native-wallet-facts-wire v0.1.0 (workspace)|
 zeroize v1.9.0|

@@ -58,6 +58,7 @@ BEGIN {
     sha2 = 0
     zkp = 0
     zkp_sys = 0
+    wire = 0
 
     digest_prefix = "digest v0.11.3 (https://github.com/liquid-wasabi/traits.git?rev=113c5ba12876e332335e49d1462a2c96c9928006#"
     elements_prefix = "elements v0.27.0 (https://github.com/liquid-wasabi/rust-elements.git?rev=d1f8850a046487cb27c911d5c6e71851b2a989fd#"
@@ -146,9 +147,16 @@ $1 ~ /^sha2 v/ {
     }
 }
 
+$1 ~ /^wasabi-liquid-native-wallet-facts-wire v/ {
+    wire++
+    if ($1 != "wasabi-liquid-native-wallet-facts-wire v0.1.0 (workspace)" || $2 != "") {
+        reject("unexpected wallet-facts wire capability: " $0)
+    }
+}
+
 END {
     if (bitcoin != 1 || digest != 1 || elements != 1 || miniscript != 1 ||
-        rand_count != 1 || secp != 1 || sha2 != 1 || zkp != 1 || zkp_sys != 1) {
+        rand_count != 1 || secp != 1 || sha2 != 1 || zkp != 1 || zkp_sys != 1 || wire != 1) {
         reject("required dependency capability count mismatch")
     }
     exit failed
@@ -156,3 +164,288 @@ END {
 
 printf '%s\n' "$tree" | diff -u ci/expected-dependency-capabilities.txt -
 printf '%s\n' "$edges" | diff -u ci/expected-dependency-edges.txt -
+
+wire_sources="crates/wallet-facts-wire/src/lib.rs crates/wallet-facts-wire/src/request.rs crates/wallet-facts-wire/src/response.rs crates/wallet-facts-wire/src/reader.rs crates/wallet-facts-wire/src/writer.rs"
+if grep -En 'use (elements|secp256k1|sha2|bitcoin_hashes)(::|[[:space:]])|SecretKey|HashMap|HashSet|\.sort\(|\.sort_by\(|rand::|getrandom|no_mangle|export_name|extern[[:space:]]+"C"' $wire_sources; then
+    echo "wallet-facts wire source capability escaped its reviewed boundary" >&2
+    exit 1
+fi
+if [ "$(grep -h -c 'sort_unstable_by(|left, right| left.bytes.cmp(&right.bytes))' $wire_sources | awk '{ total += $1 } END { print total + 0 }')" -ne 1 ]; then
+    echo "wallet-facts wire uniqueness call manifest mismatch" >&2
+    exit 1
+fi
+if [ "$(grep -h -c 'validates_observed_public_output(' $wire_sources | awk '{ total += $1 } END { print total + 0 }')" -ne 2 ]; then
+    echo "wallet-facts wire public-output validation call manifest mismatch" >&2
+    exit 1
+fi
+if ! grep -Fq 'crate-type = ["rlib"]' crates/wallet-facts-wire/Cargo.toml ||
+    grep -Fq 'cdylib' crates/wallet-facts-wire/Cargo.toml; then
+    echo "wallet-facts wire crate type mismatch" >&2
+    exit 1
+fi
+
+helper_source="$(
+    awk '
+        /^pub fn validates_observed_public_output/ { capture = 1 }
+        /^\/\/\/ The public derivation branch/ { capture = 0 }
+        capture { print }
+    ' crates/wallet-facts/src/lib.rs
+)"
+if printf '%s\n' "$helper_source" | grep -En 'Vec|Box|format!|SecretKey|Transaction|Pset|rand|std::|unwrap|expect|panic!'; then
+    echo "wallet-facts public-output helper call manifest escaped its reviewed boundary" >&2
+    exit 1
+fi
+helper_source_hash="$(
+    printf '%s\n' "$helper_source" |
+        python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'
+)"
+if [ "$helper_source_hash" != "c9154cfc0437b6563964de67e68ed5157f33570e3ea3c6b8618bd253ceba0ed9" ]; then
+    echo "wallet-facts public-output helper source hash mismatch" >&2
+    exit 1
+fi
+for required_call in \
+    'PublicKey::from_slice(spend_public_key)' \
+    'PublicKey::from_slice(blinding_public_key)' \
+    'hash160::Hash::hash(spend_public_key)'
+do
+    if ! printf '%s\n' "$helper_source" | grep -Fq "$required_call"; then
+        echo "wallet-facts public-output helper call manifest mismatch" >&2
+        exit 1
+    fi
+done
+
+uniqueness_source="$(
+    awk '
+        /^fn validate_source_uniqueness/ { capture = 1 }
+        /^fn validate_output/ { capture = 0 }
+        /^fn validate_response_uniqueness/ { capture = 1 }
+        /^fn construct_response/ { capture = 0 }
+        capture { print }
+    ' crates/wallet-facts-wire/src/response.rs
+)"
+for required_line in \
+    'Vec::with_capacity(inputs.len())' \
+    'Vec::with_capacity(input_count)' \
+    'for input in inputs' \
+    'scratch.0.push(ScopedWireOutPoint::new(input))' \
+    'scratch.0.push(ScopedWireOutPoint::new_parts(' \
+    '.sort_unstable_by(|left, right| left.bytes.cmp(&right.bytes))' \
+    '.windows(2)' \
+    '.any(|pair| pair[0].bytes == pair[1].bytes)'
+do
+    if [ "$(printf '%s\n' "$uniqueness_source" | grep -F -c "$required_line")" -ne 1 ]; then
+        echo "wallet-facts wire uniqueness source manifest mismatch" >&2
+        exit 1
+    fi
+done
+uniqueness_source_hash="$(
+    printf '%s\n' "$uniqueness_source" |
+        python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'
+)"
+if [ "$uniqueness_source_hash" != "953e88c1fa78a5b83b85874b9c1e6a1706324595ec05a0167987ca69fe47f2ff" ]; then
+    echo "wallet-facts wire uniqueness source hash mismatch" >&2
+    exit 1
+fi
+if printf '%s\n' "$uniqueness_source" | grep -En 'HashMap|HashSet|Vec::new|vec!|Vec::from|VecDeque|LinkedList|BTree|Box|String|collect|to_vec|reserve|resize|\.sort\(|\.sort_by\(|sort_by_key|sort_unstable_by_key|slice::sort|while[[:space:]]|loop[[:space:]]*\{|enumerate|position|binary_search|dedup|\.find\(|\.filter\(|\.fold\(|\.all\(|\.chunks\('; then
+    echo "wallet-facts wire uniqueness source manifest escaped its reviewed path" >&2
+    exit 1
+fi
+
+if ! compiler_cargo_bin="$(command -v cargo)"; then
+    echo "wallet-facts compiler and artifact gates require Cargo 1.96.0" >&2
+    exit 1
+fi
+cargo_version="$("$compiler_cargo_bin" --version 2>/dev/null)"
+case "$cargo_version" in
+    cargo\ *)
+        case "$cargo_version" in
+            cargo\ 1.96.0\ *) ;;
+            *)
+                echo "wallet-facts compiler call manifests require Cargo 1.96.0" >&2
+                exit 1
+                ;;
+        esac
+        rustc_version="$(
+            "$compiler_cargo_bin" rustc \
+                --quiet \
+                -p wasabi-liquid-native-wallet-facts-wire \
+                --lib \
+                --locked \
+                --offline \
+                -- \
+                --version 2>/dev/null
+        )"
+        case "$rustc_version" in
+            rustc\ 1.96.0\ *) ;;
+            *)
+                echo "wallet-facts compiler call manifests require Rust 1.96.0" >&2
+                exit 1
+                ;;
+        esac
+        "$compiler_cargo_bin" rustc \
+            --quiet \
+            -p wasabi-liquid-native-wallet-facts \
+            --lib \
+            --release \
+            --locked \
+            --offline \
+            -- \
+            --emit=mir \
+            -o "$scratch/wallet-facts.mir"
+        helper_mir_file="$(find "$scratch" -maxdepth 1 -name 'wallet-facts-*.mir' -print | head -1)"
+        if [ -z "$helper_mir_file" ]; then
+            echo "wallet-facts helper MIR was not produced" >&2
+            exit 1
+        fi
+        helper_mir="$(
+            awk '
+                /^fn validates_observed_public_output/ { capture = 1 }
+                capture { print }
+                capture && /^}/ { exit }
+            ' "$helper_mir_file"
+        )"
+        if printf '%s\n' "$helper_mir" | grep -En 'alloc::alloc|exchange_malloc|RawVec|Vec<|Box<|String|begin_panic|panic_|assert\('; then
+            echo "wallet-facts public-output helper MIR escaped its nonallocating call manifest" >&2
+            exit 1
+        fi
+        if [ "$(printf '%s\n' "$helper_mir" | grep -F -c 'secp256k1_ec_pubkey_parse')" -ne 2 ] ||
+            [ "$(printf '%s\n' "$helper_mir" | grep -F -c 'Hash160::hash')" -ne 1 ] ||
+            [ "$(printf '%s\n' "$helper_mir" | grep -F -c 'raw_eq::<[u8; 20]>')" -ne 1 ] ||
+            [ "$(printf '%s\n' "$helper_mir" | awk '/ -> \[return:/ { count++ } END { print count + 0 }')" -ne 4 ]; then
+            echo "wallet-facts public-output helper compiler call manifest mismatch" >&2
+            exit 1
+        fi
+
+        "$compiler_cargo_bin" rustc \
+            --quiet \
+            -p wasabi-liquid-native-wallet-facts-wire \
+            --lib \
+            --locked \
+            --offline \
+            -- \
+            -C opt-level=0 \
+            --emit=mir="$scratch/wallet-facts-wire.mir"
+        if [ ! -f "$scratch/wallet-facts-wire.mir" ]; then
+            echo "wallet-facts wire MIR was not produced" >&2
+            exit 1
+        fi
+        input_uniqueness_mir="$(
+            awk '
+                /^fn validate_inputs_unique/ { capture = 1 }
+                capture { print }
+                capture && /^}/ { exit }
+            ' "$scratch/wallet-facts-wire.mir"
+        )"
+        scratch_uniqueness_mir="$(
+            awk '
+                /^fn scratch_is_unique/ { capture = 1 }
+                capture { print }
+                capture && /^}/ { exit }
+            ' "$scratch/wallet-facts-wire.mir"
+        )"
+        decoder_uniqueness_mir="$(
+            awk '
+                /^fn validate_response_uniqueness/ { capture = 1 }
+                capture { print }
+                capture && /^}/ { exit }
+            ' "$scratch/wallet-facts-wire.mir"
+        )"
+        for required_call in \
+            'Vec::<ScopedWireOutPoint>::with_capacity' \
+            'Vec::<ScopedWireOutPoint>::push' \
+            'ScopedWireOutPoint::new::<T>' \
+            'scratch_is_unique'
+        do
+            if [ "$(printf '%s\n' "$input_uniqueness_mir" | grep -F -c "$required_call")" -ne 1 ]; then
+                echo "wallet-facts input uniqueness compiler call manifest mismatch" >&2
+                exit 1
+            fi
+        done
+        for required_call in \
+            'sort_unstable_by::<' \
+            '>::windows' \
+            ' as Iterator>::any::<'
+        do
+            if [ "$(printf '%s\n' "$scratch_uniqueness_mir" | grep -F -c "$required_call")" -ne 1 ]; then
+                echo "wallet-facts scratch uniqueness compiler call manifest mismatch" >&2
+                exit 1
+            fi
+        done
+        for required_call in \
+            'Vec::<ScopedWireOutPoint>::with_capacity' \
+            'Vec::<ScopedWireOutPoint>::push' \
+            'ScopedWireOutPoint::new_parts' \
+            'scratch_is_unique' \
+            'checked_multiply'
+        do
+            if [ "$(printf '%s\n' "$decoder_uniqueness_mir" | grep -F -c "$required_call")" -ne 1 ]; then
+                echo "wallet-facts decoder uniqueness compiler call manifest mismatch" >&2
+                exit 1
+            fi
+        done
+        uniqueness_mir="$input_uniqueness_mir
+$scratch_uniqueness_mir
+$decoder_uniqueness_mir"
+        if printf '%s\n' "$uniqueness_mir" | grep -En 'RawVec|alloc::alloc|exchange_malloc|VecDeque|LinkedList|BTree|HashMap|HashSet|Vec::<ScopedWireOutPoint>::(reserve|resize|extend|from)|sort_by_key|sort_unstable_by_key|slice::<.*>::sort::<|binary_search|dedup|\.chunks\('; then
+            echo "wallet-facts uniqueness compiler call manifest escaped its reviewed path" >&2
+            exit 1
+        fi
+
+        "$compiler_cargo_bin" build \
+            --quiet \
+            -p wasabi-liquid-native-wallet-facts-wire \
+            --lib \
+            --release \
+            --locked \
+            --offline
+        target_directory="$(
+            python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["target_directory"])' \
+                "$scratch/metadata.json"
+        )"
+        wire_archive="$target_directory/release/libwasabi_liquid_native_wallet_facts_wire.rlib"
+        if [ ! -f "$wire_archive" ]; then
+            echo "wallet-facts wire release archive is missing" >&2
+            exit 1
+        fi
+        if ! command -v ar >/dev/null 2>&1 || ! command -v nm >/dev/null 2>&1; then
+            echo "archive or symbol inspection tool is unavailable" >&2
+            exit 1
+        fi
+        ar t "$wire_archive" >"$scratch/wallet-facts-wire.archive"
+        if ! grep -Eq '\.o$' "$scratch/wallet-facts-wire.archive"; then
+            echo "wallet-facts wire release archive has no object members" >&2
+            exit 1
+        fi
+        nm -g "$wire_archive" >"$scratch/wallet-facts-wire.symbols" 2>"$scratch/wallet-facts-wire.nm-stderr"
+        unmangled_symbols="$(
+            awk '
+                NF >= 3 && $2 ~ /^[TWDBR]$/ &&
+                    $3 !~ /^__?ZN/ && $3 !~ /^_?_R/ { print }
+            ' "$scratch/wallet-facts-wire.symbols"
+        )"
+        if [ -n "$unmangled_symbols" ]; then
+            printf '%s\n' "$unmangled_symbols" >&2
+            echo "wallet-facts wire release archive exposes an unmangled global symbol" >&2
+            exit 1
+        fi
+        if ! dynamic_artifacts="$(
+            find "$target_directory/release" "$target_directory/debug" -type f \
+                \( -name 'libwasabi_liquid_native_wallet_facts_wire*.dylib' \
+                -o -name 'libwasabi_liquid_native_wallet_facts_wire*.so' \
+                -o -name 'wasabi_liquid_native_wallet_facts_wire*.dll' \) \
+                -print
+        )"; then
+            echo "wallet-facts wire dynamic-library artifact inspection failed" >&2
+            exit 1
+        fi
+        if [ -n "$dynamic_artifacts" ]; then
+            printf '%s\n' "$dynamic_artifacts" >&2
+            echo "wallet-facts wire dynamic-library artifact is forbidden" >&2
+            exit 1
+        fi
+        ;;
+    *)
+        echo "wallet-facts compiler and artifact gates require Cargo 1.96.0" >&2
+        exit 1
+        ;;
+esac

@@ -1,0 +1,18 @@
+[package]
+name = "wasabi-liquid-native-wallet-facts-wire"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT"
+publish = false
+description = "Canonical export-free wallet-facts request and response codec"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+wasabi-liquid-native-wallet-facts = { path = "../wallet-facts" }
+zeroize = { version = "1.8", default-features = false }
+
+[dev-dependencies]
+static_assertions = "1.1"

@@ -68,3 +68,5 @@ wasabi-liquid-native-wallet-facts v0.1.0 (workspace:crates/wallet-facts)|miniscr
 wasabi-liquid-native-wallet-facts v0.1.0 (workspace:crates/wallet-facts)|sha2|normal|all|sha2 v0.11.0 (registry+https://github.com/rust-lang/crates.io-index)
 wasabi-liquid-native-wallet-facts v0.1.0 (workspace:crates/wallet-facts)|wasabi_liquid_native_transaction_validation|normal|all|wasabi-liquid-native-transaction-validation v0.1.0 (workspace:crates/transaction-validation)
 wasabi-liquid-native-wallet-facts v0.1.0 (workspace:crates/wallet-facts)|zeroize|normal|all|zeroize v1.9.0 (registry+https://github.com/rust-lang/crates.io-index)
+wasabi-liquid-native-wallet-facts-wire v0.1.0 (workspace:crates/wallet-facts-wire)|wasabi_liquid_native_wallet_facts|normal|all|wasabi-liquid-native-wallet-facts v0.1.0 (workspace:crates/wallet-facts)
+wasabi-liquid-native-wallet-facts-wire v0.1.0 (workspace:crates/wallet-facts-wire)|zeroize|normal|all|zeroize v1.9.0 (registry+https://github.com/rust-lang/crates.io-index)

@@ -28,6 +28,96 @@ static_assertions::assert_not_impl_any!(ObservedOwnedOutput: Copy, Clone, std::f
 static_assertions::assert_not_impl_any!(ObservedWalletBatch: Copy, Clone, std::fmt::Debug);
 
 #[test]
+fn validates_only_exact_observed_public_output_shapes() {
+    let catalog = test_catalog(0);
+    let entry = catalog_entry(&catalog, DescriptorBranch::External, 0);
+    let script = entry.script_pubkey.as_slice();
+    let spend_key = entry.spend_public_key.as_slice();
+    let blinding_key = entry.spend_public_key.as_slice();
+
+    assert!(validates_observed_public_output(
+        script,
+        spend_key,
+        blinding_key
+    ));
+    for malformed_length in (0..=64).filter(|length| *length != 22) {
+        let malformed_script = vec![0; malformed_length];
+        assert!(!validates_observed_public_output(
+            &malformed_script,
+            spend_key,
+            blinding_key
+        ));
+    }
+    for malformed_length in (0..=65).filter(|length| *length != 33) {
+        let malformed_key = vec![0; malformed_length];
+        assert!(!validates_observed_public_output(
+            script,
+            &malformed_key,
+            blinding_key
+        ));
+        assert!(!validates_observed_public_output(
+            script,
+            spend_key,
+            &malformed_key
+        ));
+    }
+
+    let mut invalid_x = [0xff_u8; 33];
+    invalid_x[0] = 0x02;
+    for invalid_point in [[0_u8; 33], [0x04_u8; 33], [0x06_u8; 33], invalid_x] {
+        assert!(!validates_observed_public_output(
+            script,
+            &invalid_point,
+            blinding_key
+        ));
+        assert!(!validates_observed_public_output(
+            script,
+            spend_key,
+            &invalid_point
+        ));
+    }
+    let mut mismatched_script = entry.script_pubkey.clone();
+    mismatched_script[2] ^= 1;
+    assert!(!validates_observed_public_output(
+        &mismatched_script,
+        spend_key,
+        blinding_key
+    ));
+}
+
+#[test]
+fn observed_public_output_helper_source_has_only_the_frozen_nonallocating_calls() {
+    let source = include_str!("lib.rs");
+    let helper = source
+        .split("pub fn validates_observed_public_output")
+        .nth(1)
+        .unwrap()
+        .split("/// The public derivation branch")
+        .next()
+        .unwrap();
+    for forbidden in [
+        "Vec",
+        "Box",
+        "String",
+        "format!",
+        "to_vec",
+        "collect",
+        "SecretKey",
+        "Transaction",
+        "Pset",
+        "rand",
+        "std::",
+        "unwrap",
+        "expect",
+        "panic!",
+    ] {
+        assert!(!helper.contains(forbidden), "helper surface: {forbidden}");
+    }
+    assert_eq!(helper.matches("PublicKey::from_slice(").count(), 2);
+    assert_eq!(helper.matches("hash160::Hash::hash(").count(), 1);
+}
+
+#[test]
 fn derives_only_the_expected_public_branches() {
     let catalog = test_catalog(2);
 

@@ -1,0 +1,9 @@
+code	variant	text
+1	InvalidArgument	wallet facts wire argument is invalid
+2	VersionMismatch	wallet facts wire version is unsupported
+3	InvalidEncoding	wallet facts wire encoding is invalid
+4	LimitExceeded	wallet facts wire limit exceeded
+5	DescriptorRejected	wallet facts descriptor was rejected
+6	CandidateRejected	wallet facts candidate batch was rejected
+7	ObservationRejected	wallet facts observation was rejected
+8	SourceBindingMismatch	wallet facts source binding does not match

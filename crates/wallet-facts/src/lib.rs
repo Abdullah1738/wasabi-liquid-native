@@ -18,9 +18,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 
 use elements::encode::{deserialize, serialize};
-use elements::hashes::sha256;
+use elements::hashes::{hash160, sha256};
 use elements::secp256k1_zkp::rand::{CryptoRng, RngCore};
-use elements::secp256k1_zkp::{Secp256k1, SecretKey};
+use elements::secp256k1_zkp::{PublicKey, Secp256k1, SecretKey};
 use elements::{OutPoint, Transaction, TxOut, Txid};
 use miniscript::bitcoin::bip32::ChildNumber;
 use miniscript::descriptor::{DescriptorPublicKey, Wildcard};
@@ -44,6 +44,33 @@ pub const MAX_PREVIOUS_TRANSACTIONS_PER_BATCH: usize = 16_384;
 pub const MAX_TRANSACTION_BYTES: usize = 4 * 1_024 * 1_024;
 /// Maximum aggregate serialized bytes accepted in one atomic batch.
 pub const MAX_BATCH_BYTES: usize = 64 * 1_024 * 1_024;
+
+/// Validates the complete public shape and native-P2WPKH binding of one
+/// observed output without deriving keys or retaining input bytes.
+///
+/// This helper is total and deliberately reports only a boolean. Both public
+/// keys must be complete compressed secp256k1 points, and `script_pubkey` must
+/// be the exact version-zero P2WPKH script for `spend_public_key`.
+pub fn validates_observed_public_output(
+    script_pubkey: &[u8],
+    spend_public_key: &[u8],
+    blinding_public_key: &[u8],
+) -> bool {
+    if script_pubkey.len() != 22
+        || spend_public_key.len() != 33
+        || blinding_public_key.len() != 33
+        || PublicKey::from_slice(spend_public_key).is_err()
+        || PublicKey::from_slice(blinding_public_key).is_err()
+    {
+        return false;
+    }
+
+    let spend_key_hash = hash160::Hash::hash(spend_public_key).to_byte_array();
+    let [0, 20, script_hash @ ..] = script_pubkey else {
+        return false;
+    };
+    script_hash == spend_key_hash
+}
 
 /// The public derivation branch associated with an owned script.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]

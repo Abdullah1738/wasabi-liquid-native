@@ -472,6 +472,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasabi-liquid-native-wallet-facts-wire"
+version = "0.1.0"
+dependencies = [
+ "static_assertions",
+ "wasabi-liquid-native-wallet-facts",
+ "zeroize",
+]
+
+[[package]]
 name = "wasi"
 version = "0.11.1+wasi-snapshot-preview1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

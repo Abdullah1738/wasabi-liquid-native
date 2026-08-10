@@ -66,6 +66,21 @@ credit, persistence, or recovery. SHA-256 finalization is pinned to exact
 `113c5ba12876e332335e49d1462a2c96c9928006` so the full truncated-output
 temporary is erased when zeroization is enabled.
 
+The internal `wasabi-liquid-native-wallet-facts-wire` crate defines canonical,
+bounded binary request and response frames around those wallet-facts inputs and
+public observations. Request decoding separates exact structural parsing from
+consuming descriptor-catalog and candidate-batch preparation. Response encoding
+accepts only the product-owned validated observation batch; response decoding
+checks an opaque nonzero source-epoch binding before publishing immutable facts.
+Both complete compressed public keys, the exact native-P2WPKH spend-key script
+binding, identifier domains, counts, ordering, per-transaction outpoint
+uniqueness, and all component and aggregate limits are validated. Owned raw
+frames and decoded fields follow scoped overwrite paths. This crate is an
+export-free Rust `rlib`: it adds no ABI operation, C symbol, dynamic library,
+key provider, wallet-facts invocation, managed bridge, node authentication, or
+wallet-credit authority. Its exact nonlinkable wire reference is under
+`contracts/wallet-facts/v1/nonlinkable-reference/`.
+
 `ci/check-dependency-capabilities.sh` exact-diffs the locked, all-target
 normal/build graph for the whole default workspace against its reviewed
 snapshot. It also applies semantic checks for the exact narrow library
