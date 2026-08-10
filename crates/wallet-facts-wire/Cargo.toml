@@ -15,4 +15,5 @@ wasabi-liquid-native-wallet-facts = { path = "../wallet-facts" }
 zeroize = { version = "1.8", default-features = false }
 
 [dev-dependencies]
+sha2 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }
 static_assertions = "1.1"

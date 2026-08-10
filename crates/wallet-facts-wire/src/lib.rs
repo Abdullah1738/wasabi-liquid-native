@@ -14,6 +14,9 @@ mod response;
 mod writer;
 
 #[cfg(test)]
+mod conformance_tests;
+
+#[cfg(test)]
 mod tests;
 
 use core::fmt;

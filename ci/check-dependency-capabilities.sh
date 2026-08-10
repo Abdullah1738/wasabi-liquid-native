@@ -2,6 +2,11 @@
 set -eu
 
 cargo_bin="${CARGO:-cargo}"
+repository_root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)"
+if [ "$(pwd -P)" != "$repository_root" ]; then
+    echo "dependency capability gate must run from the repository root" >&2
+    exit 1
+fi
 
 tree_raw="$(
     "$cargo_bin" tree \
@@ -164,6 +169,62 @@ END {
 
 printf '%s\n' "$tree" | diff -u ci/expected-dependency-capabilities.txt -
 printf '%s\n' "$edges" | diff -u ci/expected-dependency-edges.txt -
+
+python3 ci/check-wallet-facts-conformance.py "$repository_root"
+conformance_inventory_hash="$(
+    python3 -c 'import hashlib, pathlib; print(hashlib.sha256(pathlib.Path("contracts/wallet-facts/v1/nonlinkable-reference/vectors/SHA256SUMS").read_bytes()).hexdigest())'
+)"
+if [ "$conformance_inventory_hash" != "9bcdcf31ffe90e7a23ada162c61c71cfc84343ba1c190865e0ed34af8c7da933" ]; then
+    echo "wallet-facts conformance inventory root mismatch" >&2
+    exit 1
+fi
+conformance_parent_hash="$(
+    python3 -c 'import hashlib, pathlib; print(hashlib.sha256(pathlib.Path("contracts/wallet-facts/v1/nonlinkable-reference/SHA256SUMS").read_bytes()).hexdigest())'
+)"
+if [ "$conformance_parent_hash" != "9a3d11662670d13e23ed248f2ae145c87a52739e2e3bb03f7628e4d12e147c63" ]; then
+    echo "wallet-facts conformance parent root mismatch" >&2
+    exit 1
+fi
+
+if [ "$(grep -Fxc 'sha2 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }' crates/wallet-facts-wire/Cargo.toml)" -ne 1 ]; then
+    echo "wallet-facts conformance test dependency mismatch" >&2
+    exit 1
+fi
+python3 - "$repository_root" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+lock_path = root / "Cargo.lock"
+baseline_path = root / "ci/expected-wallet-facts-conformance-lock-baseline.txt"
+lock_bytes = lock_path.read_bytes()
+baseline_text = baseline_path.read_text()
+baseline_hash = "195a6279af16bf9726e9a4d706a39da1eb54850ac3ce65d9a2f2c897cecef1d8"
+post_hash = "75555b929c2b1df310f0660e2ae284f13b70dbab99105694d59fbb7c7d0f13da"
+if baseline_text != baseline_hash + "\n":
+    raise SystemExit("wallet-facts conformance lock baseline pin mismatch")
+if hashlib.sha256(lock_bytes).hexdigest() != post_hash:
+    raise SystemExit("wallet-facts conformance post-slice lock pin mismatch")
+
+text = lock_bytes.decode("utf-8")
+blocks = text.split("[[package]]\n")
+wire_marker = 'name = "wasabi-liquid-native-wallet-facts-wire"\n'
+sha_marker = 'name = "sha2"\nversion = "0.11.0"\n'
+wire_indexes = [index for index, block in enumerate(blocks) if wire_marker in block]
+sha_blocks = [block for block in blocks if sha_marker in block]
+if len(wire_indexes) != 1 or len(sha_blocks) != 1:
+    raise SystemExit("wallet-facts conformance lock package multiplicity mismatch")
+wire_index = wire_indexes[0]
+wire_block = blocks[wire_index]
+entry = ' "sha2",\n'
+if wire_block.count(entry) != 1:
+    raise SystemExit("wallet-facts conformance lock edge multiplicity mismatch")
+blocks[wire_index] = wire_block.replace(entry, "", 1)
+reconstructed = "[[package]]\n".join(blocks).encode("utf-8")
+if hashlib.sha256(reconstructed).hexdigest() != baseline_hash:
+    raise SystemExit("wallet-facts conformance lock reverse transform mismatch")
+PY
 
 wire_sources="crates/wallet-facts-wire/src/lib.rs crates/wallet-facts-wire/src/request.rs crates/wallet-facts-wire/src/response.rs crates/wallet-facts-wire/src/reader.rs crates/wallet-facts-wire/src/writer.rs"
 if grep -En 'use (elements|secp256k1|sha2|bitcoin_hashes)(::|[[:space:]])|SecretKey|HashMap|HashSet|\.sort\(|\.sort_by\(|rand::|getrandom|no_mangle|export_name|extern[[:space:]]+"C"' $wire_sources; then
@@ -454,6 +515,11 @@ $decoder_uniqueness_mir"
             echo "wallet-facts wire dynamic-library artifact is forbidden" >&2
             exit 1
         fi
+        "$compiler_cargo_bin" test \
+            -p wasabi-liquid-native-wallet-facts-wire \
+            --locked \
+            --offline \
+            conformance
         ;;
     *)
         echo "wallet-facts compiler and artifact gates require Cargo 1.96.0" >&2

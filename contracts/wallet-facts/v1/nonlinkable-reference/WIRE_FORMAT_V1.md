@@ -154,3 +154,17 @@ CoinJoin capability.
 
 Errors are the stable privacy-redacted values in `ERROR_MAPPING_V1.tsv`. Error
 text never includes caller or frame data.
+
+## Language-neutral conformance corpus
+
+The `vectors/` directory contains canonical lowercase hexadecimal frames,
+operation-specific expected results, symbolic boundary arithmetic, and a
+closed checksum inventory for corpus
+`wallet-facts-wire-v1-conformance-1`. Its exact identity is that corpus ID
+paired with the SHA-256 of this directory's `SHA256SUMS` file.
+
+Corpus replay proves only byte compatibility and the named wire operation's
+stable numeric result. It does not authenticate an implementation, artifact,
+caller, node, chain, transaction source, response provenance, wallet fact, or
+state transition, and it grants no ownership, persistence, signing, broadcast,
+CoinJoin, release, production, or closure authority.
