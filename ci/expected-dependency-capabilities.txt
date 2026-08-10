@@ -15,7 +15,7 @@ cfg-if v1.0.4|
 cpufeatures v0.3.0|
 crypto-common v0.2.2|
 digest v0.11.3 (https://github.com/liquid-wasabi/traits.git?rev=113c5ba12876e332335e49d1462a2c96c9928006#113c5ba1)|block-api,default,zeroize
-elements v0.27.0 (https://github.com/liquid-wasabi/rust-elements.git?rev=85b423a3cd69ea5409c0fbcfda1ccbced6a25d27#85b423a3)|
+elements v0.27.0 (https://github.com/liquid-wasabi/rust-elements.git?rev=d1f8850a046487cb27c911d5c6e71851b2a989fd#d1f8850a)|
 find-msvc-tools v0.1.10|
 hex-conservative v0.2.2|alloc,std
 hex-conservative v1.2.0|alloc,default,std

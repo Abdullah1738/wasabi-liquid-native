@@ -8,7 +8,7 @@ publish = false
 description = "Validated owned-output observations for Wasabi Liquid"
 
 [dependencies]
-elements = { git = "https://github.com/liquid-wasabi/rust-elements.git", rev = "85b423a3cd69ea5409c0fbcfda1ccbced6a25d27", default-features = false }
+elements = { git = "https://github.com/liquid-wasabi/rust-elements.git", rev = "d1f8850a046487cb27c911d5c6e71851b2a989fd", default-features = false }
 miniscript = { version = "=12.3.7", default-features = false, features = ["no-std"] }
 sha2 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }
 wasabi-liquid-native-transaction-validation = { path = "../transaction-validation" }

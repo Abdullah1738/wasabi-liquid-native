@@ -8,5 +8,5 @@ publish = false
 description = "Confidential Liquid output opening for Wasabi Liquid"
 
 [dependencies]
-elements = { git = "https://github.com/liquid-wasabi/rust-elements.git", rev = "85b423a3cd69ea5409c0fbcfda1ccbced6a25d27", default-features = false }
+elements = { git = "https://github.com/liquid-wasabi/rust-elements.git", rev = "d1f8850a046487cb27c911d5c6e71851b2a989fd", default-features = false }
 zeroize = { version = "1.8", default-features = false }

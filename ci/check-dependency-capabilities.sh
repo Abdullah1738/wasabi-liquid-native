@@ -60,7 +60,7 @@ BEGIN {
     zkp_sys = 0
 
     digest_prefix = "digest v0.11.3 (https://github.com/liquid-wasabi/traits.git?rev=113c5ba12876e332335e49d1462a2c96c9928006#"
-    elements_prefix = "elements v0.27.0 (https://github.com/liquid-wasabi/rust-elements.git?rev=85b423a3cd69ea5409c0fbcfda1ccbced6a25d27#"
+    elements_prefix = "elements v0.27.0 (https://github.com/liquid-wasabi/rust-elements.git?rev=d1f8850a046487cb27c911d5c6e71851b2a989fd#"
     zkp_prefix = "secp256k1-zkp v0.11.1 (https://github.com/liquid-wasabi/rust-secp256k1-zkp.git?rev=06ea6e06da81d2e3a51733c8d9b5f6c5fa248c2e#"
     zkp_sys_prefix = "secp256k1-zkp-sys v0.10.0 (https://github.com/liquid-wasabi/rust-secp256k1-zkp.git?rev=06ea6e06da81d2e3a51733c8d9b5f6c5fa248c2e#"
 }
