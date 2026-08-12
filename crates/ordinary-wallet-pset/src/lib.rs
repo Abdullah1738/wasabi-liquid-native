@@ -1,12 +1,15 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-//! Export-free composition of validated wallet outputs into a blinded ordinary PSET.
+//! Export-free composition of validated wallet outputs into a blinded ordinary PSET
+//! or a locally finalized ordinary transaction.
 //!
 //! The operation independently randomizes input and confidential-output layout before
-//! construction. This crate does not establish chain state, fee policy, change
-//! classification or reservation, signing authority, finalization, or broadcast
-//! readiness.
+//! construction. Caller-authorized signing remains behind a caller-owned signer that
+//! never gives this crate custody of a secret key. Successful local finalization yields
+//! an opaque broadcast-form transaction capability. This crate does not establish node
+//! or chain authenticity, current unspentness, fee policy, change classification,
+//! reservation, broadcast submission, acceptance, or confirmation authority.
 
 use core::fmt;
 use core::hint::black_box;
@@ -15,8 +18,9 @@ use elements::LockTime;
 use elements::secp256k1_zkp::Secp256k1;
 use elements::secp256k1_zkp::rand::{CryptoRng, Error as RandomnessError, RngCore};
 use wasabi_liquid_native_ordinary_pset::{
-    BlindedOrdinaryPset, ConfidentialOutput, ExplicitFee, MAX_CONFIDENTIAL_OUTPUTS,
-    OrdinaryPsetBlindingError, PsetConstructionError, prepare_ordinary_pset,
+    BlindedOrdinaryPset, ConfidentialOutput, ExplicitFee, FinalizedOrdinaryTransaction,
+    MAX_CONFIDENTIAL_OUTPUTS, OrdinaryP2wpkhSigner, OrdinaryPsetBlindingError,
+    OrdinarySigningError, PsetConstructionError, prepare_ordinary_pset,
 };
 use wasabi_liquid_native_wallet_facts::{
     BorrowedSlip77, DescriptorCatalog, SelectedOutputBatch, WalletObservationError,
@@ -60,6 +64,126 @@ impl fmt::Display for OrdinaryWalletPsetError {
 }
 
 impl std::error::Error for OrdinaryWalletPsetError {}
+
+/// The privacy-redacted stage and reason for ordinary-wallet transaction failure.
+///
+/// Variants retain no transaction identifier, outpoint, script, address, asset,
+/// amount, proof, key, signature, digest, serialized PSET, or dependency source.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum OrdinaryWalletTransactionReason {
+    /// Selection, validation, construction, layout, or blinding failed.
+    Preparation(OrdinaryWalletPsetError),
+    /// Caller-owned signing or local finalization failed.
+    Signing(OrdinarySigningError),
+}
+
+impl fmt::Display for OrdinaryWalletTransactionReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Preparation(reason) => write!(
+                formatter,
+                "ordinary transaction preparation failed: {reason}"
+            ),
+            Self::Signing(reason) => {
+                write!(formatter, "ordinary transaction signing failed: {reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for OrdinaryWalletTransactionReason {}
+
+/// An opaque ordinary-wallet transaction failure capability.
+///
+/// This type deliberately does not implement `Debug`, `Clone`, or `Copy`.
+/// A signing failure retains the exact randomized and blinded PSET for an
+/// explicit caller decision to retry or discard. A preparation failure retains
+/// no PSET.
+pub struct OrdinaryWalletTransactionFailure {
+    reason: OrdinaryWalletTransactionReason,
+    retryable_blinded: Option<Box<BlindedOrdinaryPset>>,
+}
+
+impl OrdinaryWalletTransactionFailure {
+    fn preparation(reason: OrdinaryWalletPsetError) -> Self {
+        Self {
+            reason: OrdinaryWalletTransactionReason::Preparation(reason),
+            retryable_blinded: None,
+        }
+    }
+
+    fn signing(reason: OrdinarySigningError, blinded: BlindedOrdinaryPset) -> Self {
+        Self {
+            reason: OrdinaryWalletTransactionReason::Signing(reason),
+            retryable_blinded: Some(Box::new(blinded)),
+        }
+    }
+
+    /// Borrows the privacy-redacted failure reason.
+    pub const fn reason(&self) -> &OrdinaryWalletTransactionReason {
+        &self.reason
+    }
+
+    /// Consumes the failure and recovers its exact retryable blinded PSET, if any.
+    ///
+    /// Signing requests already made through the caller-owned signer cannot be
+    /// rolled back. A retry starts the complete key and signature request
+    /// sequence again and therefore requires a fresh or duplicate-tolerant
+    /// signer.
+    pub fn into_retryable_blinded(self) -> Option<BlindedOrdinaryPset> {
+        self.retryable_blinded.map(|blinded| *blinded)
+    }
+}
+
+/// Builds, blinds, signs, and locally finalizes an ordinary wallet transaction.
+///
+/// Selection validation, layout randomization, construction, and blinding are
+/// identical to [`build_blinded_ordinary_wallet_pset`]. The caller-owned signer
+/// supplies only public keys and signatures through [`OrdinaryP2wpkhSigner`];
+/// this function never receives or stores a secret key. Every public key and
+/// signature is validated by the canonical ordinary-PSET transition before the
+/// signed PSET is immediately consumed into the opaque finalized transaction.
+/// No intermediate unblinded or signed PSET is exported.
+///
+/// This function performs no node access, chain authentication, unspentness or
+/// reservation check, fee-policy decision, broadcast submission, acceptance
+/// check, or confirmation tracking.
+pub fn build_sign_and_finalize_ordinary_wallet_transaction<R, S>(
+    catalog: &DescriptorCatalog,
+    slip77_master_key: BorrowedSlip77<'_>,
+    selected_outputs: SelectedOutputBatch,
+    outputs: Vec<ConfidentialOutput>,
+    fee: ExplicitFee,
+    rng: &mut R,
+    signer: &mut S,
+) -> Result<FinalizedOrdinaryTransaction, OrdinaryWalletTransactionFailure>
+where
+    R: RngCore + CryptoRng,
+    S: OrdinaryP2wpkhSigner,
+{
+    let blinded = build_blinded_ordinary_wallet_pset(
+        catalog,
+        slip77_master_key,
+        selected_outputs,
+        outputs,
+        fee,
+        rng,
+    )
+    .map_err(OrdinaryWalletTransactionFailure::preparation)?;
+
+    let secp = Secp256k1::new();
+    match blinded.sign_and_finalize(&secp, signer) {
+        Ok(signed) => Ok(signed.into_finalized_transaction()),
+        Err(failure) => {
+            let reason = failure.reason();
+            Err(OrdinaryWalletTransactionFailure::signing(
+                reason,
+                failure.into_blinded(),
+            ))
+        }
+    }
+}
 
 /// Consumes exact selected wallet outputs and returns only a blinded ordinary PSET.
 ///

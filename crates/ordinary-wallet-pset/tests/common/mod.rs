@@ -9,6 +9,8 @@ use elements::{
     TxOut, TxOutSecrets, TxOutWitness,
 };
 use miniscript::Descriptor;
+use miniscript::bitcoin::NetworkKind;
+use miniscript::bitcoin::bip32::{ChildNumber, DerivationPath, Xpriv, Xpub};
 use miniscript::descriptor::DescriptorPublicKey;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -35,8 +37,54 @@ pub fn catalog() -> DescriptorCatalog {
 }
 
 pub fn funding_fixture() -> FundingFixture {
+    funding_fixture_for_scripts(descriptor_scripts())
+}
+
+#[allow(dead_code)]
+pub fn signable_funding_fixture() -> (DescriptorCatalog, FundingFixture, [SecretKey; 2]) {
+    let mut seed = synthetic_material(b"ordinary wallet signing descriptor seed");
+    let mut root = Xpriv::new_master(NetworkKind::Test, &seed).unwrap();
+    seed.fill(0);
+    let secp = miniscript::bitcoin::secp256k1::Secp256k1::new();
+    let public = Xpub::from_priv(&secp, &root);
+    let descriptor = format!("elwpkh({public}/<0;1>/*)");
+    let catalog = DescriptorCatalog::derive(&descriptor, DescriptorNetwork::Test, 1).unwrap();
+    let mut external = root
+        .derive_priv(
+            &secp,
+            &DerivationPath::from(vec![
+                ChildNumber::Normal { index: 0 },
+                ChildNumber::Normal { index: 0 },
+            ]),
+        )
+        .unwrap();
+    let mut internal = root
+        .derive_priv(
+            &secp,
+            &DerivationPath::from(vec![
+                ChildNumber::Normal { index: 1 },
+                ChildNumber::Normal { index: 1 },
+            ]),
+        )
+        .unwrap();
+    let signing_keys = [
+        SecretKey::from_slice(&external.private_key.secret_bytes()).unwrap(),
+        SecretKey::from_slice(&internal.private_key.secret_bytes()).unwrap(),
+    ];
+    external.private_key.non_secure_erase();
+    internal.private_key.non_secure_erase();
+    root.private_key.non_secure_erase();
+    let signing_secp = Secp256k1::new();
+    let scripts = signing_keys.each_ref().map(|key| {
+        let public_key = elements::bitcoin::PublicKey::new(key.public_key(&signing_secp));
+        Script::new_v0_wpkh(&public_key.wpubkey_hash().unwrap())
+    });
+    let fixture = funding_fixture_for_scripts(scripts);
+    (catalog, fixture, signing_keys)
+}
+
+fn funding_fixture_for_scripts([external_script, internal_script]: [Script; 2]) -> FundingFixture {
     let slip77 = synthetic_material(b"ordinary wallet PSET SLIP77 material");
-    let [external_script, internal_script] = descriptor_scripts();
     let fee_asset = AssetId::LIQUIDTESTNET_BTC;
     let second_asset = AssetId::from_byte_array([0x82; 32]);
     let previous = Transaction {
