@@ -15,20 +15,22 @@ use wasabi_liquid_native_wallet_facts::{
 };
 
 use common::{
-    catalog, funding_fixture, planned_outputs, receive_address, selected_batch, synthetic_material,
+    catalog, funding_fixture, planned_outputs, receive_address, second_receive_address,
+    selected_batch, synthetic_material,
 };
 
 static_assertions::assert_not_impl_any!(BlindedOrdinaryPset: Copy, Clone, std::fmt::Debug);
 static_assertions::assert_not_impl_any!(SelectedOutputBatch: Copy, Clone, std::fmt::Debug);
 
 #[test]
-fn builds_validated_two_asset_blinded_pset_with_exact_identity() {
+fn independently_shuffles_inputs_and_outputs_before_building_a_valid_pset() {
     let catalog = catalog();
     let fixture = funding_fixture();
     let selected = selected_batch(&fixture, &[1, 0]);
-    let mut rng = StdRng::from_seed(synthetic_material(
+    let mut rng = ScriptedLayoutRng::new(
         b"ordinary wallet PSET orchestration success randomness",
-    ));
+        [0, 0],
+    );
 
     let blinded = build_blinded_ordinary_wallet_pset(
         &catalog,
@@ -45,8 +47,8 @@ fn builds_validated_two_asset_blinded_pset_with_exact_identity() {
     assert_eq!(pset.n_outputs(), 3);
     assert_eq!(pset.global.tx_data.fallback_locktime, Some(LockTime::ZERO));
     let expected_outpoints = [
-        OutPoint::new(fixture.transaction.txid(), 1),
         OutPoint::new(fixture.transaction.txid(), 0),
+        OutPoint::new(fixture.transaction.txid(), 1),
     ];
     assert_eq!(
         pset.inputs()
@@ -64,10 +66,18 @@ fn builds_validated_two_asset_blinded_pset_with_exact_identity() {
         assert!(input.witness_utxo.is_some());
         assert!(input.in_utxo_rangeproof.is_some());
     }
-    assert_eq!(pset.outputs()[0].asset, Some(fixture.second_asset));
-    assert_eq!(pset.outputs()[0].amount, Some(2_000));
-    assert_eq!(pset.outputs()[1].asset, Some(fixture.fee_asset));
-    assert_eq!(pset.outputs()[1].amount, Some(800));
+    assert_eq!(pset.outputs()[0].asset, Some(fixture.fee_asset));
+    assert_eq!(pset.outputs()[0].amount, Some(800));
+    assert_eq!(
+        pset.outputs()[0].script_pubkey.as_bytes(),
+        second_receive_address().as_parsed().script_pubkey()
+    );
+    assert_eq!(pset.outputs()[1].asset, Some(fixture.second_asset));
+    assert_eq!(pset.outputs()[1].amount, Some(2_000));
+    assert_eq!(
+        pset.outputs()[1].script_pubkey.as_bytes(),
+        receive_address().as_parsed().script_pubkey()
+    );
     for output in &pset.outputs()[..2] {
         assert!(output.asset_comm.is_some());
         assert!(output.amount_comm.is_some());
@@ -96,6 +106,77 @@ fn builds_validated_two_asset_blinded_pset_with_exact_identity() {
     transaction
         .verify_tx_amt_proofs(&secp, &previous_outputs)
         .unwrap();
+    assert_eq!(rng.layout_draws_consumed, 2);
+}
+
+#[test]
+fn input_and_output_permutations_use_separate_consecutive_draws() {
+    let catalog = catalog();
+    let fixture = funding_fixture();
+    let mut rng = ScriptedLayoutRng::new(
+        b"ordinary wallet PSET independent layout randomness",
+        [0, 1],
+    );
+
+    let blinded = build_blinded_ordinary_wallet_pset(
+        &catalog,
+        BorrowedSlip77::new(&fixture.slip77),
+        selected_batch(&fixture, &[1, 0]),
+        planned_outputs(&fixture),
+        ExplicitFee::new(fixture.fee_asset, 100).unwrap(),
+        &mut rng,
+    )
+    .unwrap();
+    let pset = blinded.as_pset();
+
+    assert_eq!(
+        pset.inputs()
+            .iter()
+            .map(|input| input.previous_outpoint())
+            .collect::<Vec<_>>(),
+        [
+            OutPoint::new(fixture.transaction.txid(), 0),
+            OutPoint::new(fixture.transaction.txid(), 1),
+        ]
+    );
+    assert_eq!(pset.outputs()[0].asset, Some(fixture.second_asset));
+    assert_eq!(pset.outputs()[1].asset, Some(fixture.fee_asset));
+    assert_eq!(rng.layout_draws_consumed, 2);
+}
+
+#[test]
+fn identity_permutations_remain_valid_and_fee_stays_last() {
+    let catalog = catalog();
+    let fixture = funding_fixture();
+    let mut rng =
+        ScriptedLayoutRng::new(b"ordinary wallet PSET identity layout randomness", [1, 1]);
+
+    let blinded = build_blinded_ordinary_wallet_pset(
+        &catalog,
+        BorrowedSlip77::new(&fixture.slip77),
+        selected_batch(&fixture, &[1, 0]),
+        planned_outputs(&fixture),
+        ExplicitFee::new(fixture.fee_asset, 100).unwrap(),
+        &mut rng,
+    )
+    .unwrap();
+    let pset = blinded.as_pset();
+
+    assert_eq!(
+        pset.inputs()
+            .iter()
+            .map(|input| input.previous_outpoint())
+            .collect::<Vec<_>>(),
+        [
+            OutPoint::new(fixture.transaction.txid(), 1),
+            OutPoint::new(fixture.transaction.txid(), 0),
+        ]
+    );
+    assert_eq!(pset.outputs()[0].asset, Some(fixture.second_asset));
+    assert_eq!(pset.outputs()[1].asset, Some(fixture.fee_asset));
+    assert_eq!(blinded.fee_output_index(), 2);
+    assert!(pset.outputs()[2].script_pubkey.is_empty());
+    assert_eq!(rng.layout_draws_consumed, 2);
 }
 
 #[test]
@@ -235,6 +316,79 @@ fn rejects_entropy_secret_and_conservation_failures_without_output() {
 }
 
 #[test]
+fn singleton_input_and_output_require_no_layout_draw() {
+    let catalog = catalog();
+    let fixture = funding_fixture();
+    let output =
+        ConfidentialOutput::from_address(fixture.fee_asset, 800, &receive_address()).unwrap();
+    let mut rng = ScriptedLayoutRng::new(
+        b"ordinary wallet PSET singleton layout randomness",
+        std::iter::empty(),
+    );
+
+    let blinded = build_blinded_ordinary_wallet_pset(
+        &catalog,
+        BorrowedSlip77::new(&fixture.slip77),
+        selected_batch(&fixture, &[0]),
+        vec![output],
+        ExplicitFee::new(fixture.fee_asset, 100).unwrap(),
+        &mut rng,
+    )
+    .unwrap();
+
+    assert_eq!(blinded.as_pset().n_inputs(), 1);
+    assert_eq!(blinded.as_pset().n_outputs(), 2);
+    assert_eq!(blinded.fee_output_index(), 1);
+    assert_eq!(rng.layout_draws_consumed, 0);
+}
+
+#[test]
+fn layout_failure_on_first_draw_returns_no_pset() {
+    let catalog = catalog();
+    let fixture = funding_fixture();
+    let mut rng = LayoutFailureRng::new(0);
+
+    let result = build_blinded_ordinary_wallet_pset(
+        &catalog,
+        BorrowedSlip77::new(&fixture.slip77),
+        selected_batch(&fixture, &[1, 0]),
+        planned_outputs(&fixture),
+        ExplicitFee::new(fixture.fee_asset, 100).unwrap(),
+        &mut rng,
+    );
+
+    assert!(matches!(
+        result,
+        Err(OrdinaryWalletPsetError::RandomnessUnavailable)
+    ));
+    assert_eq!(rng.successful_layout_draws, 0);
+    assert_eq!(rng.layout_draw_attempts, 1);
+}
+
+#[test]
+fn layout_failure_after_an_input_swap_returns_no_pset() {
+    let catalog = catalog();
+    let fixture = funding_fixture();
+    let mut rng = LayoutFailureRng::new(1);
+
+    let result = build_blinded_ordinary_wallet_pset(
+        &catalog,
+        BorrowedSlip77::new(&fixture.slip77),
+        selected_batch(&fixture, &[1, 0]),
+        planned_outputs(&fixture),
+        ExplicitFee::new(fixture.fee_asset, 100).unwrap(),
+        &mut rng,
+    );
+
+    assert!(matches!(
+        result,
+        Err(OrdinaryWalletPsetError::RandomnessUnavailable)
+    ));
+    assert_eq!(rng.successful_layout_draws, 1);
+    assert_eq!(rng.layout_draw_attempts, 2);
+}
+
+#[test]
 fn blinding_stage_entropy_failure_returns_no_partial_pset() {
     let catalog = catalog();
     let fixture = funding_fixture();
@@ -257,8 +411,8 @@ fn blinding_stage_entropy_failure_returns_no_partial_pset() {
         result,
         Err(OrdinaryWalletPsetError::BlindingFailed)
     ));
-    assert_eq!(rng.try_fill_calls, 2);
-    assert_eq!(rng.supplied_bytes, 32);
+    assert_eq!(rng.try_fill_calls, 4);
+    assert_eq!(rng.supplied_bytes, 48);
 }
 
 #[test]
@@ -336,6 +490,113 @@ impl rand::RngCore for FailedRandomness {
 
 impl rand::CryptoRng for FailedRandomness {}
 
+struct ScriptedLayoutRng {
+    inner: StdRng,
+    context_seed_supplied: bool,
+    layout_draws: std::collections::VecDeque<u64>,
+    layout_draws_consumed: usize,
+}
+
+impl ScriptedLayoutRng {
+    fn new(seed_label: &[u8], layout_draws: impl IntoIterator<Item = u64>) -> ScriptedLayoutRng {
+        Self {
+            inner: StdRng::from_seed(synthetic_material(seed_label)),
+            context_seed_supplied: false,
+            layout_draws: layout_draws.into_iter().collect(),
+            layout_draws_consumed: 0,
+        }
+    }
+}
+
+impl rand::RngCore for ScriptedLayoutRng {
+    fn next_u32(&mut self) -> u32 {
+        panic!("orchestration used infallible randomness")
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        panic!("orchestration used infallible randomness")
+    }
+
+    fn fill_bytes(&mut self, _: &mut [u8]) {
+        panic!("orchestration used infallible randomness")
+    }
+
+    fn try_fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), rand::Error> {
+        if !self.context_seed_supplied {
+            assert_eq!(destination.len(), 32);
+            self.context_seed_supplied = true;
+            return self.inner.try_fill_bytes(destination);
+        }
+        if let Some(draw) = self.layout_draws.pop_front() {
+            assert_eq!(destination.len(), 8);
+            destination.copy_from_slice(&draw.to_le_bytes());
+            self.layout_draws_consumed += 1;
+            return Ok(());
+        }
+        assert_ne!(destination.len(), 8, "unexpected layout draw");
+        self.inner.try_fill_bytes(destination)
+    }
+}
+
+impl rand::CryptoRng for ScriptedLayoutRng {}
+
+struct LayoutFailureRng {
+    inner: StdRng,
+    successful_draws_before_failure: usize,
+    context_seed_supplied: bool,
+    successful_layout_draws: usize,
+    layout_draw_attempts: usize,
+}
+
+impl LayoutFailureRng {
+    fn new(successful_draws_before_failure: usize) -> Self {
+        Self {
+            inner: StdRng::from_seed(synthetic_material(
+                b"ordinary wallet PSET layout failure randomness",
+            )),
+            successful_draws_before_failure,
+            context_seed_supplied: false,
+            successful_layout_draws: 0,
+            layout_draw_attempts: 0,
+        }
+    }
+}
+
+impl rand::RngCore for LayoutFailureRng {
+    fn next_u32(&mut self) -> u32 {
+        panic!("layout failure used infallible randomness")
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        panic!("layout failure used infallible randomness")
+    }
+
+    fn fill_bytes(&mut self, _: &mut [u8]) {
+        panic!("layout failure used infallible randomness")
+    }
+
+    fn try_fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), rand::Error> {
+        if !self.context_seed_supplied {
+            assert_eq!(destination.len(), 32);
+            self.context_seed_supplied = true;
+            return self.inner.try_fill_bytes(destination);
+        }
+        assert_eq!(destination.len(), 8);
+        self.layout_draw_attempts += 1;
+        if self.successful_layout_draws < self.successful_draws_before_failure {
+            destination.copy_from_slice(&0_u64.to_le_bytes());
+            self.successful_layout_draws += 1;
+            return Ok(());
+        }
+        destination[..4].fill(0xa5);
+        Err(rand::Error::new(std::io::Error::other(
+            "test layout random source unavailable",
+        )))
+    }
+}
+
+impl rand::CryptoRng for LayoutFailureRng {}
+
 struct ContextThenBlindingFailureRng {
     context_seed_supplied: bool,
     try_fill_calls: usize,
@@ -357,8 +618,8 @@ impl rand::RngCore for ContextThenBlindingFailureRng {
 
     fn try_fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), rand::Error> {
         self.try_fill_calls += 1;
-        assert_eq!(destination.len(), 32);
         if !self.context_seed_supplied {
+            assert_eq!(destination.len(), 32);
             destination.copy_from_slice(&synthetic_material(
                 b"ordinary wallet PSET context-only entropy",
             ));
@@ -366,6 +627,12 @@ impl rand::RngCore for ContextThenBlindingFailureRng {
             self.supplied_bytes += destination.len();
             return Ok(());
         }
+        if destination.len() == 8 {
+            destination.copy_from_slice(&0_u64.to_le_bytes());
+            self.supplied_bytes += destination.len();
+            return Ok(());
+        }
+        assert_eq!(destination.len(), 32);
         Err(rand::Error::new(std::io::Error::other(
             "test blinding-stage entropy unavailable",
         )))

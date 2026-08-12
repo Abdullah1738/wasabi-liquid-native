@@ -3,12 +3,13 @@
 
 //! Export-free composition of validated wallet outputs into a blinded ordinary PSET.
 //!
-//! The operation preserves caller-selected input and output order. That deterministic
-//! layout is not privacy-safe for production use; layout randomization remains a
-//! required follow-up. This crate does not establish chain state, fee policy, change
-//! reservation, signing authority, finalization, or broadcast readiness.
+//! The operation independently randomizes input and confidential-output layout before
+//! construction. This crate does not establish chain state, fee policy, change
+//! classification or reservation, signing authority, finalization, or broadcast
+//! readiness.
 
 use core::fmt;
+use core::hint::black_box;
 
 use elements::LockTime;
 use elements::secp256k1_zkp::Secp256k1;
@@ -21,6 +22,8 @@ use wasabi_liquid_native_wallet_facts::{
     BorrowedSlip77, DescriptorCatalog, SelectedOutputBatch, WalletObservationError,
     validate_selected_owned_inputs,
 };
+
+const MAX_UNIFORM_DRAW_ATTEMPTS: usize = 128;
 
 /// A privacy-redacted ordinary-wallet PSET orchestration failure.
 ///
@@ -66,7 +69,8 @@ impl std::error::Error for OrdinaryWalletPsetError {}
 /// already carry final sequence; construction uses zero locktime and is followed
 /// immediately by blinding with the same caller-owned random source.
 ///
-/// Input and output order is preserved exactly and is not production privacy policy.
+/// Validated inputs and supplied confidential outputs are independently shuffled
+/// immediately before construction. The mandatory explicit fee remains last.
 pub fn build_blinded_ordinary_wallet_pset<R: RngCore + CryptoRng>(
     catalog: &DescriptorCatalog,
     slip77_master_key: BorrowedSlip77<'_>,
@@ -87,13 +91,109 @@ pub fn build_blinded_ordinary_wallet_pset<R: RngCore + CryptoRng>(
         rng,
     )
     .map_err(map_wallet_observation_error)?;
+    drop(selected_outputs);
     let spendable_inputs = validated_inputs
         .into_iter()
         .map(|input| input.into_spendable())
-        .collect();
+        .collect::<Vec<_>>();
+    let (spendable_inputs, outputs) = randomize_layout(spendable_inputs, outputs, rng)?;
     let prepared = prepare_ordinary_pset(spendable_inputs, outputs, fee, LockTime::ZERO)
         .map_err(map_construction_error)?;
     blind_immediately(prepared, rng, &secp)
+}
+
+fn randomize_layout<Input, Output, R: RngCore>(
+    mut inputs: Vec<Input>,
+    mut outputs: Vec<Output>,
+    rng: &mut R,
+) -> Result<(Vec<Input>, Vec<Output>), OrdinaryWalletPsetError> {
+    shuffle_in_place(&mut inputs, rng)?;
+    shuffle_in_place(&mut outputs, rng)?;
+    Ok((inputs, outputs))
+}
+
+fn shuffle_in_place<T, R: RngCore>(
+    values: &mut [T],
+    rng: &mut R,
+) -> Result<(), OrdinaryWalletPsetError> {
+    for index in (1..values.len()).rev() {
+        let swap_index = sample_uniform_index(index + 1, rng)?;
+        values.swap(index, swap_index.0);
+        drop(swap_index);
+    }
+    Ok(())
+}
+
+fn sample_uniform_index<R: RngCore>(
+    exclusive_upper_bound: usize,
+    rng: &mut R,
+) -> Result<ScopedSwapIndex, OrdinaryWalletPsetError> {
+    let upper_bound = u64::try_from(exclusive_upper_bound)
+        .map_err(|_| OrdinaryWalletPsetError::RandomnessUnavailable)?;
+    if !(2..=MAX_CONFIDENTIAL_OUTPUTS as u64).contains(&upper_bound) {
+        return Err(OrdinaryWalletPsetError::RandomnessUnavailable);
+    }
+    let threshold = upper_bound.wrapping_neg() % upper_bound;
+
+    for _ in 0..MAX_UNIFORM_DRAW_ATTEMPTS {
+        let mut draw_bytes = ScopedDrawBytes([0; 8]);
+        let mut draw = ScopedDrawValue(0);
+        rng.try_fill_bytes(&mut draw_bytes.0)
+            .map_err(|_| OrdinaryWalletPsetError::RandomnessUnavailable)?;
+        draw.0 = u64::from_le_bytes(draw_bytes.0);
+        if draw.0 >= threshold {
+            return Ok(ScopedSwapIndex((draw.0 % upper_bound) as usize));
+        }
+    }
+
+    Err(OrdinaryWalletPsetError::RandomnessUnavailable)
+}
+
+struct ScopedDrawBytes([u8; 8]);
+struct ScopedDrawValue(u64);
+struct ScopedSwapIndex(usize);
+
+#[cfg(test)]
+thread_local! {
+    static CLEARED_DRAW_BUFFERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static CLEARED_DRAW_VALUES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static CLEARED_SWAP_INDICES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+impl Drop for ScopedDrawBytes {
+    fn drop(&mut self) {
+        self.0.fill(0);
+        black_box(&self.0);
+        #[cfg(test)]
+        {
+            assert!(self.0.iter().all(|byte| *byte == 0));
+            CLEARED_DRAW_BUFFERS.with(|count| count.set(count.get() + 1));
+        }
+    }
+}
+
+impl Drop for ScopedDrawValue {
+    fn drop(&mut self) {
+        self.0 = 0;
+        black_box(&self.0);
+        #[cfg(test)]
+        {
+            assert_eq!(self.0, 0);
+            CLEARED_DRAW_VALUES.with(|count| count.set(count.get() + 1));
+        }
+    }
+}
+
+impl Drop for ScopedSwapIndex {
+    fn drop(&mut self) {
+        self.0 = 0;
+        black_box(&self.0);
+        #[cfg(test)]
+        {
+            assert_eq!(self.0, 0);
+            CLEARED_SWAP_INDICES.with(|count| count.set(count.get() + 1));
+        }
+    }
 }
 
 fn blind_immediately<R: RngCore + CryptoRng>(
@@ -210,6 +310,260 @@ fn map_wallet_observation_error(error: WalletObservationError) -> OrdinaryWallet
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ScriptedDrawRng {
+        draws: std::collections::VecDeque<u64>,
+        fill_calls: usize,
+    }
+
+    impl ScriptedDrawRng {
+        fn new(draws: impl IntoIterator<Item = u64>) -> Self {
+            Self {
+                draws: draws.into_iter().collect(),
+                fill_calls: 0,
+            }
+        }
+    }
+
+    impl RngCore for ScriptedDrawRng {
+        fn next_u32(&mut self) -> u32 {
+            panic!("uniform sampler used infallible randomness")
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            panic!("uniform sampler used infallible randomness")
+        }
+
+        fn fill_bytes(&mut self, _: &mut [u8]) {
+            panic!("uniform sampler used infallible randomness")
+        }
+
+        fn try_fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), RandomnessError> {
+            self.fill_calls += 1;
+            assert_eq!(destination.len(), 8);
+            let draw = self.draws.pop_front().expect("scripted draw available");
+            destination.copy_from_slice(&draw.to_le_bytes());
+            Ok(())
+        }
+    }
+
+    struct RejectingDrawRng {
+        fill_calls: usize,
+    }
+
+    impl RngCore for RejectingDrawRng {
+        fn next_u32(&mut self) -> u32 {
+            panic!("uniform sampler used infallible randomness")
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            panic!("uniform sampler used infallible randomness")
+        }
+
+        fn fill_bytes(&mut self, _: &mut [u8]) {
+            panic!("uniform sampler used infallible randomness")
+        }
+
+        fn try_fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), RandomnessError> {
+            self.fill_calls += 1;
+            destination.fill(0);
+            Ok(())
+        }
+    }
+
+    struct PartialFailureRng;
+
+    impl RngCore for PartialFailureRng {
+        fn next_u32(&mut self) -> u32 {
+            panic!("uniform sampler used infallible randomness")
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            panic!("uniform sampler used infallible randomness")
+        }
+
+        fn fill_bytes(&mut self, _: &mut [u8]) {
+            panic!("uniform sampler used infallible randomness")
+        }
+
+        fn try_fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), RandomnessError> {
+            destination[..4].fill(0xa5);
+            Err(RandomnessError::new(std::io::Error::other(
+                "test random source unavailable",
+            )))
+        }
+    }
+
+    struct FailAfterOneDrawRng {
+        calls: usize,
+    }
+
+    impl RngCore for FailAfterOneDrawRng {
+        fn next_u32(&mut self) -> u32 {
+            panic!("layout randomizer used infallible randomness")
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            panic!("layout randomizer used infallible randomness")
+        }
+
+        fn fill_bytes(&mut self, _: &mut [u8]) {
+            panic!("layout randomizer used infallible randomness")
+        }
+
+        fn try_fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), RandomnessError> {
+            self.calls += 1;
+            if self.calls == 1 {
+                destination.copy_from_slice(&0_u64.to_le_bytes());
+                return Ok(());
+            }
+            destination[..4].fill(0x5a);
+            Err(RandomnessError::new(std::io::Error::other(
+                "test random source unavailable",
+            )))
+        }
+    }
+
+    struct InputDropProbe;
+    struct OutputDropProbe;
+
+    thread_local! {
+        static INPUT_DROP_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        static OUTPUT_DROP_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    impl Drop for InputDropProbe {
+        fn drop(&mut self) {
+            INPUT_DROP_PROBES.with(|count| count.set(count.get() + 1));
+        }
+    }
+
+    impl Drop for OutputDropProbe {
+        fn drop(&mut self) {
+            OUTPUT_DROP_PROBES.with(|count| count.set(count.get() + 1));
+        }
+    }
+
+    #[test]
+    fn rejection_sampler_is_unbiased_at_small_and_maximum_bounds() {
+        let buffer_clears_before = CLEARED_DRAW_BUFFERS.with(std::cell::Cell::get);
+        let value_clears_before = CLEARED_DRAW_VALUES.with(std::cell::Cell::get);
+        let index_clears_before = CLEARED_SWAP_INDICES.with(std::cell::Cell::get);
+        let mut small = ScriptedDrawRng::new([0, 4]);
+        assert_eq!(sample_uniform_index(3, &mut small).unwrap().0, 1);
+        assert_eq!(small.fill_calls, 2);
+
+        let mut maximum = ScriptedDrawRng::new([0, 254]);
+        assert_eq!(
+            sample_uniform_index(MAX_CONFIDENTIAL_OUTPUTS, &mut maximum)
+                .unwrap()
+                .0,
+            254
+        );
+        assert_eq!(maximum.fill_calls, 2);
+        assert_eq!(
+            CLEARED_DRAW_BUFFERS.with(std::cell::Cell::get) - buffer_clears_before,
+            4
+        );
+        assert_eq!(
+            CLEARED_DRAW_VALUES.with(std::cell::Cell::get) - value_clears_before,
+            4
+        );
+        assert_eq!(
+            CLEARED_SWAP_INDICES.with(std::cell::Cell::get) - index_clears_before,
+            2
+        );
+    }
+
+    #[test]
+    fn rejection_sampler_exhaustion_is_bounded_and_fallible() {
+        let buffer_clears_before = CLEARED_DRAW_BUFFERS.with(std::cell::Cell::get);
+        let value_clears_before = CLEARED_DRAW_VALUES.with(std::cell::Cell::get);
+        let index_clears_before = CLEARED_SWAP_INDICES.with(std::cell::Cell::get);
+        let mut rng = RejectingDrawRng { fill_calls: 0 };
+
+        assert!(matches!(
+            sample_uniform_index(3, &mut rng),
+            Err(OrdinaryWalletPsetError::RandomnessUnavailable)
+        ));
+        assert_eq!(rng.fill_calls, MAX_UNIFORM_DRAW_ATTEMPTS);
+        assert_eq!(
+            CLEARED_DRAW_BUFFERS.with(std::cell::Cell::get) - buffer_clears_before,
+            MAX_UNIFORM_DRAW_ATTEMPTS
+        );
+        assert_eq!(
+            CLEARED_DRAW_VALUES.with(std::cell::Cell::get) - value_clears_before,
+            MAX_UNIFORM_DRAW_ATTEMPTS
+        );
+        assert_eq!(
+            CLEARED_SWAP_INDICES.with(std::cell::Cell::get) - index_clears_before,
+            0
+        );
+    }
+
+    #[test]
+    fn source_failure_clears_a_partially_filled_draw() {
+        let buffer_clears_before = CLEARED_DRAW_BUFFERS.with(std::cell::Cell::get);
+        let value_clears_before = CLEARED_DRAW_VALUES.with(std::cell::Cell::get);
+        let index_clears_before = CLEARED_SWAP_INDICES.with(std::cell::Cell::get);
+
+        assert!(matches!(
+            sample_uniform_index(3, &mut PartialFailureRng),
+            Err(OrdinaryWalletPsetError::RandomnessUnavailable)
+        ));
+        assert_eq!(
+            CLEARED_DRAW_BUFFERS.with(std::cell::Cell::get) - buffer_clears_before,
+            1
+        );
+        assert_eq!(
+            CLEARED_DRAW_VALUES.with(std::cell::Cell::get) - value_clears_before,
+            1
+        );
+        assert_eq!(
+            CLEARED_SWAP_INDICES.with(std::cell::Cell::get) - index_clears_before,
+            0
+        );
+    }
+
+    #[test]
+    fn empty_and_singleton_shuffles_consume_no_randomness() {
+        let mut empty: [u8; 0] = [];
+        let mut singleton = [7_u8];
+        let mut rng = ScriptedDrawRng::new([]);
+
+        shuffle_in_place(&mut empty, &mut rng).unwrap();
+        shuffle_in_place(&mut singleton, &mut rng).unwrap();
+
+        assert_eq!(singleton, [7]);
+        assert_eq!(rng.fill_calls, 0);
+    }
+
+    #[test]
+    fn late_layout_failure_drops_every_owned_input_and_output() {
+        let input_drops_before = INPUT_DROP_PROBES.with(std::cell::Cell::get);
+        let output_drops_before = OUTPUT_DROP_PROBES.with(std::cell::Cell::get);
+        let mut rng = FailAfterOneDrawRng { calls: 0 };
+
+        let result = randomize_layout(
+            vec![InputDropProbe, InputDropProbe],
+            vec![OutputDropProbe, OutputDropProbe],
+            &mut rng,
+        );
+
+        assert!(matches!(
+            result,
+            Err(OrdinaryWalletPsetError::RandomnessUnavailable)
+        ));
+        assert_eq!(rng.calls, 2);
+        assert_eq!(
+            INPUT_DROP_PROBES.with(std::cell::Cell::get) - input_drops_before,
+            2
+        );
+        assert_eq!(
+            OUTPUT_DROP_PROBES.with(std::cell::Cell::get) - output_drops_before,
+            2
+        );
+    }
 
     #[test]
     fn dependency_failures_collapse_without_sources() {

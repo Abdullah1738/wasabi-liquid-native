@@ -131,20 +131,25 @@ pub fn selected_batch(fixture: &FundingFixture, output_indices: &[u32]) -> Selec
 }
 
 pub fn planned_outputs(fixture: &FundingFixture) -> Vec<ConfidentialOutput> {
-    let address = receive_address();
     vec![
-        ConfidentialOutput::from_address(fixture.second_asset, 2_000, &address).unwrap(),
-        ConfidentialOutput::from_address(fixture.fee_asset, 800, &address).unwrap(),
+        ConfidentialOutput::from_address(fixture.second_asset, 2_000, &receive_address()).unwrap(),
+        ConfidentialOutput::from_address(fixture.fee_asset, 800, &second_receive_address())
+            .unwrap(),
     ]
 }
 
 pub fn receive_address() -> ConfidentialLiquidAddress {
-    let script = descriptor_scripts()[0].clone();
+    receive_address_for(0, b"ordinary wallet PSET first receiver blinding key")
+}
+
+pub fn second_receive_address() -> ConfidentialLiquidAddress {
+    receive_address_for(1, b"ordinary wallet PSET second receiver blinding key")
+}
+
+fn receive_address_for(index: usize, key_label: &[u8]) -> ConfidentialLiquidAddress {
+    let script = descriptor_scripts()[index].clone();
     let secp = Secp256k1::new();
-    let key = SecretKey::from_slice(&synthetic_material(
-        b"ordinary wallet PSET receiver blinding key",
-    ))
-    .unwrap();
+    let key = SecretKey::from_slice(&synthetic_material(key_label)).unwrap();
     let address = Address::from_script(
         &script,
         Some(key.public_key(&secp)),
