@@ -159,7 +159,7 @@ dependencies = [
 [[package]]
 name = "elements"
 version = "0.27.0"
-source = "git+https://github.com/Abdullah1738/rust-elements.git?rev=04cfed4dca0d41030638470bfda2d86f7278d8b9#04cfed4dca0d41030638470bfda2d86f7278d8b9"
+source = "git+https://github.com/Abdullah1738/rust-elements.git?rev=5b8865f8061459f82dcb8a1cf476b7ba17b14193#5b8865f8061459f82dcb8a1cf476b7ba17b14193"
 dependencies = [
  "bech32",
  "bitcoin",

@@ -226,14 +226,17 @@ pub fn validate_transaction_amount_proofs<'transaction>(
 
 fn map_verification_error(error: VerificationError) -> TransactionValidationError {
     match error {
+        VerificationError::CoinbaseTransaction => TransactionValidationError::UnsupportedCoinbase,
         VerificationError::UtxoInputLenMismatch => TransactionValidationError::InputCountMismatch,
         VerificationError::RangeProofMissing(_) => TransactionValidationError::MissingRangeProof,
         VerificationError::SurjectionProofMissing(_) => {
             TransactionValidationError::MissingSurjectionProof
         }
         VerificationError::RangeProofError(_, _)
+        | VerificationError::UnexpectedRangeProof(_)
         | VerificationError::SurjectionProofError(_, _)
-        | VerificationError::SurjectionProofVerificationError(_) => {
+        | VerificationError::SurjectionProofVerificationError(_)
+        | VerificationError::UnexpectedSurjectionProof(_) => {
             TransactionValidationError::InvalidProof
         }
         VerificationError::SpentTxOutError(_, _) | VerificationError::TxOutError(_, _) => {
@@ -243,5 +246,26 @@ fn map_verification_error(error: VerificationError) -> TransactionValidationErro
         VerificationError::IssuanceTransactionInput(_) | VerificationError::Issuance(_, _) => {
             TransactionValidationError::UnsupportedIssuance
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_upstream_shape_and_superfluous_proof_errors() {
+        assert_eq!(
+            map_verification_error(VerificationError::CoinbaseTransaction),
+            TransactionValidationError::UnsupportedCoinbase,
+        );
+        assert_eq!(
+            map_verification_error(VerificationError::UnexpectedRangeProof(2)),
+            TransactionValidationError::InvalidProof,
+        );
+        assert_eq!(
+            map_verification_error(VerificationError::UnexpectedSurjectionProof(3)),
+            TransactionValidationError::InvalidProof,
+        );
     }
 }

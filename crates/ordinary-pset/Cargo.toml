@@ -8,7 +8,7 @@ publish = false
 description = "Ordinary multiasset Liquid PSET construction and signing for Wasabi Liquid"
 
 [dependencies]
-elements = { git = "https://github.com/Abdullah1738/rust-elements.git", rev = "04cfed4dca0d41030638470bfda2d86f7278d8b9", default-features = false }
+elements = { git = "https://github.com/Abdullah1738/rust-elements.git", rev = "5b8865f8061459f82dcb8a1cf476b7ba17b14193", default-features = false }
 wasabi-liquid-native-address = { path = "../address" }
 wasabi-liquid-native-output-opening = { path = "../output-opening" }
 zeroize = { version = "1.8", default-features = false }
