@@ -20,13 +20,14 @@ use std::str::FromStr;
 use elements::encode::{deserialize, serialize};
 use elements::hashes::{hash160, sha256};
 use elements::secp256k1_zkp::rand::{CryptoRng, RngCore};
-use elements::secp256k1_zkp::{PublicKey, Secp256k1, SecretKey};
-use elements::{OutPoint, Transaction, TxOut, Txid};
+use elements::secp256k1_zkp::{All, PublicKey, Secp256k1, SecretKey};
+use elements::{OutPoint, Sequence, Transaction, TxOut, Txid};
 use miniscript::bitcoin::bip32::ChildNumber;
 use miniscript::descriptor::{DescriptorPublicKey, Wildcard};
 use miniscript::{Descriptor, ForEachKey};
 use sha2::digest::Output;
 use sha2::{Digest, Sha256};
+use wasabi_liquid_native_ordinary_pset::SpendableInput;
 use wasabi_liquid_native_transaction_validation::{
     TransactionValidationError, ValidatedOutputOpenError, validate_transaction_amount_proofs,
 };
@@ -44,6 +45,8 @@ pub const MAX_PREVIOUS_TRANSACTIONS_PER_BATCH: usize = 16_384;
 pub const MAX_TRANSACTION_BYTES: usize = 4 * 1_024 * 1_024;
 /// Maximum aggregate serialized bytes accepted in one atomic batch.
 pub const MAX_BATCH_BYTES: usize = 64 * 1_024 * 1_024;
+/// Maximum selected confidential outputs accepted for one ordinary spend.
+pub const MAX_SELECTED_OUTPUTS: usize = 100;
 
 /// Validates the complete public shape and native-P2WPKH binding of one
 /// observed output without deriving keys or retaining input bytes.
@@ -446,6 +449,157 @@ fn clone_candidate_payload(bytes: &[u8]) -> Vec<u8> {
     bytes.to_vec()
 }
 
+/// A borrowed candidate transaction, its complete previous transactions, and
+/// the one output selected for an ordinary wallet spend.
+///
+/// Values must be canonical transaction consensus bytes. The numeric output
+/// index is only a public request value until the transaction is decoded and
+/// its exact transaction identifier and output count are derived. This type
+/// deliberately implements neither `Debug`, `Clone`, nor `Copy`.
+pub struct BorrowedSelectedOutput<'candidate> {
+    transaction: &'candidate [u8],
+    previous_transactions: &'candidate [Vec<u8>],
+    output_index: u32,
+}
+
+impl<'candidate> BorrowedSelectedOutput<'candidate> {
+    /// Borrows one selected output without allocating or copying payload bytes.
+    pub const fn new(
+        transaction: &'candidate [u8],
+        previous_transactions: &'candidate [Vec<u8>],
+        output_index: u32,
+    ) -> Self {
+        Self {
+            transaction,
+            previous_transactions,
+            output_index,
+        }
+    }
+}
+
+struct SelectedOutputRequest {
+    transaction: Vec<u8>,
+    previous_transactions: Vec<Vec<u8>>,
+    output_index: u32,
+}
+
+impl Drop for SelectedOutputRequest {
+    fn drop(&mut self) {
+        self.transaction.zeroize();
+        for previous in &mut self.previous_transactions {
+            previous.zeroize();
+        }
+        self.previous_transactions.clear();
+        self.output_index.zeroize();
+    }
+}
+
+/// An owned batch of one through [`MAX_SELECTED_OUTPUTS`] selected outputs.
+///
+/// Count, aggregate byte, empty-payload, previous-transaction-count, and
+/// public reserved-index checks complete for the whole borrowed request before
+/// any payload is copied. Request order is retained exactly; this boundary does
+/// not randomize input layout and is not privacy-safe for production use. This
+/// type deliberately implements neither `Debug`, `Clone`, nor `Copy`.
+pub struct SelectedOutputBatch {
+    requests: Vec<SelectedOutputRequest>,
+}
+
+impl SelectedOutputBatch {
+    /// Preflights and then owns one bounded selected-output request batch.
+    pub fn new(requests: &[BorrowedSelectedOutput<'_>]) -> Result<Self, WalletObservationError> {
+        if requests.is_empty() || requests.len() > MAX_SELECTED_OUTPUTS {
+            return Err(WalletObservationError::BatchLimit);
+        }
+
+        let mut aggregate_bytes = 0_usize;
+        let mut previous_entries = 0_usize;
+        for request in requests {
+            if request.output_index & ((1 << 31) | (1 << 30)) != 0 {
+                return Err(WalletObservationError::SelectedOutputIndex);
+            }
+            if request.transaction.is_empty() || request.transaction.len() > MAX_TRANSACTION_BYTES {
+                return Err(WalletObservationError::TransactionLength);
+            }
+            previous_entries = previous_entries
+                .checked_add(request.previous_transactions.len())
+                .ok_or(WalletObservationError::BatchLimit)?;
+            if previous_entries > MAX_PREVIOUS_TRANSACTIONS_PER_BATCH
+                || request
+                    .previous_transactions
+                    .iter()
+                    .any(|bytes| bytes.is_empty() || bytes.len() > MAX_TRANSACTION_BYTES)
+            {
+                return Err(WalletObservationError::PreviousTransactionSet);
+            }
+            aggregate_bytes = request
+                .previous_transactions
+                .iter()
+                .try_fold(
+                    aggregate_bytes
+                        .checked_add(request.transaction.len())
+                        .ok_or(WalletObservationError::BatchLimit)?,
+                    |total, previous| total.checked_add(previous.len()),
+                )
+                .ok_or(WalletObservationError::BatchLimit)?;
+            if aggregate_bytes > MAX_BATCH_BYTES {
+                return Err(WalletObservationError::BatchLimit);
+            }
+        }
+
+        let requests = requests
+            .iter()
+            .map(|request| SelectedOutputRequest {
+                transaction: clone_candidate_payload(request.transaction),
+                previous_transactions: request
+                    .previous_transactions
+                    .iter()
+                    .map(|bytes| clone_candidate_payload(bytes))
+                    .collect(),
+                output_index: request.output_index,
+            })
+            .collect();
+        Ok(Self { requests })
+    }
+}
+
+/// One descriptor-owned confidential output validated and privately prepared
+/// for ordinary PSET construction.
+///
+/// The exact previous output and its private opening are sealed inside the
+/// contained ordinary-PSET input capability. They can leave this type only by
+/// consuming it into [`SpendableInput`]. This type deliberately implements
+/// neither `Debug`, `Clone`, nor `Copy`.
+pub struct ValidatedOwnedInput {
+    spendable_input: SpendableInput,
+    #[cfg(test)]
+    _drop_probe: ValidatedOwnedInputDropProbe,
+}
+
+impl ValidatedOwnedInput {
+    /// Consumes this opaque capability into the ordinary-PSET input type.
+    pub fn into_spendable(self) -> SpendableInput {
+        self.spendable_input
+    }
+}
+
+#[cfg(test)]
+struct ValidatedOwnedInputDropProbe;
+
+#[cfg(test)]
+impl Drop for ValidatedOwnedInputDropProbe {
+    fn drop(&mut self) {
+        VALIDATED_OWNED_INPUT_DROPS.with(|count| count.set(count.get() + 1));
+    }
+}
+
+struct PubliclyValidatedSelectedOutput {
+    transaction: Transaction,
+    previous_outputs: BTreeMap<OutPoint, TxOut>,
+    outpoint: OutPoint,
+    output_index: usize,
+}
+
 /// A privacy-redacted failure while validating an observation batch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -473,6 +627,12 @@ pub enum WalletObservationError {
     OwnedOutputOpening,
     /// A normalized outpoint was repeated or exceeded its supported index.
     DuplicateOwnedOutpoint,
+    /// A selected output index is reserved or absent from its exact transaction.
+    SelectedOutputIndex,
+    /// Two selected rows resolve to the same exact transaction outpoint.
+    DuplicateSelectedOutpoint,
+    /// A selected output is not present in the supplied public descriptor catalog.
+    SelectedOutputNotOwned,
 }
 
 impl fmt::Display for WalletObservationError {
@@ -497,6 +657,9 @@ impl fmt::Display for WalletObservationError {
             Self::ExplicitOwnedOutput => "wallet observation explicit owned output is unsupported",
             Self::OwnedOutputOpening => "wallet observation owned output opening failed",
             Self::DuplicateOwnedOutpoint => "wallet observation repeats an owned outpoint",
+            Self::SelectedOutputIndex => "selected wallet output index is invalid",
+            Self::DuplicateSelectedOutpoint => "selected wallet output is repeated",
+            Self::SelectedOutputNotOwned => "selected wallet output is not owned",
         })
     }
 }
@@ -743,6 +906,117 @@ impl Drop for PreparedCandidateOrder {
     fn drop(&mut self) {
         self.0.zeroize();
     }
+}
+
+/// Validates and privately opens one bounded batch of selected wallet outputs.
+///
+/// The whole batch completes count and byte preflight in
+/// [`SelectedOutputBatch::new`]. This transition then canonically decodes every
+/// candidate, derives its exact selected outpoint, rejects duplicates, matches
+/// the complete previous-transaction set, validates transaction amount proofs,
+/// and proves descriptor ownership and confidential shape before requesting
+/// entropy or deriving a blinding key. After every public row passes, exactly
+/// one 32-byte random seed randomizes the secp256k1 context. Each output is then
+/// opened and bound back to its exact commitments while becoming an opaque
+/// [`ValidatedOwnedInput`]. Any error returns no partial capability.
+///
+/// Returned inputs preserve the caller's exact selected-request order. No
+/// input-layout randomization is performed, so this ordering is not suitable
+/// as a production privacy policy. The caller-provided secp256k1 context is
+/// used for every public check, randomized exactly once after all such checks,
+/// and left randomized for the caller's immediate ordinary-PSET blinding step.
+///
+/// Success does not establish source provenance, chain inclusion, current
+/// unspentness, confirmation, node identity, fee policy, or signing authority.
+pub fn validate_selected_owned_inputs<R: RngCore + CryptoRng>(
+    catalog: &DescriptorCatalog,
+    slip77_master_key: BorrowedSlip77<'_>,
+    selected_outputs: &SelectedOutputBatch,
+    secp: &mut Secp256k1<All>,
+    rng: &mut R,
+) -> Result<Vec<ValidatedOwnedInput>, WalletObservationError> {
+    let mut selected_outpoints = BTreeSet::new();
+    let mut publicly_validated = Vec::with_capacity(selected_outputs.requests.len());
+
+    for request in &selected_outputs.requests {
+        let transaction = decode_candidate_transaction(&request.transaction)?;
+        let output_index = usize::try_from(request.output_index)
+            .map_err(|_| WalletObservationError::SelectedOutputIndex)?;
+        let selected_output = transaction
+            .output
+            .get(output_index)
+            .ok_or(WalletObservationError::SelectedOutputIndex)?;
+        let outpoint = OutPoint::new(transaction.txid(), request.output_index);
+        if !selected_outpoints.insert(outpoint) {
+            return Err(WalletObservationError::DuplicateSelectedOutpoint);
+        }
+
+        let previous_outputs = previous_outputs_for(&transaction, &request.previous_transactions)?;
+        validate_transaction_amount_proofs(secp, &transaction, previous_outputs.clone())?;
+        if !catalog
+            .entries
+            .contains_key(selected_output.script_pubkey.as_bytes())
+        {
+            return Err(WalletObservationError::SelectedOutputNotOwned);
+        }
+        if !selected_output.asset.is_confidential()
+            || !selected_output.value.is_confidential()
+            || !selected_output.nonce.is_confidential()
+        {
+            return Err(WalletObservationError::ExplicitOwnedOutput);
+        }
+
+        publicly_validated.push(PubliclyValidatedSelectedOutput {
+            transaction,
+            previous_outputs,
+            outpoint,
+            output_index,
+        });
+    }
+
+    let mut context_randomization_seed = ScopedContextRandomizationSeed([0; 32]);
+    rng.try_fill_bytes(&mut context_randomization_seed.0)
+        .map_err(|_| WalletObservationError::ContextRandomnessUnavailable)?;
+    secp.seeded_randomize(&context_randomization_seed.0);
+    drop(context_randomization_seed);
+
+    let mut validated_inputs = Vec::with_capacity(publicly_validated.len());
+    for selected in publicly_validated {
+        let validated = validate_transaction_amount_proofs(
+            secp,
+            &selected.transaction,
+            selected.previous_outputs,
+        )?;
+        let witness_utxo = validated
+            .transaction()
+            .output
+            .get(selected.output_index)
+            .ok_or(WalletObservationError::SelectedOutputIndex)?
+            .clone();
+        let blinding_key = derive_blinding_key(
+            slip77_master_key.bytes,
+            witness_utxo.script_pubkey.as_bytes(),
+        )?;
+        #[cfg(test)]
+        SELECTED_OUTPUT_OPEN_ATTEMPTS.with(|count| count.set(count.get() + 1));
+        let opened = validated.open_output(secp, selected.output_index, &blinding_key.0)?;
+        require_positive_owned_output_value(opened.value())?;
+        let spendable_input = SpendableInput::from_confidential(
+            secp,
+            selected.outpoint,
+            witness_utxo,
+            Sequence::MAX,
+            opened,
+        )
+        .map_err(|_| WalletObservationError::OwnedOutputOpening)?;
+        validated_inputs.push(ValidatedOwnedInput {
+            spendable_input,
+            #[cfg(test)]
+            _drop_probe: ValidatedOwnedInputDropProbe,
+        });
+    }
+
+    Ok(validated_inputs)
 }
 
 /// Validates one bounded candidate batch and atomically normalizes every output
@@ -1048,6 +1322,8 @@ thread_local! {
     static OBSERVED_WALLET_TRANSACTION_DROPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static CANDIDATE_TRANSACTION_DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static PREVIOUS_TRANSACTION_DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static SELECTED_OUTPUT_OPEN_ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static VALIDATED_OWNED_INPUT_DROPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static DERIVATION_TEST_MODE: std::cell::Cell<DerivationTestMode> = const {
         std::cell::Cell::new(DerivationTestMode::Normal)
     };
@@ -1061,6 +1337,16 @@ fn scoped_secret_key_drop_count() -> usize {
 #[cfg(test)]
 fn derivation_call_count() -> usize {
     DERIVATION_CALLS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn selected_output_open_attempt_count() -> usize {
+    SELECTED_OUTPUT_OPEN_ATTEMPTS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn validated_owned_input_drop_count() -> usize {
+    VALIDATED_OWNED_INPUT_DROPS.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]

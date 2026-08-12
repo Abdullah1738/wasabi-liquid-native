@@ -201,26 +201,73 @@ baseline_path = root / "ci/expected-wallet-facts-conformance-lock-baseline.txt"
 lock_bytes = lock_path.read_bytes()
 baseline_text = baseline_path.read_text()
 baseline_hash = "544ad20b54fe2e279a3074a5cfdeec49bd13752f358ffd0d67c0573546af326c"
-post_hash = "f30d4a8bfc6b43f61fb7eefdd0d86f866ebef815d5aa57cc2b5b3319023fcf25"
+wire_post_hash = "f30d4a8bfc6b43f61fb7eefdd0d86f866ebef815d5aa57cc2b5b3319023fcf25"
+current_hash = "5d105ea8138170cac5501f42d148855b9b9141d38b3c2b9532a246a4d5dc9ade"
 if baseline_text != baseline_hash + "\n":
     raise SystemExit("wallet-facts conformance lock baseline pin mismatch")
-if hashlib.sha256(lock_bytes).hexdigest() != post_hash:
+if hashlib.sha256(lock_bytes).hexdigest() != current_hash:
     raise SystemExit("wallet-facts conformance post-slice lock pin mismatch")
 
 text = lock_bytes.decode("utf-8")
 blocks = text.split("[[package]]\n")
+ordinary_marker = 'name = "wasabi-liquid-native-ordinary-pset"\n'
+composer_marker = 'name = "wasabi-liquid-native-ordinary-wallet-pset"\n'
+facts_marker = 'name = "wasabi-liquid-native-wallet-facts"\n'
 wire_marker = 'name = "wasabi-liquid-native-wallet-facts-wire"\n'
 sha_marker = 'name = "sha2"\nversion = "0.11.0"\n'
+ordinary_indexes = [index for index, block in enumerate(blocks) if ordinary_marker in block]
+composer_indexes = [index for index, block in enumerate(blocks) if composer_marker in block]
+facts_indexes = [index for index, block in enumerate(blocks) if facts_marker in block]
 wire_indexes = [index for index, block in enumerate(blocks) if wire_marker in block]
 sha_blocks = [block for block in blocks if sha_marker in block]
-if len(wire_indexes) != 1 or len(sha_blocks) != 1:
+if (
+    len(ordinary_indexes) != 1
+    or len(composer_indexes) != 1
+    or len(facts_indexes) != 1
+    or len(wire_indexes) != 1
+    or len(sha_blocks) != 1
+):
     raise SystemExit("wallet-facts conformance lock package multiplicity mismatch")
-wire_index = wire_indexes[0]
-wire_block = blocks[wire_index]
+
+composer_block = """name = "wasabi-liquid-native-ordinary-wallet-pset"
+version = "0.1.0"
+dependencies = [
+ "elements",
+ "miniscript",
+ "rand",
+ "sha2",
+ "static_assertions",
+ "wasabi-liquid-native-address",
+ "wasabi-liquid-native-ordinary-pset",
+ "wasabi-liquid-native-wallet-facts",
+]
+
+"""
+if blocks[composer_indexes[0]] != composer_block:
+    raise SystemExit("ordinary-wallet PSET lock package mismatch")
+del blocks[composer_indexes[0]]
+
+for marker, entry in (
+    (ordinary_marker, ' "rand",\n'),
+    (facts_marker, ' "wasabi-liquid-native-ordinary-pset",\n'),
+):
+    indexes = [index for index, block in enumerate(blocks) if marker in block]
+    if len(indexes) != 1 or blocks[indexes[0]].count(entry) != 1:
+        raise SystemExit("ordinary-wallet PSET lock edge multiplicity mismatch")
+    blocks[indexes[0]] = blocks[indexes[0]].replace(entry, "", 1)
+
+wire_post_bytes = "[[package]]\n".join(blocks).encode("utf-8")
+if hashlib.sha256(wire_post_bytes).hexdigest() != wire_post_hash:
+    raise SystemExit("ordinary-wallet PSET lock reverse transform mismatch")
+
+wire_indexes = [index for index, block in enumerate(blocks) if wire_marker in block]
+if len(wire_indexes) != 1:
+    raise SystemExit("wallet-facts conformance lock package multiplicity mismatch")
+wire_block = blocks[wire_indexes[0]]
 entry = ' "sha2",\n'
 if wire_block.count(entry) != 1:
     raise SystemExit("wallet-facts conformance lock edge multiplicity mismatch")
-blocks[wire_index] = wire_block.replace(entry, "", 1)
+blocks[wire_indexes[0]] = wire_block.replace(entry, "", 1)
 reconstructed = "[[package]]\n".join(blocks).encode("utf-8")
 if hashlib.sha256(reconstructed).hexdigest() != baseline_hash:
     raise SystemExit("wallet-facts conformance lock reverse transform mismatch")

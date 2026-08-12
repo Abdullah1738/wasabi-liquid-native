@@ -13,8 +13,90 @@ const TEST_PUBLIC_DESCRIPTOR: &str = "elwpkh([28b3f14e/84'/1'/0']tpubDC2Q4xK4XH7
 const TEST_PUBLIC_DESCRIPTOR_CHECKSUM: &str = "u0khc0kg";
 const MAINNET_PUBLIC_DESCRIPTOR: &str = "elwpkh([73c5da0a/84'/1776'/0']xpub6CRFzUgHFDaiDAQFNX7VeV9JNPDRabq6NYSpzVZ8zW8ANUCiDdenkb1gBoEZuXNZb3wPc1SVcDXgD2ww5UBtTb8s8ArAbTkoRQ8qn34KgcY/<0;1>/*)";
 
+struct SelectedCountingCryptoRng {
+    inner: StdRng,
+    fill_calls: usize,
+    filled_bytes: usize,
+}
+
+impl rand::RngCore for SelectedCountingCryptoRng {
+    fn next_u32(&mut self) -> u32 {
+        self.inner.next_u32()
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.inner.next_u64()
+    }
+
+    fn fill_bytes(&mut self, destination: &mut [u8]) {
+        self.fill_calls += 1;
+        self.filled_bytes += destination.len();
+        self.inner.fill_bytes(destination);
+    }
+
+    fn try_fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), rand::Error> {
+        self.fill_calls += 1;
+        self.filled_bytes += destination.len();
+        self.inner.try_fill_bytes(destination)
+    }
+}
+
+impl rand::CryptoRng for SelectedCountingCryptoRng {}
+
+struct SelectedNoRandomnessExpected;
+
+impl rand::RngCore for SelectedNoRandomnessExpected {
+    fn next_u32(&mut self) -> u32 {
+        panic!("selected-output public validation requested randomness")
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        panic!("selected-output public validation requested randomness")
+    }
+
+    fn fill_bytes(&mut self, _: &mut [u8]) {
+        panic!("selected-output public validation requested randomness")
+    }
+
+    fn try_fill_bytes(&mut self, _: &mut [u8]) -> Result<(), rand::Error> {
+        panic!("selected-output public validation requested randomness")
+    }
+}
+
+impl rand::CryptoRng for SelectedNoRandomnessExpected {}
+
+struct SelectedFailingCryptoRng {
+    bytes_to_write: usize,
+    try_fill_calls: usize,
+}
+
+impl rand::RngCore for SelectedFailingCryptoRng {
+    fn next_u32(&mut self) -> u32 {
+        unreachable!("selected-output validation requests bytes directly")
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        unreachable!("selected-output validation requests bytes directly")
+    }
+
+    fn fill_bytes(&mut self, _: &mut [u8]) {
+        unreachable!("selected-output validation must use fallible entropy")
+    }
+
+    fn try_fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), rand::Error> {
+        self.try_fill_calls += 1;
+        let written = self.bytes_to_write.min(destination.len());
+        destination[..written].fill(0x5a);
+        let code = std::num::NonZeroU32::new(rand::Error::CUSTOM_START).unwrap();
+        Err(rand::Error::from(code))
+    }
+}
+
+impl rand::CryptoRng for SelectedFailingCryptoRng {}
+
 static_assertions::assert_not_impl_any!(BorrowedSlip77<'static>: Copy, Clone, std::fmt::Debug);
 static_assertions::assert_not_impl_any!(BorrowedCandidateTransaction<'static>: Copy, Clone, std::fmt::Debug);
+static_assertions::assert_not_impl_any!(BorrowedSelectedOutput<'static>: Copy, Clone, std::fmt::Debug);
 static_assertions::assert_not_impl_any!(ScopedSecretKey: Copy, Clone, std::fmt::Debug);
 static_assertions::assert_not_impl_any!(ScopedContextRandomizationSeed: Copy, Clone, std::fmt::Debug);
 static_assertions::assert_not_impl_any!(PreparedCandidate: Copy, Clone, std::fmt::Debug);
@@ -22,6 +104,8 @@ static_assertions::assert_not_impl_any!(PreparedTransactionId: Copy, Clone, std:
 static_assertions::assert_not_impl_any!(PreparedCandidateOrder: Copy, Clone, std::fmt::Debug);
 static_assertions::assert_not_impl_any!(DescriptorCatalog: Copy, Clone, std::fmt::Debug);
 static_assertions::assert_not_impl_any!(CandidateBatch: Copy, Clone, std::fmt::Debug);
+static_assertions::assert_not_impl_any!(SelectedOutputBatch: Copy, Clone, std::fmt::Debug);
+static_assertions::assert_not_impl_any!(ValidatedOwnedInput: Copy, Clone, std::fmt::Debug);
 static_assertions::assert_not_impl_any!(ObservedTransactionInput: Copy, Clone, std::fmt::Debug);
 static_assertions::assert_not_impl_any!(ObservedWalletTransaction: Copy, Clone, std::fmt::Debug);
 static_assertions::assert_not_impl_any!(ObservedOwnedOutput: Copy, Clone, std::fmt::Debug);
@@ -487,6 +571,296 @@ fn observes_two_validated_assets_without_retaining_blinding_material() {
         (pair[0].transaction_id(), pair[0].output_index())
             < (pair[1].transaction_id(), pair[1].output_index())
     }));
+}
+
+#[test]
+fn validates_selected_outputs_into_only_consuming_spendable_capabilities() {
+    let catalog = test_catalog(1);
+    let slip77 = synthetic_material(b"wallet-facts selected-output material");
+    let fixture = confidential_fixture(&catalog, &slip77);
+    let previous = std::slice::from_ref(&fixture.previous_transaction_bytes);
+    let requests = [
+        BorrowedSelectedOutput::new(&fixture.transaction_bytes, previous, 1),
+        BorrowedSelectedOutput::new(&fixture.transaction_bytes, previous, 0),
+    ];
+    let selected = SelectedOutputBatch::new(&requests).unwrap();
+    let mut secp = Secp256k1::new();
+    let mut rng = SelectedCountingCryptoRng {
+        inner: StdRng::from_seed(synthetic_material(
+            b"wallet-facts selected-output context randomness",
+        )),
+        fill_calls: 0,
+        filled_bytes: 0,
+    };
+    let seed_drops_before = context_randomization_seed_drop_count();
+    let derivations_before = derivation_call_count();
+
+    let validated = validate_selected_owned_inputs(
+        &catalog,
+        BorrowedSlip77::new(&slip77),
+        &selected,
+        &mut secp,
+        &mut rng,
+    )
+    .unwrap();
+
+    assert_eq!(rng.fill_calls, 1);
+    assert_eq!(rng.filled_bytes, 32);
+    assert_eq!(
+        context_randomization_seed_drop_count() - seed_drops_before,
+        1
+    );
+    assert_eq!(derivation_call_count() - derivations_before, 2);
+    assert_eq!(validated.len(), 2);
+    for (validated, output_index) in validated.into_iter().zip([1_u32, 0]) {
+        let spendable = validated.into_spendable();
+        assert_eq!(
+            spendable.outpoint(),
+            &OutPoint::new(fixture.transaction.txid(), output_index)
+        );
+        assert_eq!(
+            spendable.witness_utxo(),
+            &fixture.transaction.output[output_index as usize]
+        );
+    }
+}
+
+#[test]
+fn selected_output_preflight_rejects_before_copying_or_decoding() {
+    let catalog = test_catalog(1);
+    let slip77 = synthetic_material(b"wallet-facts selected preflight material");
+    let fixture = confidential_fixture(&catalog, &slip77);
+    let previous = std::slice::from_ref(&fixture.previous_transaction_bytes);
+    let clones_before = candidate_payload_clone_count();
+    let decodes_before = candidate_transaction_decode_count();
+
+    assert!(matches!(
+        SelectedOutputBatch::new(&[]),
+        Err(WalletObservationError::BatchLimit)
+    ));
+    let reserved = [BorrowedSelectedOutput::new(
+        &fixture.transaction_bytes,
+        previous,
+        1 << 30,
+    )];
+    assert!(matches!(
+        SelectedOutputBatch::new(&reserved),
+        Err(WalletObservationError::SelectedOutputIndex)
+    ));
+    let too_many = (0..=MAX_SELECTED_OUTPUTS)
+        .map(|_| BorrowedSelectedOutput::new(&fixture.transaction_bytes, previous, 0))
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        SelectedOutputBatch::new(&too_many),
+        Err(WalletObservationError::BatchLimit)
+    ));
+    assert_eq!(candidate_payload_clone_count(), clones_before);
+    assert_eq!(candidate_transaction_decode_count(), decodes_before);
+}
+
+#[test]
+fn selected_output_public_failures_precede_entropy_and_secret_derivation() {
+    let catalog = test_catalog(1);
+    let slip77 = synthetic_material(b"wallet-facts selected public validation material");
+    let fixture = confidential_fixture(&catalog, &slip77);
+    let previous = std::slice::from_ref(&fixture.previous_transaction_bytes);
+
+    let duplicate_requests = [
+        BorrowedSelectedOutput::new(&fixture.transaction_bytes, previous, 0),
+        BorrowedSelectedOutput::new(&fixture.transaction_bytes, previous, 0),
+    ];
+    let duplicate = SelectedOutputBatch::new(&duplicate_requests).unwrap();
+    let mut secp = Secp256k1::new();
+    let derivations_before = derivation_call_count();
+    assert!(matches!(
+        validate_selected_owned_inputs(
+            &catalog,
+            BorrowedSlip77::new(&slip77),
+            &duplicate,
+            &mut secp,
+            &mut SelectedNoRandomnessExpected,
+        ),
+        Err(WalletObservationError::DuplicateSelectedOutpoint)
+    ));
+    assert_eq!(derivation_call_count(), derivations_before);
+
+    let absent_request = [BorrowedSelectedOutput::new(
+        &fixture.transaction_bytes,
+        previous,
+        3,
+    )];
+    let absent = SelectedOutputBatch::new(&absent_request).unwrap();
+    assert!(matches!(
+        validate_selected_owned_inputs(
+            &catalog,
+            BorrowedSlip77::new(&slip77),
+            &absent,
+            &mut secp,
+            &mut SelectedNoRandomnessExpected,
+        ),
+        Err(WalletObservationError::SelectedOutputIndex)
+    ));
+
+    let unowned_request = [BorrowedSelectedOutput::new(
+        &fixture.transaction_bytes,
+        previous,
+        2,
+    )];
+    let unowned = SelectedOutputBatch::new(&unowned_request).unwrap();
+    assert!(matches!(
+        validate_selected_owned_inputs(
+            &catalog,
+            BorrowedSlip77::new(&slip77),
+            &unowned,
+            &mut secp,
+            &mut SelectedNoRandomnessExpected,
+        ),
+        Err(WalletObservationError::SelectedOutputNotOwned)
+    ));
+
+    let mut damaged_transaction = fixture.transaction.clone();
+    damaged_transaction.output[0].witness.rangeproof = RangeProof::EMPTY;
+    let damaged_bytes = serialize(&damaged_transaction);
+    let damaged_request = [BorrowedSelectedOutput::new(&damaged_bytes, previous, 0)];
+    let damaged = SelectedOutputBatch::new(&damaged_request).unwrap();
+    assert!(matches!(
+        validate_selected_owned_inputs(
+            &catalog,
+            BorrowedSlip77::new(&slip77),
+            &damaged,
+            &mut secp,
+            &mut SelectedNoRandomnessExpected,
+        ),
+        Err(WalletObservationError::TransactionValidation)
+    ));
+    assert_eq!(derivation_call_count(), derivations_before);
+}
+
+#[test]
+fn selected_output_private_failure_returns_no_capability() {
+    let catalog = test_catalog(1);
+    let slip77 = synthetic_material(b"wallet-facts selected private validation material");
+    let wrong = synthetic_material(b"wallet-facts selected wrong private material");
+    let fixture = confidential_fixture(&catalog, &slip77);
+    let requests = [BorrowedSelectedOutput::new(
+        &fixture.transaction_bytes,
+        std::slice::from_ref(&fixture.previous_transaction_bytes),
+        0,
+    )];
+    let selected = SelectedOutputBatch::new(&requests).unwrap();
+    let mut rng = SelectedCountingCryptoRng {
+        inner: StdRng::from_seed(synthetic_material(
+            b"wallet-facts selected private failure randomness",
+        )),
+        fill_calls: 0,
+        filled_bytes: 0,
+    };
+    let mut secp = Secp256k1::new();
+
+    assert!(matches!(
+        validate_selected_owned_inputs(
+            &catalog,
+            BorrowedSlip77::new(&wrong),
+            &selected,
+            &mut secp,
+            &mut rng,
+        ),
+        Err(WalletObservationError::OwnedOutputOpening)
+    ));
+    assert_eq!(rng.fill_calls, 1);
+    assert_eq!(rng.filled_bytes, 32);
+}
+
+#[test]
+fn selected_output_late_opening_failure_drops_earlier_capability() {
+    let catalog = test_catalog(1);
+    let slip77 = synthetic_material(b"wallet-facts selected late failure material");
+    let wrong = synthetic_material(b"wallet-facts selected late mismatched material");
+    let fixture = confidential_fixture_with_second_blinder(&catalog, &slip77, &wrong);
+    let previous = std::slice::from_ref(&fixture.previous_transaction_bytes);
+    let requests = [
+        BorrowedSelectedOutput::new(&fixture.transaction_bytes, previous, 0),
+        BorrowedSelectedOutput::new(&fixture.transaction_bytes, previous, 1),
+    ];
+    let selected = SelectedOutputBatch::new(&requests).unwrap();
+    let mut secp = Secp256k1::new();
+    let mut rng = SelectedCountingCryptoRng {
+        inner: StdRng::from_seed(synthetic_material(
+            b"wallet-facts selected late failure randomness",
+        )),
+        fill_calls: 0,
+        filled_bytes: 0,
+    };
+    let derivations_before = derivation_call_count();
+    let opens_before = selected_output_open_attempt_count();
+    let key_drops_before = scoped_secret_key_drop_count();
+    let capability_drops_before = validated_owned_input_drop_count();
+
+    let result = validate_selected_owned_inputs(
+        &catalog,
+        BorrowedSlip77::new(&slip77),
+        &selected,
+        &mut secp,
+        &mut rng,
+    );
+
+    assert!(matches!(
+        result,
+        Err(WalletObservationError::OwnedOutputOpening)
+    ));
+    assert_eq!(rng.fill_calls, 1);
+    assert_eq!(rng.filled_bytes, 32);
+    assert_eq!(derivation_call_count() - derivations_before, 2);
+    assert_eq!(selected_output_open_attempt_count() - opens_before, 2);
+    assert_eq!(scoped_secret_key_drop_count() - key_drops_before, 2);
+    assert_eq!(
+        validated_owned_input_drop_count() - capability_drops_before,
+        1
+    );
+}
+
+#[test]
+fn selected_output_entropy_failures_erase_seed_before_private_work() {
+    let catalog = test_catalog(1);
+    let slip77 = synthetic_material(b"wallet-facts selected entropy failure material");
+    let fixture = confidential_fixture(&catalog, &slip77);
+    let requests = [BorrowedSelectedOutput::new(
+        &fixture.transaction_bytes,
+        std::slice::from_ref(&fixture.previous_transaction_bytes),
+        0,
+    )];
+    let selected = SelectedOutputBatch::new(&requests).unwrap();
+
+    for bytes_to_write in [0, 13] {
+        let mut secp = Secp256k1::new();
+        let mut rng = SelectedFailingCryptoRng {
+            bytes_to_write,
+            try_fill_calls: 0,
+        };
+        let seed_drops_before = context_randomization_seed_drop_count();
+        let derivations_before = derivation_call_count();
+        let opens_before = selected_output_open_attempt_count();
+        let capability_drops_before = validated_owned_input_drop_count();
+
+        assert!(matches!(
+            validate_selected_owned_inputs(
+                &catalog,
+                BorrowedSlip77::new(&slip77),
+                &selected,
+                &mut secp,
+                &mut rng,
+            ),
+            Err(WalletObservationError::ContextRandomnessUnavailable)
+        ));
+        assert_eq!(rng.try_fill_calls, 1);
+        assert_eq!(
+            context_randomization_seed_drop_count() - seed_drops_before,
+            1
+        );
+        assert_eq!(derivation_call_count(), derivations_before);
+        assert_eq!(selected_output_open_attempt_count(), opens_before);
+        assert_eq!(validated_owned_input_drop_count(), capability_drops_before);
+    }
 }
 
 #[test]
@@ -1455,6 +1829,18 @@ fn malformed_and_bounded_inputs_return_redacted_errors() {
             .to_string()
             .contains("blinding")
     );
+    for error in [
+        WalletObservationError::SelectedOutputIndex,
+        WalletObservationError::DuplicateSelectedOutpoint,
+        WalletObservationError::SelectedOutputNotOwned,
+    ] {
+        let text = error.to_string();
+        for forbidden in [
+            "txid", "script", "asset", "amount", "key", "proof", "address",
+        ] {
+            assert!(!text.contains(forbidden));
+        }
+    }
 
     let one_byte = [1];
     let oversized_count = (0..=MAX_CANDIDATE_TRANSACTIONS)

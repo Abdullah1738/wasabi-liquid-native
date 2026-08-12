@@ -11,6 +11,7 @@ description = "Validated owned-output observations for Wasabi Liquid"
 elements = { git = "https://github.com/Abdullah1738/rust-elements.git", rev = "5b8865f8061459f82dcb8a1cf476b7ba17b14193", default-features = false }
 miniscript = { version = "=12.3.7", default-features = false, features = ["no-std"] }
 sha2 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }
+wasabi-liquid-native-ordinary-pset = { path = "../ordinary-pset" }
 wasabi-liquid-native-transaction-validation = { path = "../transaction-validation" }
 zeroize = { version = "1.8", default-features = false }
 

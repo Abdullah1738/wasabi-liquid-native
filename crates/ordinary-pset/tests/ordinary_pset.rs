@@ -374,7 +374,7 @@ fn rejects_duplicate_and_null_inputs() {
 }
 
 #[test]
-fn rejects_empty_plan_zero_values_and_overflow() {
+fn rejects_empty_plan_zero_and_out_of_range_values() {
     let asset = AssetId::from_byte_array([0x81; 32]);
     let fee = ExplicitFee::new(asset, 100).unwrap();
     assert!(matches!(
@@ -395,23 +395,6 @@ fn rejects_empty_plan_zero_values_and_overflow() {
             Sequence::MAX,
         ),
         Err(SpendableInputError::ValueOutOfRange)
-    ));
-
-    let inputs = vec![
-        explicit_input(0x82, 0, asset, MAX_ORDINARY_VALUE),
-        explicit_input(0x83, 1, asset, MAX_ORDINARY_VALUE),
-        explicit_input(0x85, 2, asset, 2),
-    ];
-    let output = ConfidentialOutput::from_address(asset, 1, &receive_address()).unwrap();
-    let overflow = prepare_ordinary_pset(
-        inputs,
-        vec![output],
-        ExplicitFee::new(asset, 1).unwrap(),
-        LockTime::ZERO,
-    );
-    assert!(matches!(
-        overflow,
-        Err(PsetConstructionError::AmountOverflow)
     ));
 }
 
@@ -445,6 +428,48 @@ fn blinds_the_maximum_supported_value_and_rejects_the_next_value() {
     assert!(matches!(
         ConfidentialOutput::from_address(asset, MAX_ORDINARY_VALUE + 1, &address),
         Err(wasabi_liquid_native_ordinary_pset::ConfidentialOutputError::ValueOutOfRange)
+    ));
+
+    let out_of_range_fee_asset = AssetId::from_byte_array([0x92; 32]);
+    assert!(matches!(
+        ExplicitFee::new(out_of_range_fee_asset, MAX_ORDINARY_VALUE + 1),
+        Err(wasabi_liquid_native_ordinary_pset::ExplicitFeeError::ValueOutOfRange)
+    ));
+
+    let receiver_key = SecretKey::new(&mut rng);
+    let out_of_range_secrets = TxOutSecrets::new(
+        asset,
+        AssetBlindingFactor::new(&mut rng),
+        MAX_ORDINARY_VALUE + 1,
+        ValueBlindingFactor::new(&mut rng),
+    );
+    let spent_secrets = TxOutSecrets::new(
+        asset,
+        AssetBlindingFactor::new(&mut rng),
+        MAX_ORDINARY_VALUE + 2,
+        ValueBlindingFactor::new(&mut rng),
+    );
+    let ephemeral_key = SecretKey::new(&mut rng);
+    let confidential_utxo = TxOut::with_txout_secrets(
+        &mut rng,
+        &secp,
+        native_witness_script(),
+        receiver_key.public_key(&secp),
+        ephemeral_key,
+        out_of_range_secrets,
+        &[spent_secrets],
+    )
+    .unwrap();
+    let opened = open_confidential_output(&secp, &confidential_utxo, &receiver_key).unwrap();
+    assert!(matches!(
+        SpendableInput::from_confidential(
+            &secp,
+            OutPoint::new(Txid::from_byte_array([0x93; 32]), 0),
+            confidential_utxo,
+            Sequence::MAX,
+            opened,
+        ),
+        Err(SpendableInputError::ValueOutOfRange)
     ));
 }
 

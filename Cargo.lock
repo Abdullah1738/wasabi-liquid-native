@@ -436,9 +436,24 @@ name = "wasabi-liquid-native-ordinary-pset"
 version = "0.1.0"
 dependencies = [
  "elements",
+ "rand",
  "wasabi-liquid-native-address",
  "wasabi-liquid-native-output-opening",
  "zeroize",
+]
+
+[[package]]
+name = "wasabi-liquid-native-ordinary-wallet-pset"
+version = "0.1.0"
+dependencies = [
+ "elements",
+ "miniscript",
+ "rand",
+ "sha2",
+ "static_assertions",
+ "wasabi-liquid-native-address",
+ "wasabi-liquid-native-ordinary-pset",
+ "wasabi-liquid-native-wallet-facts",
 ]
 
 [[package]]
@@ -467,6 +482,7 @@ dependencies = [
  "rand",
  "sha2",
  "static_assertions",
+ "wasabi-liquid-native-ordinary-pset",
  "wasabi-liquid-native-transaction-validation",
  "zeroize",
 ]

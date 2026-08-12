@@ -17,6 +17,7 @@ path = "src/lib.rs"
 members = [
     ".",
     "crates/address",
+    "crates/ordinary-wallet-pset",
     "crates/ordinary-pset",
     "crates/output-opening",
     "crates/transaction-validation",
@@ -26,6 +27,7 @@ members = [
 default-members = [
     ".",
     "crates/address",
+    "crates/ordinary-wallet-pset",
     "crates/ordinary-pset",
     "crates/output-opening",
     "crates/transaction-validation",

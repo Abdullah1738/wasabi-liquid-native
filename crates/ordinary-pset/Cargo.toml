@@ -12,3 +12,6 @@ elements = { git = "https://github.com/Abdullah1738/rust-elements.git", rev = "5
 wasabi-liquid-native-address = { path = "../address" }
 wasabi-liquid-native-output-opening = { path = "../output-opening" }
 zeroize = { version = "1.8", default-features = false }
+
+[dev-dependencies]
+rand = "0.8"

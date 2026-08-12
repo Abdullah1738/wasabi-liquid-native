@@ -48,9 +48,11 @@ pub const MAX_CONFIDENTIAL_OUTPUTS: usize = 255;
 
 /// Maximum positive amount accepted by the ordinary-wallet boundary.
 ///
-/// The pinned range-proof implementation accepts positive confidential values
-/// only through the signed 64-bit maximum.
-pub const MAX_ORDINARY_VALUE: u64 = i64::MAX as u64;
+/// The pinned verifier applies the Elements money range to explicit values.
+/// This crate deliberately applies the same product boundary after opening
+/// confidential values so every supported representation and asset is bounded
+/// consistently before construction.
+pub const MAX_ORDINARY_VALUE: u64 = 21_000_000 * 100_000_000;
 
 /// A previous output owned by the ordinary wallet and available for spending.
 ///
@@ -683,6 +685,23 @@ impl Drop for PrivateAssetTotal {
     fn drop(&mut self) {
         self.asset.zeroize();
         self.value.zeroize();
+    }
+}
+
+#[cfg(test)]
+mod amount_boundary_tests {
+    use super::*;
+
+    #[test]
+    fn private_accumulator_retains_checked_overflow_defense() {
+        let asset = [0x7a; 32];
+        let mut totals = PrivateAssetTotals::default();
+        totals.checked_add(asset, u64::MAX).unwrap();
+
+        assert!(matches!(
+            totals.checked_add(asset, 1),
+            Err(PsetConstructionError::AmountOverflow)
+        ));
     }
 }
 
