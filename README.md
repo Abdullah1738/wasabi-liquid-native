@@ -42,9 +42,9 @@ transaction-level surjection proofs. Script ownership and blinding-key
 provenance also remain separate prerequisites before wallet credit.
 All five Liquid implementation crates pin exact
 `Abdullah1738/rust-elements` commit
-`83cf983ba22ef7020e48602f5bac28a3ab7f7b79`, with default features and the
+`04cfed4dca0d41030638470bfda2d86f7278d8b9`, with default features and the
 ambient global secp context disabled;
-that fork pins exact `liquid-wasabi/rust-secp256k1-zkp` commit
+that fork pins exact `Abdullah1738/rust-secp256k1-zkp` commit
 `06ea6e06da81d2e3a51733c8d9b5f6c5fa248c2e`.
 
 The internal `wasabi-liquid-native-wallet-facts` crate derives a bounded

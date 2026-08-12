@@ -159,7 +159,7 @@ dependencies = [
 [[package]]
 name = "elements"
 version = "0.27.0"
-source = "git+https://github.com/Abdullah1738/rust-elements.git?rev=83cf983ba22ef7020e48602f5bac28a3ab7f7b79#83cf983ba22ef7020e48602f5bac28a3ab7f7b79"
+source = "git+https://github.com/Abdullah1738/rust-elements.git?rev=04cfed4dca0d41030638470bfda2d86f7278d8b9#04cfed4dca0d41030638470bfda2d86f7278d8b9"
 dependencies = [
  "bech32",
  "bitcoin",
@@ -316,7 +316,7 @@ dependencies = [
 [[package]]
 name = "secp256k1-zkp"
 version = "0.11.1"
-source = "git+https://github.com/liquid-wasabi/rust-secp256k1-zkp.git?rev=06ea6e06da81d2e3a51733c8d9b5f6c5fa248c2e#06ea6e06da81d2e3a51733c8d9b5f6c5fa248c2e"
+source = "git+https://github.com/Abdullah1738/rust-secp256k1-zkp.git?rev=06ea6e06da81d2e3a51733c8d9b5f6c5fa248c2e#06ea6e06da81d2e3a51733c8d9b5f6c5fa248c2e"
 dependencies = [
  "bitcoin-private",
  "rand",
@@ -327,7 +327,7 @@ dependencies = [
 [[package]]
 name = "secp256k1-zkp-sys"
 version = "0.10.0"
-source = "git+https://github.com/liquid-wasabi/rust-secp256k1-zkp.git?rev=06ea6e06da81d2e3a51733c8d9b5f6c5fa248c2e#06ea6e06da81d2e3a51733c8d9b5f6c5fa248c2e"
+source = "git+https://github.com/Abdullah1738/rust-secp256k1-zkp.git?rev=06ea6e06da81d2e3a51733c8d9b5f6c5fa248c2e#06ea6e06da81d2e3a51733c8d9b5f6c5fa248c2e"
 dependencies = [
  "cc",
  "secp256k1-sys",
