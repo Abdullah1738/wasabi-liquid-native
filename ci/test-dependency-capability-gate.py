@@ -587,7 +587,7 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
     expect_lock_snippet(snippet, baseline, success=False)
 
     changed_pin = snippet.replace(
-        "75555b929c2b1df310f0660e2ae284f13b70dbab99105694d59fbb7c7d0f13da",
+        "1a4b921643ac7062a3adf493ad531192c5b77c62aaee348a07c77eeab18aee61",
         "0" * 64,
         1,
     )

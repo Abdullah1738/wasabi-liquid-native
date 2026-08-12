@@ -240,7 +240,7 @@ fn map_verification_error(error: VerificationError) -> TransactionValidationErro
             TransactionValidationError::InvalidAmount
         }
         VerificationError::BalanceCheckFailed => TransactionValidationError::BalanceMismatch,
-        VerificationError::IssuanceTransactionInput(_) => {
+        VerificationError::IssuanceTransactionInput(_) | VerificationError::Issuance(_, _) => {
             TransactionValidationError::UnsupportedIssuance
         }
     }

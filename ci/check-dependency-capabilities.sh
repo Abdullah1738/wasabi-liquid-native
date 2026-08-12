@@ -66,7 +66,7 @@ BEGIN {
     wire = 0
 
     digest_prefix = "digest v0.11.3 (https://github.com/liquid-wasabi/traits.git?rev=113c5ba12876e332335e49d1462a2c96c9928006#"
-    elements_prefix = "elements v0.27.0 (https://github.com/liquid-wasabi/rust-elements.git?rev=d1f8850a046487cb27c911d5c6e71851b2a989fd#"
+    elements_prefix = "elements v0.27.0 (https://github.com/Abdullah1738/rust-elements.git?rev=83cf983ba22ef7020e48602f5bac28a3ab7f7b79#"
     zkp_prefix = "secp256k1-zkp v0.11.1 (https://github.com/liquid-wasabi/rust-secp256k1-zkp.git?rev=06ea6e06da81d2e3a51733c8d9b5f6c5fa248c2e#"
     zkp_sys_prefix = "secp256k1-zkp-sys v0.10.0 (https://github.com/liquid-wasabi/rust-secp256k1-zkp.git?rev=06ea6e06da81d2e3a51733c8d9b5f6c5fa248c2e#"
 }
@@ -200,8 +200,8 @@ lock_path = root / "Cargo.lock"
 baseline_path = root / "ci/expected-wallet-facts-conformance-lock-baseline.txt"
 lock_bytes = lock_path.read_bytes()
 baseline_text = baseline_path.read_text()
-baseline_hash = "195a6279af16bf9726e9a4d706a39da1eb54850ac3ce65d9a2f2c897cecef1d8"
-post_hash = "75555b929c2b1df310f0660e2ae284f13b70dbab99105694d59fbb7c7d0f13da"
+baseline_hash = "449fd32f52e3d9c52e2ce803bd9c4f5b204d40370ae75be00e7df7a6417848a5"
+post_hash = "1a4b921643ac7062a3adf493ad531192c5b77c62aaee348a07c77eeab18aee61"
 if baseline_text != baseline_hash + "\n":
     raise SystemExit("wallet-facts conformance lock baseline pin mismatch")
 if hashlib.sha256(lock_bytes).hexdigest() != post_hash:

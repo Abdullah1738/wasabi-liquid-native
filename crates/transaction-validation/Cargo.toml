@@ -8,7 +8,7 @@ publish = false
 description = "Transaction amount-proof validation for Wasabi Liquid"
 
 [dependencies]
-elements = { git = "https://github.com/liquid-wasabi/rust-elements.git", rev = "0d7647ca90c568c36a0d6fbb30f61291dfcafdb2", default-features = false }
+elements = { git = "https://github.com/Abdullah1738/rust-elements.git", rev = "83cf983ba22ef7020e48602f5bac28a3ab7f7b79", default-features = false }
 wasabi-liquid-native-output-opening = { path = "../output-opening" }
 
 [dev-dependencies]
