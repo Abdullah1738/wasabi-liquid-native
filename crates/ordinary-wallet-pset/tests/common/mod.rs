@@ -171,9 +171,33 @@ fn funding_fixture_for_scripts([external_script, internal_script]: [Script; 2]) 
 
 pub fn selected_batch(fixture: &FundingFixture, output_indices: &[u32]) -> SelectedOutputBatch {
     let previous = std::slice::from_ref(&fixture.previous_transaction_bytes);
-    let requests = output_indices
+    let expectations = output_indices
         .iter()
-        .map(|index| BorrowedSelectedOutput::new(&fixture.transaction_bytes, previous, *index))
+        .map(|index| {
+            let (asset, value) = match index {
+                0 => (fixture.fee_asset, 900),
+                1 => (fixture.second_asset, 2_000),
+                2 => (fixture.fee_asset, 100),
+                _ => (fixture.fee_asset, 1),
+            };
+            (
+                OutPoint::new(fixture.transaction.txid(), *index),
+                asset,
+                value,
+            )
+        })
+        .collect::<Vec<_>>();
+    let requests = expectations
+        .iter()
+        .map(|(outpoint, asset, value)| {
+            BorrowedSelectedOutput::new(
+                outpoint,
+                asset,
+                value,
+                &fixture.transaction_bytes,
+                previous,
+            )
+        })
         .collect::<Vec<_>>();
     SelectedOutputBatch::new(&requests).unwrap()
 }

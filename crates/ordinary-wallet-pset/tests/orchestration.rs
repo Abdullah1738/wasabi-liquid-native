@@ -11,7 +11,7 @@ use wasabi_liquid_native_ordinary_wallet_pset::{
     OrdinaryWalletPsetError, build_blinded_ordinary_wallet_pset,
 };
 use wasabi_liquid_native_wallet_facts::{
-    BorrowedSelectedOutput, BorrowedSlip77, SelectedOutputBatch,
+    BorrowedSelectedOutput, BorrowedSlip77, SelectedOutputBatch, WalletObservationError,
 };
 
 use common::{
@@ -184,10 +184,14 @@ fn rejects_public_selection_failures_before_randomness() {
     let catalog = catalog();
     let fixture = funding_fixture();
     let missing_previous = Vec::new();
+    let expected_outpoint = OutPoint::new(fixture.transaction.txid(), 0);
+    let expected_value = 900;
     let missing_request = [BorrowedSelectedOutput::new(
+        &expected_outpoint,
+        &fixture.fee_asset,
+        &expected_value,
         &fixture.transaction_bytes,
         &missing_previous,
-        0,
     )];
     let selected = SelectedOutputBatch::new(&missing_request).unwrap();
     assert!(matches!(
@@ -215,17 +219,26 @@ fn rejects_public_selection_failures_before_randomness() {
         Err(OrdinaryWalletPsetError::InvalidSelectedOutput)
     ));
 
-    let duplicate = selected_batch(&fixture, &[0, 0]);
-    assert!(matches!(
-        build_blinded_ordinary_wallet_pset(
-            &catalog,
-            BorrowedSlip77::new(&fixture.slip77),
-            duplicate,
-            planned_outputs(&fixture),
-            ExplicitFee::new(fixture.fee_asset, 100).unwrap(),
-            &mut NoRandomnessExpected,
+    let previous = std::slice::from_ref(&fixture.previous_transaction_bytes);
+    let duplicate_requests = [
+        BorrowedSelectedOutput::new(
+            &expected_outpoint,
+            &fixture.fee_asset,
+            &expected_value,
+            &fixture.transaction_bytes,
+            previous,
         ),
-        Err(OrdinaryWalletPsetError::InvalidSelectedOutput)
+        BorrowedSelectedOutput::new(
+            &expected_outpoint,
+            &fixture.fee_asset,
+            &expected_value,
+            &fixture.transaction_bytes,
+            previous,
+        ),
+    ];
+    assert!(matches!(
+        SelectedOutputBatch::new(&duplicate_requests),
+        Err(WalletObservationError::DuplicateSelectedOutpoint)
     ));
 }
 

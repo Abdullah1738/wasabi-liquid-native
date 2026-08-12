@@ -203,6 +203,7 @@ pub fn build_blinded_ordinary_wallet_pset<R: RngCore + CryptoRng>(
     fee: ExplicitFee,
     rng: &mut R,
 ) -> Result<BlindedOrdinaryPset, OrdinaryWalletPsetError> {
+    let selected_outputs = ScopedSelectedOutputs(selected_outputs);
     if outputs.is_empty() || outputs.len() > MAX_CONFIDENTIAL_OUTPUTS {
         return Err(OrdinaryWalletPsetError::InvalidPlan);
     }
@@ -210,7 +211,7 @@ pub fn build_blinded_ordinary_wallet_pset<R: RngCore + CryptoRng>(
     let validated_inputs = validate_selected_owned_inputs(
         catalog,
         slip77_master_key,
-        &selected_outputs,
+        &selected_outputs.0,
         &mut secp,
         rng,
     )
@@ -224,6 +225,15 @@ pub fn build_blinded_ordinary_wallet_pset<R: RngCore + CryptoRng>(
     let prepared = prepare_ordinary_pset(spendable_inputs, outputs, fee, LockTime::ZERO)
         .map_err(map_construction_error)?;
     blind_immediately(prepared, rng, &secp)
+}
+
+struct ScopedSelectedOutputs(SelectedOutputBatch);
+
+impl Drop for ScopedSelectedOutputs {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        SELECTED_OUTPUT_OWNER_DROPS.with(|count| count.set(count.get() + 1));
+    }
 }
 
 fn randomize_layout<Input, Output, R: RngCore>(
@@ -282,6 +292,7 @@ thread_local! {
     static CLEARED_DRAW_BUFFERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static CLEARED_DRAW_VALUES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static CLEARED_SWAP_INDICES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static SELECTED_OUTPUT_OWNER_DROPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 impl Drop for ScopedDrawBytes {
@@ -424,6 +435,7 @@ fn map_wallet_observation_error(error: WalletObservationError) -> OrdinaryWallet
         | WalletObservationError::DuplicateOwnedOutpoint
         | WalletObservationError::SelectedOutputIndex
         | WalletObservationError::DuplicateSelectedOutpoint
+        | WalletObservationError::SelectedOutputExpectation
         | WalletObservationError::SelectedOutputNotOwned => {
             OrdinaryWalletPsetError::InvalidSelectedOutput
         }
@@ -432,8 +444,19 @@ fn map_wallet_observation_error(error: WalletObservationError) -> OrdinaryWallet
 }
 
 #[cfg(test)]
+#[path = "../tests/common/mod.rs"]
+mod orchestration_test_common;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
+    use wasabi_liquid_native_ordinary_pset::ExplicitFee;
+    use wasabi_liquid_native_wallet_facts::BorrowedSlip77;
+
+    use super::orchestration_test_common as common;
 
     struct ScriptedDrawRng {
         draws: std::collections::VecDeque<u64>,
@@ -496,6 +519,28 @@ mod tests {
     }
 
     struct PartialFailureRng;
+
+    struct PanicOnRandomness;
+
+    impl RngCore for PanicOnRandomness {
+        fn next_u32(&mut self) -> u32 {
+            panic!("test-only orchestration randomness unwind")
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            panic!("test-only orchestration randomness unwind")
+        }
+
+        fn fill_bytes(&mut self, _: &mut [u8]) {
+            panic!("test-only orchestration randomness unwind")
+        }
+
+        fn try_fill_bytes(&mut self, _: &mut [u8]) -> Result<(), RandomnessError> {
+            panic!("test-only orchestration randomness unwind")
+        }
+    }
+
+    impl CryptoRng for PanicOnRandomness {}
 
     impl RngCore for PartialFailureRng {
         fn next_u32(&mut self) -> u32 {
@@ -566,6 +611,72 @@ mod tests {
         fn drop(&mut self) {
             OUTPUT_DROP_PROBES.with(|count| count.set(count.get() + 1));
         }
+    }
+
+    #[test]
+    fn selected_output_expectation_maps_to_invalid_selected_output() {
+        assert_eq!(
+            map_wallet_observation_error(WalletObservationError::SelectedOutputExpectation),
+            OrdinaryWalletPsetError::InvalidSelectedOutput
+        );
+    }
+
+    #[test]
+    fn consuming_orchestration_destroys_selected_owner_on_success_error_and_unwind() {
+        let catalog = common::catalog();
+        let fixture = common::funding_fixture();
+        let fee = ExplicitFee::new(fixture.fee_asset, 100).unwrap();
+        let drops_before = SELECTED_OUTPUT_OWNER_DROPS.with(std::cell::Cell::get);
+        let mut rng = StdRng::from_seed(common::synthetic_material(
+            b"ordinary wallet selected owner success",
+        ));
+
+        let blinded = build_blinded_ordinary_wallet_pset(
+            &catalog,
+            BorrowedSlip77::new(&fixture.slip77),
+            common::selected_batch(&fixture, &[1, 0]),
+            common::planned_outputs(&fixture),
+            fee,
+            &mut rng,
+        )
+        .unwrap();
+        assert_eq!(
+            SELECTED_OUTPUT_OWNER_DROPS.with(std::cell::Cell::get) - drops_before,
+            1
+        );
+        drop(blinded);
+
+        assert!(matches!(
+            build_blinded_ordinary_wallet_pset(
+                &catalog,
+                BorrowedSlip77::new(&fixture.slip77),
+                common::selected_batch(&fixture, &[1, 0]),
+                Vec::new(),
+                fee,
+                &mut PanicOnRandomness,
+            ),
+            Err(OrdinaryWalletPsetError::InvalidPlan)
+        ));
+        assert_eq!(
+            SELECTED_OUTPUT_OWNER_DROPS.with(std::cell::Cell::get) - drops_before,
+            2
+        );
+
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = build_blinded_ordinary_wallet_pset(
+                &catalog,
+                BorrowedSlip77::new(&fixture.slip77),
+                common::selected_batch(&fixture, &[1, 0]),
+                common::planned_outputs(&fixture),
+                fee,
+                &mut PanicOnRandomness,
+            );
+        }));
+        assert!(unwind.is_err());
+        assert_eq!(
+            SELECTED_OUTPUT_OWNER_DROPS.with(std::cell::Cell::get) - drops_before,
+            3
+        );
     }
 
     #[test]

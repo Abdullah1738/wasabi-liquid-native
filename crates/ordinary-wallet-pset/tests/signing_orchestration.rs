@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use elements::bitcoin::PublicKey as BitcoinPublicKey;
 use elements::encode;
 use elements::secp256k1_zkp::{Message, Secp256k1, SecretKey, ecdsa};
-use elements::{EcdsaSighashType, OutPoint, Transaction};
+use elements::{EcdsaSighashType, LockTime, OutPoint, Transaction};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use wasabi_liquid_native_ordinary_pset::{
@@ -16,7 +16,9 @@ use wasabi_liquid_native_ordinary_wallet_pset::{
     OrdinaryWalletPsetError, OrdinaryWalletTransactionFailure, OrdinaryWalletTransactionReason,
     build_blinded_ordinary_wallet_pset, build_sign_and_finalize_ordinary_wallet_transaction,
 };
-use wasabi_liquid_native_wallet_facts::BorrowedSlip77;
+use wasabi_liquid_native_wallet_facts::{
+    BorrowedSelectedOutput, BorrowedSlip77, SelectedOutputBatch,
+};
 
 use common::{planned_outputs, selected_batch, signable_funding_fixture, synthetic_material};
 
@@ -154,6 +156,68 @@ fn preparation_failure_never_invokes_signer_or_returns_retry_capability() {
     assert_eq!(
         failure.reason(),
         &OrdinaryWalletTransactionReason::Preparation(OrdinaryWalletPsetError::InvalidPlan)
+    );
+    assert!(signer.events.is_empty());
+    assert!(failure.into_retryable_blinded().is_none());
+}
+
+#[test]
+fn selected_expectation_failure_never_invokes_signer_or_returns_retry_capability() {
+    let (catalog, fixture, signing_keys) = signable_funding_fixture();
+    let mut signer = FixtureSigner::accepting(&fixture, signing_keys);
+    let failure = expect_transaction_failure(build_sign_and_finalize_ordinary_wallet_transaction(
+        &catalog,
+        BorrowedSlip77::new(&fixture.slip77),
+        selected_batch(&fixture, &[7]),
+        planned_outputs(&fixture),
+        ExplicitFee::new(fixture.fee_asset, 100).unwrap(),
+        &mut NoRandomnessExpected,
+        &mut signer,
+    ));
+
+    assert_eq!(
+        failure.reason(),
+        &OrdinaryWalletTransactionReason::Preparation(
+            OrdinaryWalletPsetError::InvalidSelectedOutput
+        )
+    );
+    assert!(signer.events.is_empty());
+    assert!(failure.into_retryable_blinded().is_none());
+}
+
+#[test]
+fn selected_txid_substitution_never_invokes_signer_or_returns_retry_capability() {
+    let (catalog, fixture, signing_keys) = signable_funding_fixture();
+    let mut signer = FixtureSigner::accepting(&fixture, signing_keys);
+    let expected_outpoint = OutPoint::new(fixture.transaction.txid(), 0);
+    let expected_value = 900;
+    let mut substituted = fixture.transaction.clone();
+    substituted.lock_time = LockTime::from_consensus(1);
+    assert_ne!(substituted.txid(), expected_outpoint.txid);
+    let substituted_bytes = encode::serialize(&substituted);
+    let request = [BorrowedSelectedOutput::new(
+        &expected_outpoint,
+        &fixture.fee_asset,
+        &expected_value,
+        &substituted_bytes,
+        std::slice::from_ref(&fixture.previous_transaction_bytes),
+    )];
+    let selected = SelectedOutputBatch::new(&request).unwrap();
+    let failure = expect_transaction_failure(build_sign_and_finalize_ordinary_wallet_transaction(
+        &catalog,
+        BorrowedSlip77::new(&fixture.slip77),
+        selected,
+        planned_outputs(&fixture),
+        ExplicitFee::new(fixture.fee_asset, 100).unwrap(),
+        &mut NoRandomnessExpected,
+        &mut signer,
+    ));
+
+    assert_eq!(
+        failure.reason(),
+        &OrdinaryWalletTransactionReason::Preparation(
+            OrdinaryWalletPsetError::InvalidSelectedOutput
+        )
     );
     assert!(signer.events.is_empty());
     assert!(failure.into_retryable_blinded().is_none());
