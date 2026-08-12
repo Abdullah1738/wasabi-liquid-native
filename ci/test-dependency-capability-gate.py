@@ -499,6 +499,18 @@ def expect_lock_snippet(snippet: str, root: Path, *, success: bool) -> None:
         )
 
 
+def remove_lock_dependency(root: Path, package: str, dependency: str) -> None:
+    path = root / "Cargo.lock"
+    blocks = path.read_text().split("[[package]]\n")
+    marker = f'name = "{package}"\n'
+    indexes = [index for index, block in enumerate(blocks) if marker in block]
+    entry = f' "{dependency}",\n'
+    if len(indexes) != 1 or blocks[indexes[0]].count(entry) != 1:
+        raise AssertionError(f"lock mutation target mismatch: {package} -> {dependency}")
+    blocks[indexes[0]] = blocks[indexes[0]].replace(entry, "", 1)
+    path.write_text("[[package]]\n".join(blocks))
+
+
 def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
     gate = GATE.read_text()
     checker_call = 'python3 ci/check-wallet-facts-conformance.py "$repository_root"'
@@ -582,6 +594,22 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
     )
     expect_lock_snippet(snippet, wire_edge, success=False)
 
+    facts_provider_edge = lock_root("lock-wallet-facts-provider-edge")
+    remove_lock_dependency(
+        facts_provider_edge,
+        "wasabi-liquid-native-wallet-facts",
+        "wasabi-liquid-native-output-opening",
+    )
+    expect_lock_snippet(snippet, facts_provider_edge, success=False)
+
+    composer_provider_edge = lock_root("lock-composer-provider-edge")
+    remove_lock_dependency(
+        composer_provider_edge,
+        "wasabi-liquid-native-ordinary-wallet-pset",
+        "wasabi-liquid-native-output-opening",
+    )
+    expect_lock_snippet(snippet, composer_provider_edge, success=False)
+
     baseline = lock_root("lock-baseline")
     (baseline / "ci/expected-wallet-facts-conformance-lock-baseline.txt").write_text("0" * 64 + "\n")
     expect_lock_snippet(snippet, baseline, success=False)
@@ -592,6 +620,12 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
         1,
     )
     expect_lock_snippet(changed_pin, valid, success=False)
+    changed_provider_pin = snippet.replace(
+        "5d105ea8138170cac5501f42d148855b9b9141d38b3c2b9532a246a4d5dc9ade",
+        "0" * 64,
+        1,
+    )
+    expect_lock_snippet(changed_provider_pin, valid, success=False)
 
 
 def main() -> None:

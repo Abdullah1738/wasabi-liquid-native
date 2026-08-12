@@ -5,8 +5,8 @@ use elements::encode::serialize;
 use elements::hashes::sha256;
 use elements::secp256k1_zkp::{Secp256k1, SecretKey};
 use elements::{
-    Address, AddressParams, AssetId, LockTime, OutPoint, Script, Sequence, Transaction, TxIn,
-    TxOut, TxOutSecrets, TxOutWitness,
+    Address, AddressParams, AssetId, LockTime, OutPoint, RangeProof, RangeProofMessage, Script,
+    Sequence, Transaction, TxIn, TxOut, TxOutSecrets, TxOutWitness,
 };
 use miniscript::Descriptor;
 use miniscript::bitcoin::NetworkKind;
@@ -17,8 +17,10 @@ use rand::rngs::StdRng;
 use sha2::{Digest, Sha256};
 use wasabi_liquid_native_address::{ConfidentialLiquidAddress, LiquidAddressProfile};
 use wasabi_liquid_native_ordinary_pset::ConfidentialOutput;
+use wasabi_liquid_native_output_opening::{OpenedOutput, open_confidential_output};
 use wasabi_liquid_native_wallet_facts::{
     BorrowedSelectedOutput, DescriptorCatalog, DescriptorNetwork, SelectedOutputBatch,
+    SelectedOutputOpeningProvider,
 };
 
 pub const TEST_PUBLIC_DESCRIPTOR: &str = "elwpkh([28b3f14e/84'/1'/0']tpubDC2Q4xK4XH72GM7MowNuajyWVbigRLBWKswyP5T88hpPwu5nGqJWnda8zhJEFt71av73Hm8mUMMFSz9acNVzz8b1UbdSHCDXKTbSv5eEytu/<0;1>/*)";
@@ -30,6 +32,98 @@ pub struct FundingFixture {
     pub fee_asset: AssetId,
     pub second_asset: AssetId,
     pub slip77: [u8; 32],
+}
+
+pub struct FixtureOpeningProvider {
+    slip77: [u8; 32],
+    calls: usize,
+    refuse_at: Option<usize>,
+    panic_at: Option<usize>,
+    substitute_at: Option<(usize, TxOut)>,
+    seen_scripts: Vec<Vec<u8>>,
+}
+
+impl FixtureOpeningProvider {
+    pub fn new(fixture: &FundingFixture) -> Self {
+        Self::with_material(fixture.slip77)
+    }
+
+    pub fn with_material(slip77: [u8; 32]) -> Self {
+        Self {
+            slip77,
+            calls: 0,
+            refuse_at: None,
+            panic_at: None,
+            substitute_at: None,
+            seen_scripts: Vec::new(),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn refusing(fixture: &FundingFixture, call: usize) -> Self {
+        let mut provider = Self::new(fixture);
+        provider.refuse_at = Some(call);
+        provider
+    }
+
+    #[allow(dead_code)]
+    pub fn panicking(fixture: &FundingFixture, call: usize) -> Self {
+        let mut provider = Self::new(fixture);
+        provider.panic_at = Some(call);
+        provider
+    }
+
+    #[allow(dead_code)]
+    pub fn substituting(fixture: &FundingFixture, call: usize, output: TxOut) -> Self {
+        let mut provider = Self::new(fixture);
+        provider.substitute_at = Some((call, output));
+        provider
+    }
+
+    #[allow(dead_code)]
+    pub const fn calls(&self) -> usize {
+        self.calls
+    }
+
+    #[allow(dead_code)]
+    pub fn seen_scripts(&self) -> &[Vec<u8>] {
+        &self.seen_scripts
+    }
+}
+
+impl SelectedOutputOpeningProvider for FixtureOpeningProvider {
+    fn open_selected_output(
+        &mut self,
+        secp: &Secp256k1<elements::secp256k1_zkp::All>,
+        output: &TxOut,
+    ) -> Option<OpenedOutput> {
+        let call = self.calls;
+        self.calls += 1;
+        self.seen_scripts
+            .push(output.script_pubkey.as_bytes().to_vec());
+        if self.panic_at == Some(call) {
+            panic!("test-only opening provider unwind");
+        }
+        if self.refuse_at == Some(call) {
+            return None;
+        }
+        let output = self
+            .substitute_at
+            .as_ref()
+            .filter(|(substitute_call, _)| *substitute_call == call)
+            .map_or(output, |(_, substitute)| substitute);
+        let key =
+            ScopedFixtureBlindingKey(slip77_key(&self.slip77, output.script_pubkey.as_bytes()));
+        open_confidential_output(secp, output, &key.0).ok()
+    }
+}
+
+struct ScopedFixtureBlindingKey(SecretKey);
+
+impl Drop for ScopedFixtureBlindingKey {
+    fn drop(&mut self) {
+        self.0.non_secure_erase();
+    }
 }
 
 pub fn catalog() -> DescriptorCatalog {
@@ -208,6 +302,62 @@ pub fn planned_outputs(fixture: &FundingFixture) -> Vec<ConfidentialOutput> {
         ConfidentialOutput::from_address(fixture.fee_asset, 800, &second_receive_address())
             .unwrap(),
     ]
+}
+
+#[allow(dead_code)]
+pub fn zero_opening_output(fixture: &FundingFixture) -> TxOut {
+    let script_pubkey = descriptor_scripts()[0].clone();
+    let secp = Secp256k1::new();
+    let receiver_key = slip77_key(&fixture.slip77, script_pubkey.as_bytes());
+    let mut rng = StdRng::from_seed(synthetic_material(
+        b"ordinary wallet PSET provider zero-opening output",
+    ));
+    let spent_secrets = [TxOutSecrets::new(
+        fixture.fee_asset,
+        AssetBlindingFactor::zero(),
+        1_000,
+        ValueBlindingFactor::zero(),
+    )];
+    let secrets = TxOutSecrets::new(
+        fixture.fee_asset,
+        AssetBlindingFactor::new(&mut rng),
+        0,
+        ValueBlindingFactor::new(&mut rng),
+    );
+    let (asset, surjection_proof) = Asset::Explicit(secrets.asset)
+        .blind(&mut rng, &secp, secrets.asset_bf, &spent_secrets)
+        .unwrap();
+    let message = RangeProofMessage::new(secrets.asset, secrets.asset_bf);
+    let asset_generator = message.commitment(&secp);
+    let value = Value::new_confidential(&secp, 0, asset_generator, secrets.value_bf);
+    let value_commitment = value.commitment().unwrap();
+    let (nonce, shared_secret) =
+        Nonce::new_confidential(&mut rng, &secp, &receiver_key.public_key(&secp));
+    let rangeproof = RangeProof::new(
+        &secp,
+        0,
+        value_commitment,
+        0,
+        secrets.value_bf.into_inner(),
+        &message.to_byte_array(),
+        script_pubkey.as_bytes(),
+        shared_secret,
+        0,
+        52,
+        asset_generator,
+    )
+    .unwrap();
+
+    TxOut {
+        asset,
+        value,
+        nonce,
+        script_pubkey,
+        witness: TxOutWitness {
+            surjection_proof,
+            rangeproof,
+        },
+    }
 }
 
 pub fn receive_address() -> ConfidentialLiquidAddress {

@@ -202,7 +202,8 @@ lock_bytes = lock_path.read_bytes()
 baseline_text = baseline_path.read_text()
 baseline_hash = "544ad20b54fe2e279a3074a5cfdeec49bd13752f358ffd0d67c0573546af326c"
 wire_post_hash = "f30d4a8bfc6b43f61fb7eefdd0d86f866ebef815d5aa57cc2b5b3319023fcf25"
-current_hash = "5d105ea8138170cac5501f42d148855b9b9141d38b3c2b9532a246a4d5dc9ade"
+provider_post_hash = "5d105ea8138170cac5501f42d148855b9b9141d38b3c2b9532a246a4d5dc9ade"
+current_hash = "3287e329ab3d1b9868cb5eb3c39b1713a0d660b0dcd35100688bfb7c7a867178"
 if baseline_text != baseline_hash + "\n":
     raise SystemExit("wallet-facts conformance lock baseline pin mismatch")
 if hashlib.sha256(lock_bytes).hexdigest() != current_hash:
@@ -243,6 +244,17 @@ dependencies = [
 ]
 
 """
+for marker in (composer_marker, facts_marker):
+    indexes = [index for index, block in enumerate(blocks) if marker in block]
+    entry = ' "wasabi-liquid-native-output-opening",\n'
+    if len(indexes) != 1 or blocks[indexes[0]].count(entry) != 1:
+        raise SystemExit("selected opening-provider lock edge multiplicity mismatch")
+    blocks[indexes[0]] = blocks[indexes[0]].replace(entry, "", 1)
+
+provider_post_bytes = "[[package]]\n".join(blocks).encode("utf-8")
+if hashlib.sha256(provider_post_bytes).hexdigest() != provider_post_hash:
+    raise SystemExit("selected opening-provider lock reverse transform mismatch")
+
 if blocks[composer_indexes[0]] != composer_block:
     raise SystemExit("ordinary-wallet PSET lock package mismatch")
 del blocks[composer_indexes[0]]

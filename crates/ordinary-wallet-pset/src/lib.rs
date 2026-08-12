@@ -23,8 +23,8 @@ use wasabi_liquid_native_ordinary_pset::{
     OrdinarySigningError, PsetConstructionError, prepare_ordinary_pset,
 };
 use wasabi_liquid_native_wallet_facts::{
-    BorrowedSlip77, DescriptorCatalog, SelectedOutputBatch, WalletObservationError,
-    validate_selected_owned_inputs,
+    DescriptorCatalog, SelectedOutputBatch, SelectedOutputOpeningProvider, WalletObservationError,
+    open_prepared_selected_owned_inputs, prepare_selected_owned_inputs,
 };
 
 const MAX_UNIFORM_DRAW_ATTEMPTS: usize = 128;
@@ -149,9 +149,15 @@ impl OrdinaryWalletTransactionFailure {
 /// This function performs no node access, chain authentication, unspentness or
 /// reservation check, fee-policy decision, broadcast submission, acceptance
 /// check, or confirmation tracking.
-pub fn build_sign_and_finalize_ordinary_wallet_transaction<R, S>(
+///
+/// Output-provider calls are nontransactional and are not rolled back by a
+/// later opening, construction, blinding, or signing failure. Retrying this
+/// complete operation starts provider calls again at row zero. Only a direct
+/// retry of the blinded PSET recovered from a signing failure avoids further
+/// provider calls.
+pub fn build_sign_and_finalize_ordinary_wallet_transaction<R, P, S>(
     catalog: &DescriptorCatalog,
-    slip77_master_key: BorrowedSlip77<'_>,
+    provider: &mut P,
     selected_outputs: SelectedOutputBatch,
     outputs: Vec<ConfidentialOutput>,
     fee: ExplicitFee,
@@ -160,17 +166,12 @@ pub fn build_sign_and_finalize_ordinary_wallet_transaction<R, S>(
 ) -> Result<FinalizedOrdinaryTransaction, OrdinaryWalletTransactionFailure>
 where
     R: RngCore + CryptoRng,
+    P: SelectedOutputOpeningProvider + ?Sized,
     S: OrdinaryP2wpkhSigner,
 {
-    let blinded = build_blinded_ordinary_wallet_pset(
-        catalog,
-        slip77_master_key,
-        selected_outputs,
-        outputs,
-        fee,
-        rng,
-    )
-    .map_err(OrdinaryWalletTransactionFailure::preparation)?;
+    let blinded =
+        build_blinded_ordinary_wallet_pset(catalog, provider, selected_outputs, outputs, fee, rng)
+            .map_err(OrdinaryWalletTransactionFailure::preparation)?;
 
     let secp = Secp256k1::new();
     match blinded.sign_and_finalize(&secp, signer) {
@@ -195,33 +196,43 @@ where
 ///
 /// Validated inputs and supplied confidential outputs are independently shuffled
 /// immediately before construction. The mandatory explicit fee remains last.
-pub fn build_blinded_ordinary_wallet_pset<R: RngCore + CryptoRng>(
+/// Provider calls are nontransactional: calls already made survive any later
+/// opening, construction, or blinding failure, and retrying this complete
+/// operation starts provider calls again at row zero.
+pub fn build_blinded_ordinary_wallet_pset<R, P>(
     catalog: &DescriptorCatalog,
-    slip77_master_key: BorrowedSlip77<'_>,
+    provider: &mut P,
     selected_outputs: SelectedOutputBatch,
     outputs: Vec<ConfidentialOutput>,
     fee: ExplicitFee,
     rng: &mut R,
-) -> Result<BlindedOrdinaryPset, OrdinaryWalletPsetError> {
+) -> Result<BlindedOrdinaryPset, OrdinaryWalletPsetError>
+where
+    R: RngCore + CryptoRng,
+    P: SelectedOutputOpeningProvider + ?Sized,
+{
     let selected_outputs = ScopedSelectedOutputs(selected_outputs);
     if outputs.is_empty() || outputs.len() > MAX_CONFIDENTIAL_OUTPUTS {
         return Err(OrdinaryWalletPsetError::InvalidPlan);
     }
+    if !selected_outputs
+        .0
+        .expected_ordinary_plan_is_balanced(&outputs, fee)
+    {
+        return Err(OrdinaryWalletPsetError::InvalidPlan);
+    }
     let mut secp = Secp256k1::new();
-    let validated_inputs = validate_selected_owned_inputs(
-        catalog,
-        slip77_master_key,
-        &selected_outputs.0,
-        &mut secp,
-        rng,
-    )
-    .map_err(map_wallet_observation_error)?;
+    let prepared = prepare_selected_owned_inputs(catalog, &selected_outputs.0, &secp)
+        .map_err(map_wallet_observation_error)?;
+    let layout = LayoutPlan::generate(prepared.input_count(), outputs.len(), rng)?;
+    let validated_inputs = open_prepared_selected_owned_inputs(prepared, provider, &mut secp, rng)
+        .map_err(map_wallet_observation_error)?;
     drop(selected_outputs);
     let spendable_inputs = validated_inputs
         .into_iter()
         .map(|input| input.into_spendable())
         .collect::<Vec<_>>();
-    let (spendable_inputs, outputs) = randomize_layout(spendable_inputs, outputs, rng)?;
+    let (spendable_inputs, outputs) = layout.apply(spendable_inputs, outputs);
     let prepared = prepare_ordinary_pset(spendable_inputs, outputs, fee, LockTime::ZERO)
         .map_err(map_construction_error)?;
     blind_immediately(prepared, rng, &secp)
@@ -236,26 +247,60 @@ impl Drop for ScopedSelectedOutputs {
     }
 }
 
-fn randomize_layout<Input, Output, R: RngCore>(
-    mut inputs: Vec<Input>,
-    mut outputs: Vec<Output>,
-    rng: &mut R,
-) -> Result<(Vec<Input>, Vec<Output>), OrdinaryWalletPsetError> {
-    shuffle_in_place(&mut inputs, rng)?;
-    shuffle_in_place(&mut outputs, rng)?;
-    Ok((inputs, outputs))
+struct LayoutPlan {
+    input_swaps: Vec<ScopedSwapIndex>,
+    output_swaps: Vec<ScopedSwapIndex>,
 }
 
-fn shuffle_in_place<T, R: RngCore>(
-    values: &mut [T],
+impl LayoutPlan {
+    fn generate<R: RngCore>(
+        input_count: usize,
+        output_count: usize,
+        rng: &mut R,
+    ) -> Result<Self, OrdinaryWalletPsetError> {
+        let mut plan = Self {
+            input_swaps: Vec::with_capacity(input_count.saturating_sub(1)),
+            output_swaps: Vec::with_capacity(output_count.saturating_sub(1)),
+        };
+        fill_shuffle_plan(&mut plan.input_swaps, input_count, rng)?;
+        fill_shuffle_plan(&mut plan.output_swaps, output_count, rng)?;
+        Ok(plan)
+    }
+
+    fn apply<Input, Output>(
+        mut self,
+        mut inputs: Vec<Input>,
+        mut outputs: Vec<Output>,
+    ) -> (Vec<Input>, Vec<Output>) {
+        apply_shuffle_plan(&mut inputs, &mut self.input_swaps);
+        apply_shuffle_plan(&mut outputs, &mut self.output_swaps);
+        #[cfg(test)]
+        {
+            assert!(self.input_swaps.iter().all(|index| index.0 == 0));
+            assert!(self.output_swaps.iter().all(|index| index.0 == 0));
+            ZEROED_LAYOUT_PLANS_BEFORE_DROP.with(|count| count.set(count.get() + 1));
+        }
+        (inputs, outputs)
+    }
+}
+
+fn fill_shuffle_plan<R: RngCore>(
+    swaps: &mut Vec<ScopedSwapIndex>,
+    value_count: usize,
     rng: &mut R,
 ) -> Result<(), OrdinaryWalletPsetError> {
-    for index in (1..values.len()).rev() {
-        let swap_index = sample_uniform_index(index + 1, rng)?;
-        values.swap(index, swap_index.0);
-        drop(swap_index);
+    for index in (1..value_count).rev() {
+        swaps.push(sample_uniform_index(index + 1, rng)?);
     }
     Ok(())
+}
+
+fn apply_shuffle_plan<T>(values: &mut [T], swaps: &mut [ScopedSwapIndex]) {
+    debug_assert_eq!(swaps.len(), values.len().saturating_sub(1));
+    for (index, swap_index) in (1..values.len()).rev().zip(swaps.iter_mut()) {
+        values.swap(index, swap_index.0);
+        swap_index.clear_in_place();
+    }
 }
 
 fn sample_uniform_index<R: RngCore>(
@@ -292,6 +337,8 @@ thread_local! {
     static CLEARED_DRAW_BUFFERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static CLEARED_DRAW_VALUES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static CLEARED_SWAP_INDICES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static SWAP_INDICES_CLEARED_IN_PLACE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static ZEROED_LAYOUT_PLANS_BEFORE_DROP: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SELECTED_OUTPUT_OWNER_DROPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -328,6 +375,15 @@ impl Drop for ScopedSwapIndex {
             assert_eq!(self.0, 0);
             CLEARED_SWAP_INDICES.with(|count| count.set(count.get() + 1));
         }
+    }
+}
+
+impl ScopedSwapIndex {
+    fn clear_in_place(&mut self) {
+        self.0 = 0;
+        black_box(&self.0);
+        #[cfg(test)]
+        SWAP_INDICES_CLEARED_IN_PLACE.with(|count| count.set(count.get() + 1));
     }
 }
 
@@ -451,12 +507,13 @@ mod orchestration_test_common;
 mod tests {
     use super::*;
 
+    use super::orchestration_test_common as common;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
     use wasabi_liquid_native_ordinary_pset::ExplicitFee;
-    use wasabi_liquid_native_wallet_facts::BorrowedSlip77;
 
-    use super::orchestration_test_common as common;
+    static_assertions::assert_not_impl_any!(LayoutPlan: Copy, Clone, std::fmt::Debug);
+    static_assertions::assert_not_impl_any!(ScopedSwapIndex: Copy, Clone, std::fmt::Debug);
 
     struct ScriptedDrawRng {
         draws: std::collections::VecDeque<u64>,
@@ -593,32 +650,26 @@ mod tests {
         }
     }
 
-    struct InputDropProbe;
-    struct OutputDropProbe;
-
-    thread_local! {
-        static INPUT_DROP_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-        static OUTPUT_DROP_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    }
-
-    impl Drop for InputDropProbe {
-        fn drop(&mut self) {
-            INPUT_DROP_PROBES.with(|count| count.set(count.get() + 1));
-        }
-    }
-
-    impl Drop for OutputDropProbe {
-        fn drop(&mut self) {
-            OUTPUT_DROP_PROBES.with(|count| count.set(count.get() + 1));
-        }
-    }
-
     #[test]
     fn selected_output_expectation_maps_to_invalid_selected_output() {
         assert_eq!(
             map_wallet_observation_error(WalletObservationError::SelectedOutputExpectation),
             OrdinaryWalletPsetError::InvalidSelectedOutput
         );
+    }
+
+    #[test]
+    fn production_source_uses_only_the_opening_provider_boundary() {
+        let source = include_str!("lib.rs");
+        let forbidden_master_borrow = ["Borrowed", "Slip77"].concat();
+        let names_master_borrow = |candidate: &str| candidate.contains(&forbidden_master_borrow);
+        assert!(!names_master_borrow(source));
+        assert!(names_master_borrow(&format!(
+            "{source}\npub fn post_test_regression(_: {forbidden_master_borrow}<'_>) {{}}"
+        )));
+        assert!(source.contains("SelectedOutputOpeningProvider"));
+        assert!(source.contains("prepare_selected_owned_inputs"));
+        assert!(source.contains("open_prepared_selected_owned_inputs"));
     }
 
     #[test]
@@ -633,7 +684,7 @@ mod tests {
 
         let blinded = build_blinded_ordinary_wallet_pset(
             &catalog,
-            BorrowedSlip77::new(&fixture.slip77),
+            &mut common::FixtureOpeningProvider::new(&fixture),
             common::selected_batch(&fixture, &[1, 0]),
             common::planned_outputs(&fixture),
             fee,
@@ -649,7 +700,7 @@ mod tests {
         assert!(matches!(
             build_blinded_ordinary_wallet_pset(
                 &catalog,
-                BorrowedSlip77::new(&fixture.slip77),
+                &mut common::FixtureOpeningProvider::new(&fixture),
                 common::selected_batch(&fixture, &[1, 0]),
                 Vec::new(),
                 fee,
@@ -665,7 +716,7 @@ mod tests {
         let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _ = build_blinded_ordinary_wallet_pset(
                 &catalog,
-                BorrowedSlip77::new(&fixture.slip77),
+                &mut common::FixtureOpeningProvider::new(&fixture),
                 common::selected_batch(&fixture, &[1, 0]),
                 common::planned_outputs(&fixture),
                 fee,
@@ -676,6 +727,27 @@ mod tests {
         assert_eq!(
             SELECTED_OUTPUT_OWNER_DROPS.with(std::cell::Cell::get) - drops_before,
             3
+        );
+
+        let mut provider = common::FixtureOpeningProvider::panicking(&fixture, 1);
+        let mut rng = StdRng::from_seed(common::synthetic_material(
+            b"ordinary wallet selected provider unwind",
+        ));
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = build_blinded_ordinary_wallet_pset(
+                &catalog,
+                &mut provider,
+                common::selected_batch(&fixture, &[1, 0]),
+                common::planned_outputs(&fixture),
+                fee,
+                &mut rng,
+            );
+        }));
+        assert!(unwind.is_err());
+        assert_eq!(provider.calls(), 2);
+        assert_eq!(
+            SELECTED_OUTPUT_OWNER_DROPS.with(std::cell::Cell::get) - drops_before,
+            4
         );
     }
 
@@ -737,6 +809,32 @@ mod tests {
     }
 
     #[test]
+    fn layout_exhaustion_clears_an_earlier_input_plan_index() {
+        let buffer_clears_before = CLEARED_DRAW_BUFFERS.with(std::cell::Cell::get);
+        let value_clears_before = CLEARED_DRAW_VALUES.with(std::cell::Cell::get);
+        let index_clears_before = CLEARED_SWAP_INDICES.with(std::cell::Cell::get);
+        let mut rng = RejectingDrawRng { fill_calls: 0 };
+
+        assert!(matches!(
+            LayoutPlan::generate(2, 3, &mut rng),
+            Err(OrdinaryWalletPsetError::RandomnessUnavailable)
+        ));
+        assert_eq!(rng.fill_calls, MAX_UNIFORM_DRAW_ATTEMPTS + 1);
+        assert_eq!(
+            CLEARED_DRAW_BUFFERS.with(std::cell::Cell::get) - buffer_clears_before,
+            MAX_UNIFORM_DRAW_ATTEMPTS + 1
+        );
+        assert_eq!(
+            CLEARED_DRAW_VALUES.with(std::cell::Cell::get) - value_clears_before,
+            MAX_UNIFORM_DRAW_ATTEMPTS + 1
+        );
+        assert_eq!(
+            CLEARED_SWAP_INDICES.with(std::cell::Cell::get) - index_clears_before,
+            1
+        );
+    }
+
+    #[test]
     fn source_failure_clears_a_partially_filled_draw() {
         let buffer_clears_before = CLEARED_DRAW_BUFFERS.with(std::cell::Cell::get);
         let value_clears_before = CLEARED_DRAW_VALUES.with(std::cell::Cell::get);
@@ -762,28 +860,54 @@ mod tests {
 
     #[test]
     fn empty_and_singleton_shuffles_consume_no_randomness() {
-        let mut empty: [u8; 0] = [];
-        let mut singleton = [7_u8];
         let mut rng = ScriptedDrawRng::new([]);
 
-        shuffle_in_place(&mut empty, &mut rng).unwrap();
-        shuffle_in_place(&mut singleton, &mut rng).unwrap();
+        let empty = LayoutPlan::generate(0, 0, &mut rng).unwrap();
+        let (empty_inputs, empty_outputs) = empty.apply(Vec::<u8>::new(), Vec::<u8>::new());
+        let singleton = LayoutPlan::generate(1, 1, &mut rng).unwrap();
+        let (singleton_inputs, singleton_outputs) = singleton.apply(vec![7_u8], vec![9_u8]);
 
-        assert_eq!(singleton, [7]);
+        assert!(empty_inputs.is_empty());
+        assert!(empty_outputs.is_empty());
+        assert_eq!(singleton_inputs, [7]);
+        assert_eq!(singleton_outputs, [9]);
         assert_eq!(rng.fill_calls, 0);
     }
 
     #[test]
-    fn late_layout_failure_drops_every_owned_input_and_output() {
-        let input_drops_before = INPUT_DROP_PROBES.with(std::cell::Cell::get);
-        let output_drops_before = OUTPUT_DROP_PROBES.with(std::cell::Cell::get);
+    fn layout_application_clears_heap_slots_before_plan_drop() {
+        let in_place_before = SWAP_INDICES_CLEARED_IN_PLACE.with(std::cell::Cell::get);
+        let zeroed_plans_before = ZEROED_LAYOUT_PLANS_BEFORE_DROP.with(std::cell::Cell::get);
+        let drops_before = CLEARED_SWAP_INDICES.with(std::cell::Cell::get);
+        let plan = LayoutPlan {
+            input_swaps: vec![ScopedSwapIndex(1), ScopedSwapIndex(0)],
+            output_swaps: vec![ScopedSwapIndex(1)],
+        };
+
+        let (inputs, outputs) = plan.apply(vec![1, 2, 3], vec![4, 5]);
+
+        assert_eq!(inputs, [3, 1, 2]);
+        assert_eq!(outputs, [4, 5]);
+        assert_eq!(
+            SWAP_INDICES_CLEARED_IN_PLACE.with(std::cell::Cell::get) - in_place_before,
+            3
+        );
+        assert_eq!(
+            ZEROED_LAYOUT_PLANS_BEFORE_DROP.with(std::cell::Cell::get) - zeroed_plans_before,
+            1
+        );
+        assert_eq!(
+            CLEARED_SWAP_INDICES.with(std::cell::Cell::get) - drops_before,
+            3
+        );
+    }
+
+    #[test]
+    fn late_layout_failure_clears_every_partial_plan_index() {
+        let index_clears_before = CLEARED_SWAP_INDICES.with(std::cell::Cell::get);
         let mut rng = FailAfterOneDrawRng { calls: 0 };
 
-        let result = randomize_layout(
-            vec![InputDropProbe, InputDropProbe],
-            vec![OutputDropProbe, OutputDropProbe],
-            &mut rng,
-        );
+        let result = LayoutPlan::generate(2, 2, &mut rng);
 
         assert!(matches!(
             result,
@@ -791,12 +915,8 @@ mod tests {
         ));
         assert_eq!(rng.calls, 2);
         assert_eq!(
-            INPUT_DROP_PROBES.with(std::cell::Cell::get) - input_drops_before,
-            2
-        );
-        assert_eq!(
-            OUTPUT_DROP_PROBES.with(std::cell::Cell::get) - output_drops_before,
-            2
+            CLEARED_SWAP_INDICES.with(std::cell::Cell::get) - index_clears_before,
+            1
         );
     }
 

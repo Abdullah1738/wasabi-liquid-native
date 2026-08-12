@@ -453,6 +453,7 @@ dependencies = [
  "static_assertions",
  "wasabi-liquid-native-address",
  "wasabi-liquid-native-ordinary-pset",
+ "wasabi-liquid-native-output-opening",
  "wasabi-liquid-native-wallet-facts",
 ]
 
@@ -483,6 +484,7 @@ dependencies = [
  "sha2",
  "static_assertions",
  "wasabi-liquid-native-ordinary-pset",
+ "wasabi-liquid-native-output-opening",
  "wasabi-liquid-native-transaction-validation",
  "zeroize",
 ]

@@ -8,6 +8,7 @@ use elements::{
 };
 use rand::SeedableRng;
 use rand::rngs::StdRng;
+use wasabi_liquid_native_output_opening::open_confidential_output;
 
 const TEST_PUBLIC_DESCRIPTOR: &str = "elwpkh([28b3f14e/84'/1'/0']tpubDC2Q4xK4XH72GM7MowNuajyWVbigRLBWKswyP5T88hpPwu5nGqJWnda8zhJEFt71av73Hm8mUMMFSz9acNVzz8b1UbdSHCDXKTbSv5eEytu/<0;1>/*)";
 const TEST_PUBLIC_DESCRIPTOR_CHECKSUM: &str = "u0khc0kg";
@@ -94,6 +95,90 @@ impl rand::RngCore for SelectedFailingCryptoRng {
 
 impl rand::CryptoRng for SelectedFailingCryptoRng {}
 
+struct SyntheticSelectedOpeningProvider<'key> {
+    slip77: &'key [u8; 32],
+    calls: usize,
+    refuse_at: Option<usize>,
+    panic_at: Option<usize>,
+    substitute_at: Option<(usize, TxOut)>,
+    seen_scripts: Vec<Vec<u8>>,
+}
+
+struct SyntheticProviderScratch([u8; 32]);
+
+impl Drop for SyntheticProviderScratch {
+    fn drop(&mut self) {
+        self.0.zeroize();
+        assert!(self.0.iter().all(|byte| *byte == 0));
+        SYNTHETIC_PROVIDER_SCRATCH_DROPS.with(|count| count.set(count.get() + 1));
+    }
+}
+
+thread_local! {
+    static SYNTHETIC_PROVIDER_SCRATCH_DROPS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
+impl<'key> SyntheticSelectedOpeningProvider<'key> {
+    fn new(slip77: &'key [u8; 32]) -> Self {
+        Self {
+            slip77,
+            calls: 0,
+            refuse_at: None,
+            panic_at: None,
+            substitute_at: None,
+            seen_scripts: Vec::new(),
+        }
+    }
+
+    fn refusing(slip77: &'key [u8; 32], call: usize) -> Self {
+        let mut provider = Self::new(slip77);
+        provider.refuse_at = Some(call);
+        provider
+    }
+
+    fn panicking(slip77: &'key [u8; 32], call: usize) -> Self {
+        let mut provider = Self::new(slip77);
+        provider.panic_at = Some(call);
+        provider
+    }
+
+    fn substituting(slip77: &'key [u8; 32], call: usize, output: TxOut) -> Self {
+        let mut provider = Self::new(slip77);
+        provider.substitute_at = Some((call, output));
+        provider
+    }
+}
+
+impl SelectedOutputOpeningProvider for SyntheticSelectedOpeningProvider<'_> {
+    fn open_selected_output(
+        &mut self,
+        secp: &Secp256k1<All>,
+        output: &TxOut,
+    ) -> Option<OpenedOutput> {
+        let _scratch = SyntheticProviderScratch([0xa5; 32]);
+        let call = self.calls;
+        self.calls += 1;
+        self.seen_scripts
+            .push(output.script_pubkey.as_bytes().to_vec());
+        if self.panic_at == Some(call) {
+            panic!("test-only selected opening provider unwind");
+        }
+        if self.refuse_at == Some(call) {
+            return None;
+        }
+        let output = self
+            .substitute_at
+            .as_ref()
+            .filter(|(substitute_call, _)| *substitute_call == call)
+            .map_or(output, |(_, substitute)| substitute);
+        let blinding_key =
+            derive_blinding_key(self.slip77, output.script_pubkey.as_bytes()).ok()?;
+        open_confidential_output(secp, output, &blinding_key.0).ok()
+    }
+}
+
 static_assertions::assert_not_impl_any!(BorrowedSlip77<'static>: Copy, Clone, std::fmt::Debug);
 static_assertions::assert_not_impl_any!(BorrowedCandidateTransaction<'static>: Copy, Clone, std::fmt::Debug);
 static_assertions::assert_not_impl_any!(BorrowedSelectedOutput<'static>: Copy, Clone, std::fmt::Debug);
@@ -105,9 +190,13 @@ static_assertions::assert_not_impl_any!(PreparedCandidateOrder: Copy, Clone, std
 static_assertions::assert_not_impl_any!(DescriptorCatalog: Copy, Clone, std::fmt::Debug);
 static_assertions::assert_not_impl_any!(CandidateBatch: Copy, Clone, std::fmt::Debug);
 static_assertions::assert_not_impl_any!(SelectedOutputBatch: Copy, Clone, std::fmt::Debug);
+static_assertions::assert_not_impl_any!(PubliclyPreparedSelectedOutputs<'static>: Copy, Clone, std::fmt::Debug);
 static_assertions::assert_not_impl_any!(SelectedOutputExpectation: Copy, Clone, std::fmt::Debug);
 static_assertions::assert_not_impl_any!(SelectedOutputPayload: Copy, Clone, std::fmt::Debug);
 static_assertions::assert_not_impl_any!(SelectedOutputRequest: Copy, Clone, std::fmt::Debug);
+static_assertions::assert_not_impl_any!(ExpectedPlanTotal: Copy, Clone, std::fmt::Debug);
+static_assertions::assert_not_impl_any!(ExpectedPlanTotals: Copy, Clone, std::fmt::Debug);
+static_assertions::assert_not_impl_any!(ScopedExpectedPlanAsset: Copy, Clone, std::fmt::Debug);
 static_assertions::assert_not_impl_any!(PubliclyValidatedSelectedOutput: Copy, Clone, std::fmt::Debug);
 static_assertions::assert_not_impl_any!(ScopedSelectedRequestIndex: Copy, Clone, std::fmt::Debug);
 static_assertions::assert_not_impl_any!(ValidatedOwnedInput: Copy, Clone, std::fmt::Debug);
@@ -119,15 +208,41 @@ static_assertions::assert_not_impl_any!(ObservedWalletBatch: Copy, Clone, std::f
 #[test]
 fn selected_output_validation_source_retains_only_one_owned_expectation() {
     let source = include_str!("lib.rs");
-    let validation = source
-        .split_once("pub fn validate_selected_owned_inputs")
+    let private_opening = source
+        .split_once("pub fn open_prepared_selected_owned_inputs")
         .unwrap()
         .1
-        .split_once("/// Validates one bounded candidate batch")
+        .split_once("/// Validates and privately opens one bounded batch")
         .unwrap()
         .0;
-    assert!(!validation.contains("BTreeSet"));
-    assert_eq!(validation.matches("OutPoint::new(").count(), 1);
+    assert!(!private_opening.contains("BTreeSet"));
+    assert_eq!(private_opening.matches("OutPoint::new(").count(), 1);
+    assert!(!private_opening.contains("BorrowedSlip77"));
+    assert!(!private_opening.contains("derive_blinding_key"));
+    assert!(!private_opening.contains("SecretKey"));
+
+    let provider_surface = source
+        .split_once("pub trait SelectedOutputOpeningProvider")
+        .unwrap()
+        .1
+        .split_once("/// An opaque, key-free capability")
+        .unwrap()
+        .0;
+    assert!(provider_surface.contains("secp: &Secp256k1<All>"));
+    assert!(provider_surface.contains("output: &TxOut"));
+    for forbidden in [
+        "OutPoint",
+        "Txid",
+        "AssetId",
+        "Descriptor",
+        "SelectedOutputBatch",
+        "Transaction",
+        "Pset",
+        "SecretKey",
+        "associated type",
+    ] {
+        assert!(!provider_surface.contains(forbidden), "{forbidden}");
+    }
 
     let public_temporary = source
         .split_once("struct PubliclyValidatedSelectedOutput")
@@ -139,6 +254,301 @@ fn selected_output_validation_source_retains_only_one_owned_expectation() {
     assert!(public_temporary.contains("request_index: ScopedSelectedRequestIndex"));
     assert!(!public_temporary.contains("output_index"));
     assert!(!public_temporary.contains("expected_"));
+
+    let prepared_surface = source
+        .split_once("impl PubliclyPreparedSelectedOutputs<'_>")
+        .unwrap()
+        .1
+        .split_once("struct ScopedSelectedRequestIndex")
+        .unwrap()
+        .0;
+    assert_eq!(prepared_surface.matches("pub fn ").count(), 1);
+    assert!(prepared_surface.contains("pub fn input_count"));
+}
+
+#[test]
+fn selected_output_provider_trait_is_object_safe() {
+    fn borrow_object(_: &mut dyn SelectedOutputOpeningProvider) {}
+
+    let slip77 = synthetic_material(b"wallet-facts object-safe selected provider");
+    let mut provider = SyntheticSelectedOpeningProvider::new(&slip77);
+    borrow_object(&mut provider);
+}
+
+#[test]
+fn expected_plan_predicate_is_exact_and_clears_all_accumulators() {
+    let catalog = test_catalog(1);
+    let slip77 = synthetic_material(b"wallet-facts expected plan material");
+    let fixture = confidential_fixture(&catalog, &slip77);
+    let expectation = fixture.selected_expectation(2);
+    let request = [BorrowedSelectedOutput::new(
+        &expectation.outpoint,
+        &expectation.asset,
+        &expectation.value,
+        &fixture.transaction_bytes,
+        std::slice::from_ref(&fixture.previous_transaction_bytes),
+    )];
+    let selected = SelectedOutputBatch::new(&request).unwrap();
+    let drops_before = expected_plan_total_drop_count();
+
+    assert!(selected.expected_ordinary_plan_is_balanced(
+        &[],
+        wasabi_liquid_native_ordinary_pset::ExplicitFee::new(fixture.first_asset, 100).unwrap(),
+    ));
+    assert_eq!(expected_plan_total_drop_count() - drops_before, 2);
+    assert!(!selected.expected_ordinary_plan_is_balanced(
+        &[],
+        wasabi_liquid_native_ordinary_pset::ExplicitFee::new(fixture.first_asset, 99).unwrap(),
+    ));
+    assert_eq!(expected_plan_total_drop_count() - drops_before, 4);
+    assert!(!selected.expected_ordinary_plan_is_balanced(
+        &[],
+        wasabi_liquid_native_ordinary_pset::ExplicitFee::new(fixture.second_asset, 100).unwrap(),
+    ));
+    assert_eq!(expected_plan_total_drop_count() - drops_before, 6);
+
+    let overflow_drops_before = expected_plan_total_drop_count();
+    {
+        let mut totals = ExpectedPlanTotals::with_capacity(1);
+        assert!(totals.checked_add([0x5a; 32], u64::MAX));
+        assert!(!totals.checked_add([0x5a; 32], 1));
+    }
+    assert_eq!(expected_plan_total_drop_count() - overflow_drops_before, 1);
+
+    let partial_total_drops_before = expected_plan_total_drop_count();
+    let partial_asset_drops_before = expected_plan_asset_drop_count();
+    let unwind = std::panic::catch_unwind(|| {
+        let mut totals = ExpectedPlanTotals::with_capacity(2);
+        assert!(totals.checked_add([0x31; 32], 7));
+        set_expected_plan_adds_before_panic(Some(0));
+        let _ = totals.checked_add([0x32; 32], 9);
+    });
+    set_expected_plan_adds_before_panic(None);
+    assert!(unwind.is_err());
+    assert_eq!(
+        expected_plan_total_drop_count() - partial_total_drops_before,
+        1
+    );
+    assert_eq!(
+        expected_plan_asset_drop_count() - partial_asset_drops_before,
+        2
+    );
+}
+
+#[test]
+fn split_selected_opening_calls_provider_in_exact_request_order_and_retries_from_zero() {
+    let catalog = test_catalog(1);
+    let slip77 = synthetic_material(b"wallet-facts split selected provider material");
+    let fixture = confidential_fixture(&catalog, &slip77);
+    let expectations = [
+        fixture.selected_expectation(1),
+        fixture.selected_expectation(0),
+    ];
+    let requests = borrowed_selected_outputs(&fixture, &expectations);
+    let selected = SelectedOutputBatch::new(&requests).unwrap();
+    let mut provider = SyntheticSelectedOpeningProvider::new(&slip77);
+
+    for retry in 0..2 {
+        let mut secp = Secp256k1::new();
+        let prepared = prepare_selected_owned_inputs(&catalog, &selected, &secp).unwrap();
+        assert_eq!(prepared.input_count(), 2);
+        assert_eq!(provider.calls, retry * 2);
+        let mut rng = StdRng::from_seed(synthetic_material(
+            b"wallet-facts split selected provider randomness",
+        ));
+        let validated =
+            open_prepared_selected_owned_inputs(prepared, &mut provider, &mut secp, &mut rng)
+                .unwrap();
+        assert_eq!(validated.len(), 2);
+        drop(validated);
+    }
+
+    assert_eq!(provider.calls, 4);
+    let expected = [
+        fixture.transaction.output[1].script_pubkey.as_bytes(),
+        fixture.transaction.output[0].script_pubkey.as_bytes(),
+        fixture.transaction.output[1].script_pubkey.as_bytes(),
+        fixture.transaction.output[0].script_pubkey.as_bytes(),
+    ];
+    assert!(provider.seen_scripts.iter().map(Vec::as_slice).eq(expected));
+}
+
+#[test]
+fn selected_provider_is_not_called_on_public_or_context_failure() {
+    let catalog = test_catalog(1);
+    let slip77 = synthetic_material(b"wallet-facts provider barrier material");
+    let fixture = confidential_fixture(&catalog, &slip77);
+    let absent = fixture.selected_expectation(7);
+    let absent_request = [BorrowedSelectedOutput::new(
+        &absent.outpoint,
+        &absent.asset,
+        &absent.value,
+        &fixture.transaction_bytes,
+        std::slice::from_ref(&fixture.previous_transaction_bytes),
+    )];
+    let absent = SelectedOutputBatch::new(&absent_request).unwrap();
+    let mut provider = SyntheticSelectedOpeningProvider::new(&slip77);
+    assert!(matches!(
+        validate_selected_owned_inputs(
+            &catalog,
+            &mut provider,
+            &absent,
+            &mut Secp256k1::new(),
+            &mut SelectedNoRandomnessExpected,
+        ),
+        Err(WalletObservationError::SelectedOutputExpectation)
+    ));
+    assert_eq!(provider.calls, 0);
+
+    let expectation = fixture.selected_expectation(0);
+    let request = [BorrowedSelectedOutput::new(
+        &expectation.outpoint,
+        &expectation.asset,
+        &expectation.value,
+        &fixture.transaction_bytes,
+        std::slice::from_ref(&fixture.previous_transaction_bytes),
+    )];
+    let selected = SelectedOutputBatch::new(&request).unwrap();
+    let mut failing_rng = SelectedFailingCryptoRng {
+        bytes_to_write: 7,
+        try_fill_calls: 0,
+    };
+    assert!(matches!(
+        validate_selected_owned_inputs(
+            &catalog,
+            &mut provider,
+            &selected,
+            &mut Secp256k1::new(),
+            &mut failing_rng,
+        ),
+        Err(WalletObservationError::ContextRandomnessUnavailable)
+    ));
+    assert_eq!(provider.calls, 0);
+}
+
+#[test]
+fn selected_provider_refusal_substitution_and_unwind_return_no_partial_capability() {
+    let catalog = test_catalog(1);
+    let slip77 = synthetic_material(b"wallet-facts provider atomicity material");
+    let fixture = confidential_fixture(&catalog, &slip77);
+    let expectations = [
+        fixture.selected_expectation(0),
+        fixture.selected_expectation(1),
+    ];
+    let requests = borrowed_selected_outputs(&fixture, &expectations);
+
+    for (refusal, expected_calls, expected_drops) in [(0, 1, 0), (1, 2, 1)] {
+        let selected = SelectedOutputBatch::new(&requests).unwrap();
+        let mut provider = SyntheticSelectedOpeningProvider::refusing(&slip77, refusal);
+        let drops_before = validated_owned_input_drop_count();
+        let result = validate_selected_owned_inputs(
+            &catalog,
+            &mut provider,
+            &selected,
+            &mut Secp256k1::new(),
+            &mut StdRng::from_seed(synthetic_material(b"wallet-facts provider refusal rng")),
+        );
+        assert!(matches!(
+            result,
+            Err(WalletObservationError::OwnedOutputOpening)
+        ));
+        assert_eq!(provider.calls, expected_calls);
+        assert_eq!(
+            validated_owned_input_drop_count() - drops_before,
+            expected_drops
+        );
+    }
+
+    for (substitution, substituted_output, expected_calls, expected_drops) in [
+        (0, fixture.transaction.output[1].clone(), 1, 0),
+        (1, fixture.transaction.output[0].clone(), 2, 1),
+    ] {
+        let selected = SelectedOutputBatch::new(&requests).unwrap();
+        let mut provider = SyntheticSelectedOpeningProvider::substituting(
+            &slip77,
+            substitution,
+            substituted_output,
+        );
+        let drops_before = validated_owned_input_drop_count();
+        assert!(matches!(
+            validate_selected_owned_inputs(
+                &catalog,
+                &mut provider,
+                &selected,
+                &mut Secp256k1::new(),
+                &mut StdRng::from_seed(synthetic_material(
+                    b"wallet-facts provider substitution rng"
+                )),
+            ),
+            Err(WalletObservationError::OwnedOutputOpening)
+        ));
+        assert_eq!(provider.calls, expected_calls);
+        assert_eq!(
+            validated_owned_input_drop_count() - drops_before,
+            expected_drops
+        );
+    }
+
+    let selected = SelectedOutputBatch::new(&requests).unwrap();
+    let mut provider = SyntheticSelectedOpeningProvider::panicking(&slip77, 1);
+    let drops_before = validated_owned_input_drop_count();
+    let scratch_drops_before = SYNTHETIC_PROVIDER_SCRATCH_DROPS.with(std::cell::Cell::get);
+    let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = validate_selected_owned_inputs(
+            &catalog,
+            &mut provider,
+            &selected,
+            &mut Secp256k1::new(),
+            &mut StdRng::from_seed(synthetic_material(b"wallet-facts provider panic rng")),
+        );
+    }));
+    assert!(unwind.is_err());
+    assert_eq!(provider.calls, 2);
+    assert_eq!(validated_owned_input_drop_count() - drops_before, 1);
+    assert_eq!(
+        SYNTHETIC_PROVIDER_SCRATCH_DROPS.with(std::cell::Cell::get) - scratch_drops_before,
+        2
+    );
+}
+
+#[test]
+fn selected_provider_zero_opening_is_redacted_and_clears_earlier_capability() {
+    let catalog = test_catalog(1);
+    let slip77 = synthetic_material(b"wallet-facts provider zero-opening material");
+    let fixture = confidential_fixture(&catalog, &slip77);
+    let zero = confidential_actual_zero_fixture(&catalog, &slip77);
+    let expectations = [
+        fixture.selected_expectation(0),
+        fixture.selected_expectation(1),
+    ];
+    let requests = borrowed_selected_outputs(&fixture, &expectations);
+
+    for (substitution, expected_calls, expected_drops) in [(0, 1, 0), (1, 2, 1)] {
+        let selected = SelectedOutputBatch::new(&requests).unwrap();
+        let mut provider = SyntheticSelectedOpeningProvider::substituting(
+            &slip77,
+            substitution,
+            zero.transaction.output[0].clone(),
+        );
+        let drops_before = validated_owned_input_drop_count();
+        assert!(matches!(
+            validate_selected_owned_inputs(
+                &catalog,
+                &mut provider,
+                &selected,
+                &mut Secp256k1::new(),
+                &mut StdRng::from_seed(synthetic_material(
+                    b"wallet-facts provider zero-opening randomness"
+                )),
+            ),
+            Err(WalletObservationError::OwnedOutputOpening)
+        ));
+        assert_eq!(provider.calls, expected_calls);
+        assert_eq!(
+            validated_owned_input_drop_count() - drops_before,
+            expected_drops
+        );
+    }
 }
 
 #[test]
@@ -629,7 +1039,7 @@ fn validates_selected_outputs_into_only_consuming_spendable_capabilities() {
 
     let validated = validate_selected_owned_inputs(
         &catalog,
-        BorrowedSlip77::new(&slip77),
+        &mut SyntheticSelectedOpeningProvider::new(&slip77),
         &selected,
         &mut secp,
         &mut rng,
@@ -809,7 +1219,7 @@ fn selected_output_public_failures_precede_entropy_and_secret_derivation() {
     assert!(matches!(
         validate_selected_owned_inputs(
             &catalog,
-            BorrowedSlip77::new(&slip77),
+            &mut SyntheticSelectedOpeningProvider::new(&slip77),
             &absent,
             &mut secp,
             &mut SelectedNoRandomnessExpected,
@@ -838,7 +1248,7 @@ fn selected_output_public_failures_precede_entropy_and_secret_derivation() {
     assert!(matches!(
         validate_selected_owned_inputs(
             &catalog,
-            BorrowedSlip77::new(&slip77),
+            &mut SyntheticSelectedOpeningProvider::new(&slip77),
             &unowned,
             &mut secp,
             &mut SelectedNoRandomnessExpected,
@@ -871,7 +1281,7 @@ fn selected_output_public_failures_precede_entropy_and_secret_derivation() {
     assert!(matches!(
         validate_selected_owned_inputs(
             &catalog,
-            BorrowedSlip77::new(&slip77),
+            &mut SyntheticSelectedOpeningProvider::new(&slip77),
             &damaged,
             &mut secp,
             &mut SelectedNoRandomnessExpected,
@@ -913,7 +1323,7 @@ fn selected_output_txid_substitution_rejects_before_previous_or_private_work() {
     assert!(matches!(
         validate_selected_owned_inputs(
             &catalog,
-            BorrowedSlip77::new(&slip77),
+            &mut SyntheticSelectedOpeningProvider::new(&slip77),
             &selected,
             &mut secp,
             &mut SelectedNoRandomnessExpected,
@@ -975,12 +1385,12 @@ fn selected_output_expectations_bind_consensus_asset_order_and_value_after_openi
         assert!(matches!(
             validate_selected_owned_inputs(
                 &catalog,
-                BorrowedSlip77::new(&slip77),
+                &mut SyntheticSelectedOpeningProvider::new(&slip77),
                 &selected,
                 &mut secp,
                 &mut rng,
             ),
-            Err(WalletObservationError::SelectedOutputExpectation)
+            Err(WalletObservationError::OwnedOutputOpening)
         ));
         assert_eq!(rng.fill_calls, 1);
         assert_eq!(derivation_call_count() - derivations_before, 1);
@@ -1024,12 +1434,12 @@ fn selected_output_late_expectation_mismatch_drops_earlier_capability() {
     assert!(matches!(
         validate_selected_owned_inputs(
             &catalog,
-            BorrowedSlip77::new(&slip77),
+            &mut SyntheticSelectedOpeningProvider::new(&slip77),
             &selected,
             &mut secp,
             &mut rng,
         ),
-        Err(WalletObservationError::SelectedOutputExpectation)
+        Err(WalletObservationError::OwnedOutputOpening)
     ));
     assert_eq!(
         validated_owned_input_drop_count() - capability_drops_before,
@@ -1078,7 +1488,7 @@ fn selected_output_private_failure_returns_no_capability() {
     assert!(matches!(
         validate_selected_owned_inputs(
             &catalog,
-            BorrowedSlip77::new(&wrong),
+            &mut SyntheticSelectedOpeningProvider::new(&wrong),
             &selected,
             &mut secp,
             &mut rng,
@@ -1128,7 +1538,7 @@ fn selected_output_derivation_failure_clears_private_state_and_owned_expectation
     assert!(matches!(
         validate_selected_owned_inputs(
             &catalog,
-            BorrowedSlip77::new(&slip77),
+            &mut SyntheticSelectedOpeningProvider::new(&slip77),
             &selected,
             &mut secp,
             &mut rng,
@@ -1183,7 +1593,7 @@ fn selected_output_late_opening_failure_drops_earlier_capability() {
 
     let result = validate_selected_owned_inputs(
         &catalog,
-        BorrowedSlip77::new(&slip77),
+        &mut SyntheticSelectedOpeningProvider::new(&slip77),
         &selected,
         &mut secp,
         &mut rng,
@@ -1243,7 +1653,7 @@ fn selected_output_entropy_failures_erase_seed_before_private_work() {
         assert!(matches!(
             validate_selected_owned_inputs(
                 &catalog,
-                BorrowedSlip77::new(&slip77),
+                &mut SyntheticSelectedOpeningProvider::new(&slip77),
                 &selected,
                 &mut secp,
                 &mut rng,
@@ -1334,7 +1744,7 @@ fn selected_output_expectations_clear_on_validation_unwind_when_batch_is_consume
         let consumed = selected;
         let _ = validate_selected_owned_inputs(
             &catalog,
-            BorrowedSlip77::new(&slip77),
+            &mut SyntheticSelectedOpeningProvider::new(&slip77),
             &consumed,
             &mut secp,
             &mut rng,

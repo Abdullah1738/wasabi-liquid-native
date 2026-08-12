@@ -11,12 +11,12 @@ use wasabi_liquid_native_ordinary_wallet_pset::{
     OrdinaryWalletPsetError, build_blinded_ordinary_wallet_pset,
 };
 use wasabi_liquid_native_wallet_facts::{
-    BorrowedSelectedOutput, BorrowedSlip77, SelectedOutputBatch, WalletObservationError,
+    BorrowedSelectedOutput, SelectedOutputBatch, WalletObservationError,
 };
 
 use common::{
     catalog, funding_fixture, planned_outputs, receive_address, second_receive_address,
-    selected_batch, synthetic_material,
+    selected_batch, synthetic_material, zero_opening_output,
 };
 
 static_assertions::assert_not_impl_any!(BlindedOrdinaryPset: Copy, Clone, std::fmt::Debug);
@@ -31,10 +31,11 @@ fn independently_shuffles_inputs_and_outputs_before_building_a_valid_pset() {
         b"ordinary wallet PSET orchestration success randomness",
         [0, 0],
     );
+    let mut provider = common::FixtureOpeningProvider::new(&fixture);
 
     let blinded = build_blinded_ordinary_wallet_pset(
         &catalog,
-        BorrowedSlip77::new(&fixture.slip77),
+        &mut provider,
         selected,
         planned_outputs(&fixture),
         ExplicitFee::new(fixture.fee_asset, 100).unwrap(),
@@ -107,6 +108,14 @@ fn independently_shuffles_inputs_and_outputs_before_building_a_valid_pset() {
         .verify_tx_amt_proofs(&secp, &previous_outputs)
         .unwrap();
     assert_eq!(rng.layout_draws_consumed, 2);
+    assert_eq!(provider.calls(), 2);
+    assert_eq!(
+        provider.seen_scripts(),
+        [
+            fixture.transaction.output[1].script_pubkey.as_bytes(),
+            fixture.transaction.output[0].script_pubkey.as_bytes(),
+        ]
+    );
 }
 
 #[test]
@@ -120,7 +129,7 @@ fn input_and_output_permutations_use_separate_consecutive_draws() {
 
     let blinded = build_blinded_ordinary_wallet_pset(
         &catalog,
-        BorrowedSlip77::new(&fixture.slip77),
+        &mut common::FixtureOpeningProvider::new(&fixture),
         selected_batch(&fixture, &[1, 0]),
         planned_outputs(&fixture),
         ExplicitFee::new(fixture.fee_asset, 100).unwrap(),
@@ -153,7 +162,7 @@ fn identity_permutations_remain_valid_and_fee_stays_last() {
 
     let blinded = build_blinded_ordinary_wallet_pset(
         &catalog,
-        BorrowedSlip77::new(&fixture.slip77),
+        &mut common::FixtureOpeningProvider::new(&fixture),
         selected_batch(&fixture, &[1, 0]),
         planned_outputs(&fixture),
         ExplicitFee::new(fixture.fee_asset, 100).unwrap(),
@@ -194,25 +203,39 @@ fn rejects_public_selection_failures_before_randomness() {
         &missing_previous,
     )];
     let selected = SelectedOutputBatch::new(&missing_request).unwrap();
+    let balanced_fee_output =
+        vec![ConfidentialOutput::from_address(fixture.fee_asset, 800, &receive_address()).unwrap()];
     assert!(matches!(
         build_blinded_ordinary_wallet_pset(
             &catalog,
-            BorrowedSlip77::new(&fixture.slip77),
+            &mut common::FixtureOpeningProvider::new(&fixture),
             selected,
-            planned_outputs(&fixture),
+            balanced_fee_output,
             ExplicitFee::new(fixture.fee_asset, 100).unwrap(),
             &mut NoRandomnessExpected,
         ),
         Err(OrdinaryWalletPsetError::InvalidFundingTransaction)
     ));
 
-    let absent = selected_batch(&fixture, &[7]);
+    let absent_outpoint = OutPoint::new(fixture.transaction.txid(), 7);
+    let absent_value = 900;
+    let absent_request = [BorrowedSelectedOutput::new(
+        &absent_outpoint,
+        &fixture.fee_asset,
+        &absent_value,
+        &fixture.transaction_bytes,
+        std::slice::from_ref(&fixture.previous_transaction_bytes),
+    )];
+    let absent = SelectedOutputBatch::new(&absent_request).unwrap();
     assert!(matches!(
         build_blinded_ordinary_wallet_pset(
             &catalog,
-            BorrowedSlip77::new(&fixture.slip77),
+            &mut common::FixtureOpeningProvider::new(&fixture),
             absent,
-            planned_outputs(&fixture),
+            vec![
+                ConfidentialOutput::from_address(fixture.fee_asset, 800, &receive_address(),)
+                    .unwrap()
+            ],
             ExplicitFee::new(fixture.fee_asset, 100).unwrap(),
             &mut NoRandomnessExpected,
         ),
@@ -249,7 +272,7 @@ fn rejects_output_limits_before_opening_inputs() {
     assert!(matches!(
         build_blinded_ordinary_wallet_pset(
             &catalog,
-            BorrowedSlip77::new(&fixture.slip77),
+            &mut common::FixtureOpeningProvider::new(&fixture),
             selected_batch(&fixture, &[1, 0]),
             vec![],
             ExplicitFee::new(fixture.fee_asset, 100).unwrap(),
@@ -265,7 +288,7 @@ fn rejects_output_limits_before_opening_inputs() {
     assert!(matches!(
         build_blinded_ordinary_wallet_pset(
             &catalog,
-            BorrowedSlip77::new(&fixture.slip77),
+            &mut common::FixtureOpeningProvider::new(&fixture),
             selected_batch(&fixture, &[1, 0]),
             outputs,
             ExplicitFee::new(fixture.fee_asset, 100).unwrap(),
@@ -279,10 +302,11 @@ fn rejects_output_limits_before_opening_inputs() {
 fn rejects_entropy_secret_and_conservation_failures_without_output() {
     let catalog = catalog();
     let fixture = funding_fixture();
+    let mut failed_randomness_provider = common::FixtureOpeningProvider::new(&fixture);
     assert!(matches!(
         build_blinded_ordinary_wallet_pset(
             &catalog,
-            BorrowedSlip77::new(&fixture.slip77),
+            &mut failed_randomness_provider,
             selected_batch(&fixture, &[1, 0]),
             planned_outputs(&fixture),
             ExplicitFee::new(fixture.fee_asset, 100).unwrap(),
@@ -290,6 +314,7 @@ fn rejects_entropy_secret_and_conservation_failures_without_output() {
         ),
         Err(OrdinaryWalletPsetError::RandomnessUnavailable)
     ));
+    assert_eq!(failed_randomness_provider.calls(), 0);
 
     let wrong_slip77 = synthetic_material(b"ordinary wallet PSET wrong SLIP77 material");
     let mut private_failure_rng = StdRng::from_seed(synthetic_material(
@@ -298,7 +323,7 @@ fn rejects_entropy_secret_and_conservation_failures_without_output() {
     assert!(matches!(
         build_blinded_ordinary_wallet_pset(
             &catalog,
-            BorrowedSlip77::new(&wrong_slip77),
+            &mut common::FixtureOpeningProvider::with_material(wrong_slip77),
             selected_batch(&fixture, &[1, 0]),
             planned_outputs(&fixture),
             ExplicitFee::new(fixture.fee_asset, 100).unwrap(),
@@ -315,10 +340,11 @@ fn rejects_entropy_secret_and_conservation_failures_without_output() {
     let mut imbalance_rng = StdRng::from_seed(synthetic_material(
         b"ordinary wallet PSET imbalance randomness",
     ));
+    let mut imbalance_provider = common::FixtureOpeningProvider::new(&fixture);
     assert!(matches!(
         build_blinded_ordinary_wallet_pset(
             &catalog,
-            BorrowedSlip77::new(&fixture.slip77),
+            &mut imbalance_provider,
             selected_batch(&fixture, &[1, 0]),
             imbalanced,
             ExplicitFee::new(fixture.fee_asset, 100).unwrap(),
@@ -326,6 +352,34 @@ fn rejects_entropy_secret_and_conservation_failures_without_output() {
         ),
         Err(OrdinaryWalletPsetError::InvalidPlan)
     ));
+    assert_eq!(imbalance_provider.calls(), 0);
+}
+
+#[test]
+fn provider_zero_opening_maps_to_invalid_selected_output() {
+    let catalog = catalog();
+    let fixture = funding_fixture();
+    let zero_output = zero_opening_output(&fixture);
+    let mut provider = common::FixtureOpeningProvider::substituting(&fixture, 0, zero_output);
+    let mut rng = StdRng::from_seed(synthetic_material(
+        b"ordinary wallet PSET provider zero-opening randomness",
+    ));
+
+    assert!(matches!(
+        build_blinded_ordinary_wallet_pset(
+            &catalog,
+            &mut provider,
+            selected_batch(&fixture, &[0]),
+            vec![
+                ConfidentialOutput::from_address(fixture.fee_asset, 800, &receive_address(),)
+                    .unwrap(),
+            ],
+            ExplicitFee::new(fixture.fee_asset, 100).unwrap(),
+            &mut rng,
+        ),
+        Err(OrdinaryWalletPsetError::InvalidSelectedOutput)
+    ));
+    assert_eq!(provider.calls(), 1);
 }
 
 #[test]
@@ -341,7 +395,7 @@ fn singleton_input_and_output_require_no_layout_draw() {
 
     let blinded = build_blinded_ordinary_wallet_pset(
         &catalog,
-        BorrowedSlip77::new(&fixture.slip77),
+        &mut common::FixtureOpeningProvider::new(&fixture),
         selected_batch(&fixture, &[0]),
         vec![output],
         ExplicitFee::new(fixture.fee_asset, 100).unwrap(),
@@ -360,10 +414,11 @@ fn layout_failure_on_first_draw_returns_no_pset() {
     let catalog = catalog();
     let fixture = funding_fixture();
     let mut rng = LayoutFailureRng::new(0);
+    let mut provider = common::FixtureOpeningProvider::new(&fixture);
 
     let result = build_blinded_ordinary_wallet_pset(
         &catalog,
-        BorrowedSlip77::new(&fixture.slip77),
+        &mut provider,
         selected_batch(&fixture, &[1, 0]),
         planned_outputs(&fixture),
         ExplicitFee::new(fixture.fee_asset, 100).unwrap(),
@@ -376,6 +431,7 @@ fn layout_failure_on_first_draw_returns_no_pset() {
     ));
     assert_eq!(rng.successful_layout_draws, 0);
     assert_eq!(rng.layout_draw_attempts, 1);
+    assert_eq!(provider.calls(), 0);
 }
 
 #[test]
@@ -383,10 +439,11 @@ fn layout_failure_after_an_input_swap_returns_no_pset() {
     let catalog = catalog();
     let fixture = funding_fixture();
     let mut rng = LayoutFailureRng::new(1);
+    let mut provider = common::FixtureOpeningProvider::new(&fixture);
 
     let result = build_blinded_ordinary_wallet_pset(
         &catalog,
-        BorrowedSlip77::new(&fixture.slip77),
+        &mut provider,
         selected_batch(&fixture, &[1, 0]),
         planned_outputs(&fixture),
         ExplicitFee::new(fixture.fee_asset, 100).unwrap(),
@@ -399,6 +456,37 @@ fn layout_failure_after_an_input_swap_returns_no_pset() {
     ));
     assert_eq!(rng.successful_layout_draws, 1);
     assert_eq!(rng.layout_draw_attempts, 2);
+    assert_eq!(provider.calls(), 0);
+}
+
+#[test]
+fn bounded_layout_rejection_exhaustion_precedes_provider_calls() {
+    let catalog = catalog();
+    let fixture = funding_fixture();
+    let outputs = vec![
+        ConfidentialOutput::from_address(fixture.second_asset, 1_000, &receive_address()).unwrap(),
+        ConfidentialOutput::from_address(fixture.second_asset, 1_000, &second_receive_address())
+            .unwrap(),
+        ConfidentialOutput::from_address(fixture.fee_asset, 800, &receive_address()).unwrap(),
+    ];
+    let mut rng = RejectionExhaustionRng { calls: 0 };
+    let mut provider = common::FixtureOpeningProvider::new(&fixture);
+
+    let result = build_blinded_ordinary_wallet_pset(
+        &catalog,
+        &mut provider,
+        selected_batch(&fixture, &[1, 0]),
+        outputs,
+        ExplicitFee::new(fixture.fee_asset, 100).unwrap(),
+        &mut rng,
+    );
+
+    assert!(matches!(
+        result,
+        Err(OrdinaryWalletPsetError::RandomnessUnavailable)
+    ));
+    assert_eq!(rng.calls, 129);
+    assert_eq!(provider.calls(), 0);
 }
 
 #[test]
@@ -413,7 +501,7 @@ fn blinding_stage_entropy_failure_returns_no_partial_pset() {
 
     let result = build_blinded_ordinary_wallet_pset(
         &catalog,
-        BorrowedSlip77::new(&fixture.slip77),
+        &mut common::FixtureOpeningProvider::new(&fixture),
         selected_batch(&fixture, &[1, 0]),
         planned_outputs(&fixture),
         ExplicitFee::new(fixture.fee_asset, 100).unwrap(),
@@ -535,18 +623,20 @@ impl rand::RngCore for ScriptedLayoutRng {
     }
 
     fn try_fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), rand::Error> {
-        if !self.context_seed_supplied {
-            assert_eq!(destination.len(), 32);
-            self.context_seed_supplied = true;
-            return self.inner.try_fill_bytes(destination);
-        }
-        if let Some(draw) = self.layout_draws.pop_front() {
+        if destination.len() == 8 {
+            let draw = self
+                .layout_draws
+                .pop_front()
+                .expect("layout draw available");
             assert_eq!(destination.len(), 8);
             destination.copy_from_slice(&draw.to_le_bytes());
             self.layout_draws_consumed += 1;
             return Ok(());
         }
-        assert_ne!(destination.len(), 8, "unexpected layout draw");
+        if !self.context_seed_supplied {
+            assert_eq!(destination.len(), 32);
+            self.context_seed_supplied = true;
+        }
         self.inner.try_fill_bytes(destination)
     }
 }
@@ -554,9 +644,7 @@ impl rand::RngCore for ScriptedLayoutRng {
 impl rand::CryptoRng for ScriptedLayoutRng {}
 
 struct LayoutFailureRng {
-    inner: StdRng,
     successful_draws_before_failure: usize,
-    context_seed_supplied: bool,
     successful_layout_draws: usize,
     layout_draw_attempts: usize,
 }
@@ -564,11 +652,7 @@ struct LayoutFailureRng {
 impl LayoutFailureRng {
     fn new(successful_draws_before_failure: usize) -> Self {
         Self {
-            inner: StdRng::from_seed(synthetic_material(
-                b"ordinary wallet PSET layout failure randomness",
-            )),
             successful_draws_before_failure,
-            context_seed_supplied: false,
             successful_layout_draws: 0,
             layout_draw_attempts: 0,
         }
@@ -589,11 +673,6 @@ impl rand::RngCore for LayoutFailureRng {
     }
 
     fn try_fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), rand::Error> {
-        if !self.context_seed_supplied {
-            assert_eq!(destination.len(), 32);
-            self.context_seed_supplied = true;
-            return self.inner.try_fill_bytes(destination);
-        }
         assert_eq!(destination.len(), 8);
         self.layout_draw_attempts += 1;
         if self.successful_layout_draws < self.successful_draws_before_failure {
@@ -609,6 +688,33 @@ impl rand::RngCore for LayoutFailureRng {
 }
 
 impl rand::CryptoRng for LayoutFailureRng {}
+
+struct RejectionExhaustionRng {
+    calls: usize,
+}
+
+impl rand::RngCore for RejectionExhaustionRng {
+    fn next_u32(&mut self) -> u32 {
+        panic!("layout exhaustion used infallible randomness")
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        panic!("layout exhaustion used infallible randomness")
+    }
+
+    fn fill_bytes(&mut self, _: &mut [u8]) {
+        panic!("layout exhaustion used infallible randomness")
+    }
+
+    fn try_fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), rand::Error> {
+        assert_eq!(destination.len(), 8);
+        self.calls += 1;
+        destination.fill(0);
+        Ok(())
+    }
+}
+
+impl rand::CryptoRng for RejectionExhaustionRng {}
 
 struct ContextThenBlindingFailureRng {
     context_seed_supplied: bool,
@@ -631,17 +737,17 @@ impl rand::RngCore for ContextThenBlindingFailureRng {
 
     fn try_fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), rand::Error> {
         self.try_fill_calls += 1;
+        if destination.len() == 8 {
+            destination.copy_from_slice(&0_u64.to_le_bytes());
+            self.supplied_bytes += destination.len();
+            return Ok(());
+        }
         if !self.context_seed_supplied {
             assert_eq!(destination.len(), 32);
             destination.copy_from_slice(&synthetic_material(
                 b"ordinary wallet PSET context-only entropy",
             ));
             self.context_seed_supplied = true;
-            self.supplied_bytes += destination.len();
-            return Ok(());
-        }
-        if destination.len() == 8 {
-            destination.copy_from_slice(&0_u64.to_le_bytes());
             self.supplied_bytes += destination.len();
             return Ok(());
         }

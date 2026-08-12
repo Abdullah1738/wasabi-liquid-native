@@ -27,7 +27,10 @@ use miniscript::descriptor::{DescriptorPublicKey, Wildcard};
 use miniscript::{Descriptor, ForEachKey};
 use sha2::digest::Output;
 use sha2::{Digest, Sha256};
-use wasabi_liquid_native_ordinary_pset::{MAX_ORDINARY_VALUE, SpendableInput};
+use wasabi_liquid_native_ordinary_pset::{
+    MAX_CONFIDENTIAL_OUTPUTS, MAX_ORDINARY_VALUE, SpendableInput,
+};
+use wasabi_liquid_native_output_opening::OpenedOutput;
 use wasabi_liquid_native_transaction_validation::{
     TransactionValidationError, ValidatedOutputOpenError, validate_transaction_amount_proofs,
 };
@@ -666,6 +669,109 @@ impl SelectedOutputBatch {
             .collect();
         Ok(Self { requests })
     }
+
+    /// Returns whether the exact selected expectations balance the supplied
+    /// confidential outputs and explicit fee independently for every asset.
+    ///
+    /// This predicate exposes no partial totals or mismatch details. Every
+    /// internal asset and amount accumulator is cleared before return or while
+    /// unwinding.
+    pub fn expected_ordinary_plan_is_balanced(
+        &self,
+        outputs: &[wasabi_liquid_native_ordinary_pset::ConfidentialOutput],
+        fee: wasabi_liquid_native_ordinary_pset::ExplicitFee,
+    ) -> bool {
+        if outputs.len() > MAX_CONFIDENTIAL_OUTPUTS {
+            return false;
+        }
+        let mut selected = ExpectedPlanTotals::with_capacity(self.requests.len());
+        for request in &self.requests {
+            if !selected.checked_add(request.expectation.asset, request.expectation.value) {
+                return false;
+            }
+        }
+
+        let mut planned = ExpectedPlanTotals::with_capacity(outputs.len().saturating_add(1));
+        for output in outputs {
+            if !planned.checked_add(output.asset().to_byte_array(), output.value()) {
+                return false;
+            }
+        }
+        if !planned.checked_add(fee.asset().to_byte_array(), fee.value()) {
+            return false;
+        }
+
+        selected.exactly_matches(&planned)
+    }
+}
+
+struct ExpectedPlanTotal {
+    asset: ScopedExpectedPlanAsset,
+    value: u64,
+}
+
+impl Drop for ExpectedPlanTotal {
+    fn drop(&mut self) {
+        self.value.zeroize();
+        #[cfg(test)]
+        {
+            assert_eq!(self.value, 0);
+            EXPECTED_PLAN_TOTAL_DROPS.with(|count| count.set(count.get() + 1));
+        }
+    }
+}
+
+struct ScopedExpectedPlanAsset([u8; 32]);
+
+impl Drop for ScopedExpectedPlanAsset {
+    fn drop(&mut self) {
+        self.0.zeroize();
+        #[cfg(test)]
+        {
+            assert!(self.0.iter().all(|byte| *byte == 0));
+            EXPECTED_PLAN_ASSET_DROPS.with(|count| count.set(count.get() + 1));
+        }
+    }
+}
+
+struct ExpectedPlanTotals(Vec<ExpectedPlanTotal>);
+
+impl ExpectedPlanTotals {
+    fn with_capacity(capacity: usize) -> Self {
+        Self(Vec::with_capacity(capacity))
+    }
+
+    fn checked_add(&mut self, asset: [u8; 32], value: u64) -> bool {
+        let asset = ScopedExpectedPlanAsset(asset);
+        #[cfg(test)]
+        EXPECTED_PLAN_ADDS_BEFORE_PANIC.with(|remaining| {
+            if let Some(value) = remaining.get() {
+                if value == 0 {
+                    remaining.set(None);
+                    panic!("test-only expected-plan accumulator unwind");
+                }
+                remaining.set(Some(value - 1));
+            }
+        });
+        if let Some(total) = self.0.iter_mut().find(|total| total.asset.0 == asset.0) {
+            let Some(value) = total.value.checked_add(value) else {
+                return false;
+            };
+            total.value = value;
+            return true;
+        }
+        self.0.push(ExpectedPlanTotal { asset, value });
+        true
+    }
+
+    fn exactly_matches(&self, other: &Self) -> bool {
+        self.0.len() == other.0.len()
+            && self.0.iter().all(|expected| {
+                other.0.iter().any(|actual| {
+                    actual.asset.0 == expected.asset.0 && actual.value == expected.value
+                })
+            })
+    }
 }
 
 /// One descriptor-owned confidential output validated and privately prepared
@@ -702,6 +808,41 @@ struct PubliclyValidatedSelectedOutput {
     transaction: Transaction,
     previous_outputs: BTreeMap<OutPoint, TxOut>,
     request_index: ScopedSelectedRequestIndex,
+}
+
+/// A caller-owned operation that opens one exact selected confidential output.
+///
+/// The provider receives only the already validated output and randomized
+/// secp256k1 context. It retains ownership of all key material and private
+/// scratch. Refusal and provider-internal failure are represented only by
+/// `None`. Calls are nontransactional side effects: earlier calls survive a
+/// later refusal or downstream failure, and a complete retry starts again at
+/// the first selected output.
+pub trait SelectedOutputOpeningProvider {
+    /// Opens one selected output without exposing a blinding key.
+    fn open_selected_output(
+        &mut self,
+        secp: &Secp256k1<All>,
+        output: &TxOut,
+    ) -> Option<OpenedOutput>;
+}
+
+/// An opaque, key-free capability proving complete public validation of one
+/// selected-output batch.
+///
+/// This type deliberately implements neither `Debug`, `Clone`, nor `Copy` and
+/// borrows the exact owning [`SelectedOutputBatch`] until it is consumed or
+/// dropped.
+pub struct PubliclyPreparedSelectedOutputs<'selected> {
+    selected_outputs: &'selected SelectedOutputBatch,
+    publicly_validated: Vec<PubliclyValidatedSelectedOutput>,
+}
+
+impl PubliclyPreparedSelectedOutputs<'_> {
+    /// Returns the number of publicly validated selected inputs.
+    pub fn input_count(&self) -> usize {
+        self.publicly_validated.len()
+    }
 }
 
 struct ScopedSelectedRequestIndex(usize);
@@ -1031,34 +1172,19 @@ impl Drop for PreparedCandidateOrder {
     }
 }
 
-/// Validates and privately opens one bounded batch of selected wallet outputs.
+/// Completes public validation for one bounded batch of selected wallet outputs.
 ///
 /// The whole batch completes count and byte preflight in
 /// [`SelectedOutputBatch::new`]. This transition then canonically decodes every
 /// candidate, binds it to the exact expected transaction identifier and output
 /// index, matches the complete previous-transaction set, validates transaction
-/// amount proofs, and proves descriptor ownership and confidential shape before
-/// requesting entropy or deriving a blinding key. After every public row
-/// passes, exactly one 32-byte random seed randomizes the secp256k1 context. Each
-/// output is then opened, compared with its expected asset and value, and bound
-/// back to its exact commitments while becoming an opaque
-/// [`ValidatedOwnedInput`]. Any error returns no partial capability.
-///
-/// Returned inputs preserve the caller's exact selected-request order. No
-/// input-layout randomization is performed, so this ordering is not suitable
-/// as a production privacy policy. The caller-provided secp256k1 context is
-/// used for every public check, randomized exactly once after all such checks,
-/// and left randomized for the caller's immediate ordinary-PSET blinding step.
-///
-/// Success does not establish source provenance, chain inclusion, current
-/// unspentness, confirmation, node identity, fee policy, or signing authority.
-pub fn validate_selected_owned_inputs<R: RngCore + CryptoRng>(
+/// amount proofs, and proves descriptor ownership and confidential shape. It
+/// requests no entropy and invokes no opening provider.
+pub fn prepare_selected_owned_inputs<'selected>(
     catalog: &DescriptorCatalog,
-    slip77_master_key: BorrowedSlip77<'_>,
-    selected_outputs: &SelectedOutputBatch,
-    secp: &mut Secp256k1<All>,
-    rng: &mut R,
-) -> Result<Vec<ValidatedOwnedInput>, WalletObservationError> {
+    selected_outputs: &'selected SelectedOutputBatch,
+    secp: &Secp256k1<All>,
+) -> Result<PubliclyPreparedSelectedOutputs<'selected>, WalletObservationError> {
     let mut publicly_validated = Vec::with_capacity(selected_outputs.requests.len());
 
     for (request_index, request) in selected_outputs.requests.iter().enumerate() {
@@ -1095,6 +1221,36 @@ pub fn validate_selected_owned_inputs<R: RngCore + CryptoRng>(
         });
     }
 
+    Ok(PubliclyPreparedSelectedOutputs {
+        selected_outputs,
+        publicly_validated,
+    })
+}
+
+/// Privately opens one completely prepared selected-output batch.
+///
+/// Exactly one 32-byte random seed randomizes the secp256k1 context before the
+/// first provider call. The provider is then invoked exactly once per row in
+/// selected-request order. Each opaque opening is checked against the exact
+/// expected asset and value and recomputed against the exact output commitments
+/// while becoming a [`ValidatedOwnedInput`]. Any error returns no partial
+/// capability. Provider calls already made are not rolled back, and retrying
+/// this complete transition starts provider calls again at row zero.
+pub fn open_prepared_selected_owned_inputs<R, P>(
+    prepared: PubliclyPreparedSelectedOutputs<'_>,
+    provider: &mut P,
+    secp: &mut Secp256k1<All>,
+    rng: &mut R,
+) -> Result<Vec<ValidatedOwnedInput>, WalletObservationError>
+where
+    R: RngCore + CryptoRng,
+    P: SelectedOutputOpeningProvider + ?Sized,
+{
+    let PubliclyPreparedSelectedOutputs {
+        selected_outputs,
+        publicly_validated,
+    } = prepared;
+
     let mut context_randomization_seed = ScopedContextRandomizationSeed([0; 32]);
     rng.try_fill_bytes(&mut context_randomization_seed.0)
         .map_err(|_| WalletObservationError::ContextRandomnessUnavailable)?;
@@ -1120,18 +1276,16 @@ pub fn validate_selected_owned_inputs<R: RngCore + CryptoRng>(
             .get(output_index)
             .ok_or(WalletObservationError::SelectedOutputExpectation)?
             .clone();
-        let blinding_key = derive_blinding_key(
-            slip77_master_key.bytes,
-            witness_utxo.script_pubkey.as_bytes(),
-        )?;
         #[cfg(test)]
         SELECTED_OUTPUT_OPEN_ATTEMPTS.with(|count| count.set(count.get() + 1));
-        let opened = validated.open_output(secp, output_index, &blinding_key.0)?;
-        require_positive_owned_output_value(opened.value())?;
-        if opened.asset_id() != &request.expectation.asset
+        let opened = provider
+            .open_selected_output(secp, &witness_utxo)
+            .ok_or(WalletObservationError::OwnedOutputOpening)?;
+        if opened.value() == &0
+            || opened.asset_id() != &request.expectation.asset
             || opened.value() != &request.expectation.value
         {
-            return Err(WalletObservationError::SelectedOutputExpectation);
+            return Err(WalletObservationError::OwnedOutputOpening);
         }
         let spendable_input = SpendableInput::from_confidential(
             secp,
@@ -1152,6 +1306,40 @@ pub fn validate_selected_owned_inputs<R: RngCore + CryptoRng>(
     }
 
     Ok(validated_inputs)
+}
+
+/// Validates and privately opens one bounded batch of selected wallet outputs.
+///
+/// This convenience transition immediately composes
+/// [`prepare_selected_owned_inputs`] and [`open_prepared_selected_owned_inputs`].
+/// Ordinary-wallet orchestration uses those split operations so all layout
+/// randomness is obtained before private provider calls.
+///
+/// Provider calls are nontransactional. A later-row or downstream failure does
+/// not roll back calls already made, and retrying this complete convenience
+/// transition starts provider calls again at row zero.
+///
+/// Returned inputs preserve the caller's exact selected-request order. No
+/// input-layout randomization is performed, so this ordering is not suitable
+/// as a production privacy policy. The caller-provided secp256k1 context is
+/// used for every public check, randomized exactly once after all such checks,
+/// and left randomized for the caller's immediate ordinary-PSET blinding step.
+///
+/// Success does not establish source provenance, chain inclusion, current
+/// unspentness, confirmation, node identity, fee policy, or signing authority.
+pub fn validate_selected_owned_inputs<R, P>(
+    catalog: &DescriptorCatalog,
+    provider: &mut P,
+    selected_outputs: &SelectedOutputBatch,
+    secp: &mut Secp256k1<All>,
+    rng: &mut R,
+) -> Result<Vec<ValidatedOwnedInput>, WalletObservationError>
+where
+    R: RngCore + CryptoRng,
+    P: SelectedOutputOpeningProvider + ?Sized,
+{
+    let prepared = prepare_selected_owned_inputs(catalog, selected_outputs, secp)?;
+    open_prepared_selected_owned_inputs(prepared, provider, secp, rng)
 }
 
 /// Validates one bounded candidate batch and atomically normalizes every output
@@ -1463,6 +1651,9 @@ thread_local! {
     static SELECTED_OUTPUT_EXPECTATION_DROPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SELECTED_OUTPUT_PAYLOAD_DROPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SELECTED_OUTPUT_REQUEST_INDEX_DROPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static EXPECTED_PLAN_TOTAL_DROPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static EXPECTED_PLAN_ASSET_DROPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static EXPECTED_PLAN_ADDS_BEFORE_PANIC: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
     static DERIVATION_TEST_MODE: std::cell::Cell<DerivationTestMode> = const {
         std::cell::Cell::new(DerivationTestMode::Normal)
     };
@@ -1501,6 +1692,21 @@ fn selected_output_payload_drop_count() -> usize {
 #[cfg(test)]
 fn selected_output_request_index_drop_count() -> usize {
     SELECTED_OUTPUT_REQUEST_INDEX_DROPS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn expected_plan_total_drop_count() -> usize {
+    EXPECTED_PLAN_TOTAL_DROPS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn expected_plan_asset_drop_count() -> usize {
+    EXPECTED_PLAN_ASSET_DROPS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn set_expected_plan_adds_before_panic(remaining: Option<usize>) {
+    EXPECTED_PLAN_ADDS_BEFORE_PANIC.with(|current| current.set(remaining));
 }
 
 #[cfg(test)]

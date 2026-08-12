@@ -10,17 +10,18 @@ use elements::{EcdsaSighashType, LockTime, OutPoint, Transaction};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use wasabi_liquid_native_ordinary_pset::{
-    ExplicitFee, FinalizedOrdinaryTransaction, OrdinaryP2wpkhSigner, OrdinarySigningError,
+    ConfidentialOutput, ExplicitFee, FinalizedOrdinaryTransaction, OrdinaryP2wpkhSigner,
+    OrdinarySigningError,
 };
 use wasabi_liquid_native_ordinary_wallet_pset::{
     OrdinaryWalletPsetError, OrdinaryWalletTransactionFailure, OrdinaryWalletTransactionReason,
     build_blinded_ordinary_wallet_pset, build_sign_and_finalize_ordinary_wallet_transaction,
 };
-use wasabi_liquid_native_wallet_facts::{
-    BorrowedSelectedOutput, BorrowedSlip77, SelectedOutputBatch,
-};
+use wasabi_liquid_native_wallet_facts::{BorrowedSelectedOutput, SelectedOutputBatch};
 
-use common::{planned_outputs, selected_batch, signable_funding_fixture, synthetic_material};
+use common::{
+    planned_outputs, receive_address, selected_batch, signable_funding_fixture, synthetic_material,
+};
 
 static_assertions::assert_not_impl_any!(
     OrdinaryWalletTransactionFailure: Copy,
@@ -53,10 +54,11 @@ fn signs_identity_and_nonidentity_layouts_by_exact_outpoint() {
         let (catalog, fixture, signing_keys) = signable_funding_fixture();
         let mut signer = FixtureSigner::accepting(&fixture, signing_keys);
         let mut rng = ScriptedLayoutRng::new(label, draws);
+        let mut provider = common::FixtureOpeningProvider::new(&fixture);
 
         let finalized = expect_finalized(build_sign_and_finalize_ordinary_wallet_transaction(
             &catalog,
-            BorrowedSlip77::new(&fixture.slip77),
+            &mut provider,
             selected_batch(&fixture, &[1, 0]),
             planned_outputs(&fixture),
             ExplicitFee::new(fixture.fee_asset, 100).unwrap(),
@@ -76,6 +78,7 @@ fn signs_identity_and_nonidentity_layouts_by_exact_outpoint() {
         assert_all_public_keys_precede_signatures(&signer.events, &expected_outpoints);
         assert_finalized_transaction_valid(&finalized, &fixture.transaction);
         assert_eq!(rng.layout_draws_consumed, 2);
+        assert_eq!(provider.calls(), 2);
     }
 }
 
@@ -85,9 +88,10 @@ fn late_signer_refusal_returns_exact_retryable_blinded_pset() {
     let seed_label = b"ordinary wallet retryable signed layout";
     let draws = [0, 1];
     let mut baseline_rng = ScriptedLayoutRng::new(seed_label, draws);
+    let mut baseline_provider = common::FixtureOpeningProvider::new(&fixture);
     let baseline = build_blinded_ordinary_wallet_pset(
         &catalog,
-        BorrowedSlip77::new(&fixture.slip77),
+        &mut baseline_provider,
         selected_batch(&fixture, &[1, 0]),
         planned_outputs(&fixture),
         ExplicitFee::new(fixture.fee_asset, 100).unwrap(),
@@ -99,9 +103,10 @@ fn late_signer_refusal_returns_exact_retryable_blinded_pset() {
 
     let mut signer = FixtureSigner::refusing_signature(&fixture, signing_keys, 1);
     let mut signing_rng = ScriptedLayoutRng::new(seed_label, draws);
+    let mut signing_provider = common::FixtureOpeningProvider::new(&fixture);
     let failure = expect_transaction_failure(build_sign_and_finalize_ordinary_wallet_transaction(
         &catalog,
-        BorrowedSlip77::new(&fixture.slip77),
+        &mut signing_provider,
         selected_batch(&fixture, &[1, 0]),
         planned_outputs(&fixture),
         ExplicitFee::new(fixture.fee_asset, 100).unwrap(),
@@ -114,6 +119,7 @@ fn late_signer_refusal_returns_exact_retryable_blinded_pset() {
         &OrdinaryWalletTransactionReason::Signing(OrdinarySigningError::SignatureUnavailable)
     );
     assert_eq!(signer.signature_request_count(), 2);
+    assert_eq!(signing_provider.calls(), 2);
     assert!(matches!(signer.events[2], SignerEvent::Signature(0, _)));
     assert!(matches!(signer.events[3], SignerEvent::Signature(1, _)));
     let retryable = failure.into_retryable_blinded().unwrap();
@@ -131,6 +137,7 @@ fn late_signer_refusal_returns_exact_retryable_blinded_pset() {
         Ok(signed) => signed,
         Err(_) => panic!("retry unexpectedly failed"),
     };
+    assert_eq!(signing_provider.calls(), 2);
     assert_all_public_keys_precede_signatures(&retry_signer.events, &expected_outpoints);
     assert_eq!(
         retry_signer.events[0],
@@ -140,12 +147,41 @@ fn late_signer_refusal_returns_exact_retryable_blinded_pset() {
 }
 
 #[test]
+fn provider_failure_never_invokes_signer_or_returns_retry_capability() {
+    let (catalog, fixture, signing_keys) = signable_funding_fixture();
+    let mut provider = common::FixtureOpeningProvider::refusing(&fixture, 1);
+    let mut signer = FixtureSigner::accepting(&fixture, signing_keys);
+    let mut rng =
+        ScriptedLayoutRng::new(b"ordinary wallet provider refusal signing boundary", [0, 0]);
+
+    let failure = expect_transaction_failure(build_sign_and_finalize_ordinary_wallet_transaction(
+        &catalog,
+        &mut provider,
+        selected_batch(&fixture, &[1, 0]),
+        planned_outputs(&fixture),
+        ExplicitFee::new(fixture.fee_asset, 100).unwrap(),
+        &mut rng,
+        &mut signer,
+    ));
+
+    assert_eq!(
+        failure.reason(),
+        &OrdinaryWalletTransactionReason::Preparation(
+            OrdinaryWalletPsetError::InvalidSelectedOutput
+        )
+    );
+    assert_eq!(provider.calls(), 2);
+    assert!(signer.events.is_empty());
+    assert!(failure.into_retryable_blinded().is_none());
+}
+
+#[test]
 fn preparation_failure_never_invokes_signer_or_returns_retry_capability() {
     let (catalog, fixture, signing_keys) = signable_funding_fixture();
     let mut signer = FixtureSigner::accepting(&fixture, signing_keys);
     let failure = expect_transaction_failure(build_sign_and_finalize_ordinary_wallet_transaction(
         &catalog,
-        BorrowedSlip77::new(&fixture.slip77),
+        &mut common::FixtureOpeningProvider::new(&fixture),
         selected_batch(&fixture, &[1, 0]),
         vec![],
         ExplicitFee::new(fixture.fee_asset, 100).unwrap(),
@@ -165,11 +201,21 @@ fn preparation_failure_never_invokes_signer_or_returns_retry_capability() {
 fn selected_expectation_failure_never_invokes_signer_or_returns_retry_capability() {
     let (catalog, fixture, signing_keys) = signable_funding_fixture();
     let mut signer = FixtureSigner::accepting(&fixture, signing_keys);
+    let expected_outpoint = OutPoint::new(fixture.transaction.txid(), 7);
+    let expected_value = 900;
+    let request = [BorrowedSelectedOutput::new(
+        &expected_outpoint,
+        &fixture.fee_asset,
+        &expected_value,
+        &fixture.transaction_bytes,
+        std::slice::from_ref(&fixture.previous_transaction_bytes),
+    )];
+    let selected = SelectedOutputBatch::new(&request).unwrap();
     let failure = expect_transaction_failure(build_sign_and_finalize_ordinary_wallet_transaction(
         &catalog,
-        BorrowedSlip77::new(&fixture.slip77),
-        selected_batch(&fixture, &[7]),
-        planned_outputs(&fixture),
+        &mut common::FixtureOpeningProvider::new(&fixture),
+        selected,
+        vec![ConfidentialOutput::from_address(fixture.fee_asset, 800, &receive_address()).unwrap()],
         ExplicitFee::new(fixture.fee_asset, 100).unwrap(),
         &mut NoRandomnessExpected,
         &mut signer,
@@ -205,9 +251,9 @@ fn selected_txid_substitution_never_invokes_signer_or_returns_retry_capability()
     let selected = SelectedOutputBatch::new(&request).unwrap();
     let failure = expect_transaction_failure(build_sign_and_finalize_ordinary_wallet_transaction(
         &catalog,
-        BorrowedSlip77::new(&fixture.slip77),
+        &mut common::FixtureOpeningProvider::new(&fixture),
         selected,
-        planned_outputs(&fixture),
+        vec![ConfidentialOutput::from_address(fixture.fee_asset, 800, &receive_address()).unwrap()],
         ExplicitFee::new(fixture.fee_asset, 100).unwrap(),
         &mut NoRandomnessExpected,
         &mut signer,
@@ -453,18 +499,20 @@ impl rand::RngCore for ScriptedLayoutRng {
     }
 
     fn try_fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), rand::Error> {
-        if !self.context_seed_supplied {
-            assert_eq!(destination.len(), 32);
-            self.context_seed_supplied = true;
-            return self.inner.try_fill_bytes(destination);
-        }
-        if let Some(draw) = self.layout_draws.pop_front() {
+        if destination.len() == 8 {
+            let draw = self
+                .layout_draws
+                .pop_front()
+                .expect("layout draw available");
             assert_eq!(destination.len(), 8);
             destination.copy_from_slice(&draw.to_le_bytes());
             self.layout_draws_consumed += 1;
             return Ok(());
         }
-        assert_ne!(destination.len(), 8, "unexpected layout draw");
+        if !self.context_seed_supplied {
+            assert_eq!(destination.len(), 32);
+            self.context_seed_supplied = true;
+        }
         self.inner.try_fill_bytes(destination)
     }
 }

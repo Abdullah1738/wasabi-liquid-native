@@ -12,6 +12,7 @@ elements = { git = "https://github.com/Abdullah1738/rust-elements.git", rev = "5
 miniscript = { version = "=12.3.7", default-features = false, features = ["no-std"] }
 sha2 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }
 wasabi-liquid-native-ordinary-pset = { path = "../ordinary-pset" }
+wasabi-liquid-native-output-opening = { path = "../output-opening" }
 wasabi-liquid-native-transaction-validation = { path = "../transaction-validation" }
 zeroize = { version = "1.8", default-features = false }
 
