@@ -115,12 +115,16 @@ fn spawn_delayed_writer() {
         .expect("delayed descendant probe");
 }
 
+fn require_no_sudo_authority() {
+    match Command::new("/usr/bin/sudo").args(["-n", "true"]).status() {
+        Ok(status) => assert!(!status.success(), "build identity unexpectedly has sudo authority"),
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {}
+        Err(error) => panic!("absolute sudo denial was not OS-enforced: {error}"),
+    }
+}
+
 fn main() {
-    let sudo = Command::new("/usr/bin/sudo")
-        .args(["-n", "true"])
-        .status()
-        .expect("absolute sudo probe");
-    assert!(!sudo.success(), "build identity unexpectedly has sudo authority");
+    require_no_sudo_authority();
     require_denied_write("SEALED_DEPENDENCY_TARGET");
     require_denied_write("SEALED_WORKSPACE_TARGET");
     require_denied_write("SEALED_HOST_WRITE_TARGET");

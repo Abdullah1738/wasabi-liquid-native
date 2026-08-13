@@ -821,10 +821,128 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
     if not (
         gate.count('check-pinned-rust-toolchain.py --toolchain-root "$sealed_toolchain"') == 1
         and gate.count('check-pinned-rust-toolchain.py --root-owned-toolchain "$sealed_toolchain"') == 4
-        and gate.count('check-sealed-rust-command-bin.py "$sealed_command_bin" "$sealed_toolchain"') == 4
+        and gate.count("check-sealed-rust-command-bin.py") == 10
+        and gate.count("check_sealed_command_bin >/dev/null") == 4
         and copied_toolchain < copied_check < toolchain_seal < root_handoff < root_check
     ):
         raise AssertionError("constructed Rust toolchain validation ordering is not exact")
+    sealed_command_checker = (ROOT / "ci/check-sealed-rust-command-bin.py").read_text(
+        encoding="utf-8"
+    )
+    sealed_command_checker_main = '''def main() -> int:
+    if len(sys.argv) == 3 and sys.argv[1] == "--digest":
+        try:
+            print(stable_digest(Path(sys.argv[2]))[1])
+        except (OSError, ValueError) as error:
+            print(f"sealed Darwin command digest failed: {error}", file=sys.stderr)
+            return 1
+        return 0
+    if len(sys.argv) not in (3, 23):
+        print(
+            "usage: check-sealed-rust-command-bin.py ABSOLUTE_BIN ABSOLUTE_TOOLCHAIN [10 DARWIN TARGETS AND 10 SHA256 DIGESTS]",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        darwin_targets = (
+            None
+            if len(sys.argv) == 3
+            else dict(zip(DARWIN_COMMANDS, map(Path, sys.argv[3:13]), strict=True))
+        )
+        darwin_digests = (
+            None
+            if len(sys.argv) == 3
+            else dict(zip(DARWIN_COMMANDS, sys.argv[13:23], strict=True))
+        )
+        if darwin_digests is not None and any(
+            len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest)
+            for digest in darwin_digests.values()
+        ):
+            raise ValueError("sealed Darwin command digest is noncanonical")
+        validate(Path(sys.argv[1]), Path(sys.argv[2]), 0, darwin_targets, darwin_digests)
+    except (OSError, ValueError) as error:
+        print(f"sealed Rust command check failed: {error}", file=sys.stderr)
+        return 1
+    print("sealed Rust command authority accepted")
+    return 0'''
+    sealed_command_checker_entrypoint = '''if __name__ == "__main__":
+    raise SystemExit(main())'''
+    sealed_command_checker_tokens = (
+        sealed_command_checker_main,
+        'DARWIN_COMMANDS = ("cc", "c++", "clang", "clang++", "ar", "as", "ld", "nm", "ranlib", "strip")',
+        "def stable_digest(path: Path) -> tuple[os.stat_result, str]:",
+        "or stat.S_IMODE(before.st_mode) & 0o022",
+        "descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)",
+        "value.st_ctime_ns,",
+        'raise ValueError("sealed Darwin command target changed before hashing")',
+        'raise ValueError("sealed Darwin command target changed while hashing")',
+        "if (darwin_targets is None) != (darwin_digests is None)",
+        "tuple(darwin_targets) != DARWIN_COMMANDS",
+        "tuple(darwin_digests or {}) != DARWIN_COMMANDS",
+        'digest != (darwin_digests or {})[name]',
+        'if len(sys.argv) == 3 and sys.argv[1] == "--digest":',
+        "if len(sys.argv) not in (3, 23):",
+        "dict(zip(DARWIN_COMMANDS, map(Path, sys.argv[3:13]), strict=True))",
+        "dict(zip(DARWIN_COMMANDS, sys.argv[13:23], strict=True))",
+        'len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest)',
+    )
+
+    def sealed_command_checker_is_exact(candidate: str) -> bool:
+        return (
+            all(candidate.count(token) == 1 for token in sealed_command_checker_tokens)
+            and candidate.count("def main() -> int:") == 1
+            and candidate.count("def validate(") == 1
+            and candidate.count('if __name__ == "__main__":') == 1
+            and candidate.count('raise SystemExit(main())') == 1
+            and candidate.endswith(sealed_command_checker_entrypoint + "\n")
+            and candidate.index(sealed_command_checker_main)
+            < candidate.index(sealed_command_checker_entrypoint)
+            < candidate.index('raise SystemExit(main())')
+            and all(
+                forbidden not in candidate
+                for forbidden in (
+                    "follow_symlinks=True",
+                    "os.access(",
+                    "hashlib.md5",
+                    "hashlib.sha1",
+                    "main =",
+                    "globals(",
+                )
+            )
+        )
+
+    if not sealed_command_checker_is_exact(sealed_command_checker):
+        raise AssertionError("sealed Darwin command checker is not exact")
+    for token in sealed_command_checker_tokens:
+        mutated = sealed_command_checker.replace(token, "", 1)
+        if mutated == sealed_command_checker or sealed_command_checker_is_exact(mutated):
+            raise AssertionError(f"sealed Darwin command checker mutation was accepted: {token}")
+    for name, original, replacement in (
+        ("writable target", "or stat.S_IMODE(before.st_mode) & 0o022", "or False"),
+        (
+            "unbound content",
+            'digest != (darwin_digests or {})[name]',
+            "False",
+        ),
+        ("followed target", "os.O_RDONLY | os.O_NOFOLLOW", "os.O_RDONLY"),
+        ("wrong Darwin arity", "if len(sys.argv) not in (3, 23):", "if len(sys.argv) < 3:"),
+        (
+            "early main return",
+            sealed_command_checker_main,
+            sealed_command_checker_main.replace(
+                "def main() -> int:\n", "def main() -> int:\n    return 0\n", 1
+            ),
+        ),
+        (
+            "early successful entrypoint",
+            sealed_command_checker_main,
+            sealed_command_checker_main
+            + '\n\n\nif __name__ == "__main__":\n    raise SystemExit(0)',
+        ),
+    ):
+        mutated = sealed_command_checker.replace(original, replacement, 1)
+        if mutated == sealed_command_checker or sealed_command_checker_is_exact(mutated):
+            raise AssertionError(f"sealed Darwin command checker {name} mutation was accepted")
     environment_pattern_match = re.search(r"grep -Eiq '([^']+)'", gate)
     if environment_pattern_match is None:
         raise AssertionError("compiler environment rejection pattern is missing")
@@ -948,6 +1066,84 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
     plan_mutation_call = "python3 -I ci/test-ordinary-wallet-plan-conformance.py"
     if gate.count(plan_mutation_call) != 1:
         raise AssertionError("ordinary-wallet plan conformance mutation test invocation is not fixed and singular")
+    plan_mutation_test = (ROOT / "ci/test-ordinary-wallet-plan-conformance.py").read_text(
+        encoding="utf-8"
+    )
+    mutable_copy_helper = '''def copy_mutable_tree(source: Path, destination: Path) -> None:
+    source_metadata = os.lstat(source)
+    if stat.S_ISLNK(source_metadata.st_mode) or not stat.S_ISDIR(source_metadata.st_mode):
+        raise AssertionError("mutable corpus copy source root is linked or not a directory")
+    shutil.copytree(source, destination, symlinks=True)
+    for directory, directories, files in os.walk(
+        destination,
+        topdown=False,
+        followlinks=False,
+    ):
+        directory_path = Path(directory)
+        for name in files:
+            path = directory_path / name
+            metadata = os.lstat(path)
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+                raise AssertionError("mutable corpus copy contains a linked or special file")
+            os.chmod(path, 0o600)
+        for name in directories:
+            path = directory_path / name
+            metadata = os.lstat(path)
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+                raise AssertionError("mutable corpus copy contains a linked or non-directory entry")
+            os.chmod(path, 0o700)
+        os.chmod(directory_path, 0o700)'''
+    mutable_copy_test_tokens = (
+        'os.chmod(source_file, 0o444)',
+        'os.chmod(nested, 0o555)',
+        'os.chmod(source, 0o555)',
+        'stat.S_IMODE(os.lstat(source).st_mode) != 0o555',
+        'stat.S_IMODE(os.lstat(nested).st_mode) != 0o555',
+        'stat.S_IMODE(os.lstat(source_file).st_mode) != 0o444',
+        'stat.S_IMODE(os.lstat(destination).st_mode) != 0o700',
+        'stat.S_IMODE(os.lstat(destination / "nested").st_mode) != 0o700',
+        'stat.S_IMODE(os.lstat(destination_file).st_mode) != 0o600',
+        'destination_file.write_text("changed\\n", encoding="utf-8", newline="\\n")',
+        'created.write_text("created\\n", encoding="utf-8", newline="\\n")',
+        'created.unlink()',
+        'for name, directory_link in (("file-link", False), ("directory-link", True)):',
+        'test_mutable_copy_modes(scratch)',
+    )
+
+    def mutable_copy_boundary_is_exact(candidate: str) -> bool:
+        return (
+            candidate.count(mutable_copy_helper) == 1
+            and candidate.count('copy_mutable_tree(ROOT / "contracts", target / "contracts")') == 1
+            and candidate.count("copy_mutable_contracts(target)") == 1
+            and candidate.count("copy_mutable_contracts(valid)") == 1
+            and candidate.count("shutil.copytree(") == 1
+            and all(candidate.count(token) == 1 for token in mutable_copy_test_tokens)
+        )
+
+    if not mutable_copy_boundary_is_exact(plan_mutation_test):
+        raise AssertionError("ordinary-wallet plan mutable corpus copy boundary is not exact")
+    for name, original, replacement in (
+        ("followed links", "followlinks=False", "followlinks=True"),
+        ("dereferenced copy links", "symlinks=True", "symlinks=False"),
+        ("writable source file", "os.chmod(path, 0o600)", "os.chmod(source / path.relative_to(destination), 0o600)"),
+        ("nonwritable copy file", "os.chmod(path, 0o600)", "os.chmod(path, 0o400)"),
+        ("nonwritable copy directory", "os.chmod(path, 0o700)", "os.chmod(path, 0o500)"),
+        (
+            "accepted linked file",
+            "if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):",
+            "if not stat.S_ISREG(metadata.st_mode):",
+        ),
+        (
+            "accepted linked directory",
+            "if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):",
+            "if not stat.S_ISDIR(metadata.st_mode):",
+        ),
+        ("direct mutable copy", "copy_mutable_contracts(target)", 'shutil.copytree(ROOT / "contracts", target / "contracts")'),
+        ("missing mode regression", "test_mutable_copy_modes(scratch)", ""),
+    ):
+        mutated = plan_mutation_test.replace(original, replacement, 1)
+        if mutated == plan_mutation_test or mutable_copy_boundary_is_exact(mutated):
+            raise AssertionError(f"ordinary-wallet plan mutable copy {name} mutation was accepted")
     proof_build_stanza = '''(
     cd /
     CARGO_HOME="$proof_cargo_home" CARGO_TARGET_DIR="$proof_target" \\
@@ -1116,6 +1312,29 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
         if gate.count(token) != 1:
             raise AssertionError(f"sealed compiler boundary token is not exact: {token}")
 
+    darwin_sealed_command_check_helper = '''check_sealed_command_bin() {
+    if [ "$host_system" = Darwin ]; then
+        for darwin_command_target in \\
+            "$darwin_cc_bin" "$darwin_cxx_bin" "$darwin_ar_bin" "$darwin_as_bin" \\
+            "$darwin_ld_bin" "$darwin_nm_bin" "$darwin_ranlib_bin" "$darwin_strip_bin"; do
+            darwin_require_host_authority_path "$darwin_command_target" 'Regular File'
+        done
+        python3 -I ci/check-sealed-rust-command-bin.py \\
+            "$sealed_command_bin" "$sealed_toolchain" \\
+            "$darwin_cc_bin" "$darwin_cxx_bin" "$darwin_cc_bin" "$darwin_cxx_bin" \\
+            "$darwin_ar_bin" "$darwin_as_bin" "$darwin_ld_bin" "$darwin_nm_bin" \\
+            "$darwin_ranlib_bin" "$darwin_strip_bin" \\
+            "$darwin_cc_sha256" "$darwin_cxx_sha256" "$darwin_cc_sha256" "$darwin_cxx_sha256" \\
+            "$darwin_ar_sha256" "$darwin_as_sha256" "$darwin_ld_sha256" "$darwin_nm_sha256" \\
+            "$darwin_ranlib_sha256" "$darwin_strip_sha256"
+    else
+        python3 -I ci/check-sealed-rust-command-bin.py "$sealed_command_bin" "$sealed_toolchain"
+    fi
+}'''
+    darwin_system_exec_authority = '''    for darwin_system_exec in \\
+        /usr/bin/env /bin/sh /bin/pwd /bin/sleep /bin/zsh /usr/bin/dirname /bin/realpath; do
+        darwin_require_host_authority_path "$darwin_system_exec" 'Regular File'
+    done'''
     darwin_toolchain_authority_tokens = (
         'prepare_darwin_toolchain() {',
         'expected_darwin_developer_dir=/Applications/Xcode_15.4.app/Contents/Developer',
@@ -1153,6 +1372,15 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
         'darwin_nm_bin="$(darwin_resolve_tool nm)"',
         'darwin_ranlib_bin="$(darwin_resolve_tool ranlib)"',
         'darwin_strip_bin="$(darwin_resolve_tool strip)"',
+        'darwin_cc_sha256="$("$python_bin" -I ci/check-sealed-rust-command-bin.py --digest "$darwin_cc_bin")"',
+        'darwin_cxx_sha256="$("$python_bin" -I ci/check-sealed-rust-command-bin.py --digest "$darwin_cxx_bin")"',
+        'darwin_ar_sha256="$("$python_bin" -I ci/check-sealed-rust-command-bin.py --digest "$darwin_ar_bin")"',
+        'darwin_as_sha256="$("$python_bin" -I ci/check-sealed-rust-command-bin.py --digest "$darwin_as_bin")"',
+        'darwin_ld_sha256="$("$python_bin" -I ci/check-sealed-rust-command-bin.py --digest "$darwin_ld_bin")"',
+        'darwin_nm_sha256="$("$python_bin" -I ci/check-sealed-rust-command-bin.py --digest "$darwin_nm_bin")"',
+        'darwin_ranlib_sha256="$("$python_bin" -I ci/check-sealed-rust-command-bin.py --digest "$darwin_ranlib_bin")"',
+        'darwin_strip_sha256="$("$python_bin" -I ci/check-sealed-rust-command-bin.py --digest "$darwin_strip_bin")"',
+        darwin_system_exec_authority,
         'for system_name in awk bash cat chmod diff env find git grep head id make mkdir mktemp perl rm sed sh sort tr uname wc; do',
         'link_trusted_tool cc "$darwin_cc_bin"',
         'link_trusted_tool c++ "$darwin_cxx_bin"',
@@ -1162,6 +1390,17 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
         'link_trusted_tool nm "$darwin_nm_bin"',
         'link_trusted_tool ranlib "$darwin_ranlib_bin"',
         'link_trusted_tool strip "$darwin_strip_bin"',
+        '/bin/ln -s "$darwin_cc_bin" "$sealed_command_bin/cc"',
+        '/bin/ln -s "$darwin_cxx_bin" "$sealed_command_bin/c++"',
+        '/bin/ln -s "$darwin_cc_bin" "$sealed_command_bin/clang"',
+        '/bin/ln -s "$darwin_cxx_bin" "$sealed_command_bin/clang++"',
+        '/bin/ln -s "$darwin_ar_bin" "$sealed_command_bin/ar"',
+        '/bin/ln -s "$darwin_as_bin" "$sealed_command_bin/as"',
+        '/bin/ln -s "$darwin_ld_bin" "$sealed_command_bin/ld"',
+        '/bin/ln -s "$darwin_nm_bin" "$sealed_command_bin/nm"',
+        '/bin/ln -s "$darwin_ranlib_bin" "$sealed_command_bin/ranlib"',
+        '/bin/ln -s "$darwin_strip_bin" "$sealed_command_bin/strip"',
+        darwin_sealed_command_check_helper,
         'for system_name in ar as cc c++ ld nm ranlib strip; do',
         '\nprepare_darwin_toolchain\n',
         '                "$darwin_sdkroot" \\\n                "${@}"',
@@ -1187,6 +1426,9 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
             < candidate.index('\nprepare_darwin_toolchain\n')
             < candidate.index('trusted_bin="$scratch/trusted-bin"')
             < candidate.index('link_trusted_tool cc "$darwin_cc_bin"')
+            < candidate.index('sealed_command_bin="$scratch/sealed-rust-command-bin"')
+            < candidate.index('/bin/ln -s "$darwin_cc_bin" "$sealed_command_bin/cc"')
+            < candidate.index(darwin_sealed_command_check_helper)
             < candidate.index('proof_sandbox_profile="$scratch/build-proof.sb"')
             < candidate.index('                "$darwin_sdkroot" \\\n                "${@}"')
         )
@@ -1219,6 +1461,44 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
             gate.replace(
                 'link_trusted_tool cc "$darwin_cc_bin"',
                 'link_system_tool xcrun\n    link_trusted_tool cc "$darwin_cc_bin"',
+                1,
+            ),
+        ),
+        (
+            "sealed system compiler shim",
+            gate.replace(
+                '/bin/ln -s "$darwin_cc_bin" "$sealed_command_bin/cc"',
+                '/bin/ln -s /usr/bin/cc "$sealed_command_bin/cc"',
+                1,
+            ),
+        ),
+        (
+            "sealed checker early return",
+            gate.replace(
+                darwin_sealed_command_check_helper,
+                darwin_sealed_command_check_helper.replace(
+                    'check_sealed_command_bin() {\n',
+                    'check_sealed_command_bin() {\n    return 0\n',
+                    1,
+                ),
+                1,
+            ),
+        ),
+        (
+            "sealed checker wrong platform",
+            gate.replace(
+                darwin_sealed_command_check_helper,
+                darwin_sealed_command_check_helper.replace(
+                    '[ "$host_system" = Darwin ]', '[ "$host_system" = Linux ]', 1
+                ),
+                1,
+            ),
+        ),
+        (
+            "sealed checker dropped digest",
+            gate.replace(
+                darwin_sealed_command_check_helper,
+                darwin_sealed_command_check_helper.replace(' "$darwin_strip_sha256"', '', 1),
                 1,
             ),
         ),
@@ -1378,10 +1658,20 @@ done'''
         r'"(allow file-map-executable (subpath \"$sealed_toolchain\") '
         r'(subpath \"$sealed_command_bin\") (subpath \"$profile_target\"))"'
     )
+    darwin_process_fork = "'(allow process-fork)'"
+    darwin_process_info = "'(allow process-info* (target self))'"
     darwin_system_exec = (
-        "'(allow process-exec* (subpath \"/System\") (subpath \"/usr\") "
-        "(subpath \"/bin\") (subpath \"/sbin\") (subpath \"/Applications\") "
-        "(subpath \"/Library/Developer\"))'"
+        "'(allow process-exec* (literal \"/usr/bin/env\") "
+        "(literal \"/bin/sh\") (literal \"/bin/pwd\") "
+        "(literal \"/bin/sleep\") (literal \"/bin/zsh\") "
+        "(literal \"/usr/bin/dirname\") (literal \"/bin/realpath\"))'"
+    )
+    darwin_xcode_exec = (
+        r'"(allow process-exec* (literal \"$darwin_cc_bin\") '
+        r'(literal \"$darwin_cxx_bin\") (literal \"$darwin_ar_bin\") '
+        r'(literal \"$darwin_as_bin\") (literal \"$darwin_ld_bin\") '
+        r'(literal \"$darwin_nm_bin\") (literal \"$darwin_ranlib_bin\") '
+        r'(literal \"$darwin_strip_bin\"))"'
     )
     darwin_private_exec = (
         r'"(allow process-exec* (subpath \"$sealed_toolchain\") '
@@ -1393,8 +1683,10 @@ done'''
     )
     darwin_null_read = "'(allow file-read-data (literal \"/dev/null\"))'"
     darwin_allow_tokens = (
-        "'(allow process*)'",
+        darwin_process_fork,
+        darwin_process_info,
         darwin_system_exec,
+        darwin_xcode_exec,
         darwin_private_exec,
         "'(allow signal (target self))'",
         "'(allow sysctl-read)'",
@@ -1424,11 +1716,13 @@ done'''
             or len(re.findall(r"\(\s*deny(?:\s|\))", candidate)) != 2
             or candidate.count("(allow file-read") != 6
             or candidate.count("(allow file-map-executable") != 2
-            or candidate.count("(allow process-exec") != 2
+            or candidate.count("(allow process-exec") != 3
             or '(subpath "/")' in candidate
             or "(allow file-read*)" in candidate
             or "(allow file-map-executable)" in candidate
             or "(allow process-exec*)" in candidate
+            or "(allow process*)" in candidate
+            or "(allow process-info*)" in candidate
             or "(with no-sandbox)" in candidate
             or '(subpath "$scratch")' in candidate
             or '(subpath "$build_home")' in candidate
@@ -1494,7 +1788,16 @@ done'''
         if mutated == gate or darwin_profile_is_exact(mutated):
             raise AssertionError(f"sealed Darwin {name} mutation was accepted")
     for name, original, replacement in (
+        ("missing process fork", darwin_process_fork, ""),
+        ("broad process capability", darwin_process_fork, "'(allow process*)'"),
+        ("missing self process information", darwin_process_info, ""),
+        (
+            "unfiltered process information",
+            darwin_process_info,
+            "'(allow process-info*)'",
+        ),
         ("missing system child execution", darwin_system_exec, ""),
+        ("missing Xcode child execution", darwin_xcode_exec, ""),
         ("missing private child execution", darwin_private_exec, ""),
         (
             "unfiltered child execution",
@@ -1512,7 +1815,7 @@ done'''
             "'(allow process-exec* (with no-sandbox) (subpath \"/System\"))'",
         ),
         (
-            "interpreter-only child execution",
+            "missing shell and pwd execution",
             darwin_system_exec,
             "'(allow process-exec* (literal \"/usr/bin/env\"))'",
         ),
@@ -1520,6 +1823,28 @@ done'''
             "interpreter operation substitution",
             darwin_system_exec,
             "'(allow process-exec-interpreter (literal \"/usr/bin/env\"))'",
+        ),
+        (
+            "broad usr child execution",
+            darwin_system_exec,
+            "'(allow process-exec* (subpath \"/usr\") (literal \"/bin/sh\") (literal \"/bin/pwd\"))'",
+        ),
+        (
+            "system make child execution",
+            darwin_system_exec,
+            darwin_system_exec[:-2] + ' (literal "/usr/bin/make"))\'',
+        ),
+        (
+            "broad Xcode child execution",
+            darwin_xcode_exec,
+            r'"(allow process-exec* (subpath \"$darwin_toolchain_bin\"))"',
+        ),
+        (
+            "incomplete Xcode child execution",
+            darwin_xcode_exec,
+            darwin_xcode_exec.replace(
+                r' (literal \"$darwin_strip_bin\")', "", 1
+            ),
         ),
         (
             "scratch child execution",
@@ -2114,7 +2439,21 @@ fi'''
         mutated_gate = gate.replace(sealed_cwd_probe, replacement, 1)
         if mutated_gate == gate or mutated_gate.count(sealed_cwd_probe) != 0:
             raise AssertionError(f"sealed command live CWD {name} mutation was accepted")
+    darwin_system_shim_probe = '''    for denied_darwin_tool in /usr/bin/cc /usr/bin/make /usr/bin/xcrun; do
+        if [ ! -x "$denied_darwin_tool" ] || ! run_sealed /bin/sh -c \\
+            '\"$1\" --version >/dev/null 2>&1; [ "$?" -eq 126 ]' \\
+            wlpq-denied-darwin-tool "$denied_darwin_tool"; then
+            echo "sealed Darwin system compiler shim remained executable" >&2
+            exit 1
+        fi
+    done'''
+    darwin_as_probe = '''    if ! run_sealed "$sealed_command_bin/as" --version >/dev/null; then
+        echo "sealed Darwin assembler wrapper could not reach its exact interpreter and helpers" >&2
+        exit 1
+    fi'''
     darwin_child_exec_probe = '''if [ "$host_system" = Darwin ]; then
+''' + darwin_system_shim_probe + '''
+''' + darwin_as_probe + '''
     expected_darwin_rustc_version='rustc 1.96.0 (ac68faa20 2026-05-25)
 binary: rustc
 commit-hash: ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96
@@ -2150,6 +2489,32 @@ fi'''
                 'if [ "$(run_sealed /bin/sh -c \'exec "$1" -vV </dev/null\' wlpq-rustc "$compiler_rustc_bin")" != "$expected_darwin_rustc_version" ]; then',
                 'if ! run_sealed /bin/sh -c \'exec "$1" -vV </dev/null\' wlpq-rustc "$compiler_rustc_bin" >/dev/null; then',
             ),
+        ),
+        (
+            "missing system shim probes",
+            darwin_child_exec_probe.replace(darwin_system_shim_probe + "\n", "", 1),
+        ),
+        (
+            "missing assembler wrapper probe",
+            darwin_child_exec_probe.replace(darwin_as_probe + "\n", "", 1),
+        ),
+        (
+            "unchecked assembler wrapper probe",
+            darwin_child_exec_probe.replace(
+                darwin_as_probe,
+                '    run_sealed "$sealed_command_bin/as" --version >/dev/null',
+                1,
+            ),
+        ),
+        (
+            "partial system shim probes",
+            darwin_child_exec_probe.replace(
+                "/usr/bin/cc /usr/bin/make /usr/bin/xcrun", "/usr/bin/cc /usr/bin/xcrun", 1
+            ),
+        ),
+        (
+            "accepted non-denial status",
+            darwin_child_exec_probe.replace('eq 126', 'ne 0', 1),
         ),
     ):
         mutated_gate = gate.replace(darwin_child_exec_probe, replacement, 1)
@@ -2226,6 +2591,47 @@ fi'''
     ):
         if probe_source.count(token) != expected:
             raise AssertionError(f"sealed boundary probe token is not exact: {token}")
+    sudo_denial_probe = '''fn require_no_sudo_authority() {
+    match Command::new("/usr/bin/sudo").args(["-n", "true"]).status() {
+        Ok(status) => assert!(!status.success(), "build identity unexpectedly has sudo authority"),
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {}
+        Err(error) => panic!("absolute sudo denial was not OS-enforced: {error}"),
+    }
+}'''
+
+    def sudo_denial_probe_is_exact(candidate: str) -> bool:
+        return (
+            candidate.count(sudo_denial_probe) == 1
+            and candidate.count("    require_no_sudo_authority();") == 1
+            and candidate.index(sudo_denial_probe)
+            < candidate.index("fn main()")
+            < candidate.index("    require_no_sudo_authority();")
+            < candidate.index('require_denied_write("SEALED_DEPENDENCY_TARGET")')
+        )
+
+    if not sudo_denial_probe_is_exact(probe_source):
+        raise AssertionError("sealed sudo authority denial probe is not exact")
+    for name, mutated in (
+        ("missing function", probe_source.replace(sudo_denial_probe, "", 1)),
+        (
+            "missing call",
+            probe_source.replace("    require_no_sudo_authority();\n", "", 1),
+        ),
+        (
+            "successful sudo accepted",
+            probe_source.replace("assert!(!status.success()", "assert!(status.success()", 1),
+        ),
+        (
+            "arbitrary launch error accepted",
+            probe_source.replace(
+                "Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {}",
+                "Err(_) => {}",
+                1,
+            ),
+        ),
+    ):
+        if mutated == probe_source or sudo_denial_probe_is_exact(mutated):
+            raise AssertionError(f"sealed sudo authority {name} mutation was accepted")
     linux_probe_mount_assertion = '''#[cfg(target_os = "linux")]
 fn require_linux_mount_boundary() {
     let build_roots = [

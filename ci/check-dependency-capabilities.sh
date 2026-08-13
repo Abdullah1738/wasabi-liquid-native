@@ -34,6 +34,14 @@ darwin_ld_bin=
 darwin_nm_bin=
 darwin_ranlib_bin=
 darwin_strip_bin=
+darwin_cc_sha256=
+darwin_cxx_sha256=
+darwin_ar_sha256=
+darwin_as_sha256=
+darwin_ld_sha256=
+darwin_nm_sha256=
+darwin_ranlib_sha256=
+darwin_strip_sha256=
 prepare_darwin_toolchain() {
     if [ "$host_system" != Darwin ]; then
         return
@@ -125,6 +133,18 @@ Build version 15F31d'
     darwin_nm_bin="$(darwin_resolve_tool nm)"
     darwin_ranlib_bin="$(darwin_resolve_tool ranlib)"
     darwin_strip_bin="$(darwin_resolve_tool strip)"
+    darwin_cc_sha256="$("$python_bin" -I ci/check-sealed-rust-command-bin.py --digest "$darwin_cc_bin")"
+    darwin_cxx_sha256="$("$python_bin" -I ci/check-sealed-rust-command-bin.py --digest "$darwin_cxx_bin")"
+    darwin_ar_sha256="$("$python_bin" -I ci/check-sealed-rust-command-bin.py --digest "$darwin_ar_bin")"
+    darwin_as_sha256="$("$python_bin" -I ci/check-sealed-rust-command-bin.py --digest "$darwin_as_bin")"
+    darwin_ld_sha256="$("$python_bin" -I ci/check-sealed-rust-command-bin.py --digest "$darwin_ld_bin")"
+    darwin_nm_sha256="$("$python_bin" -I ci/check-sealed-rust-command-bin.py --digest "$darwin_nm_bin")"
+    darwin_ranlib_sha256="$("$python_bin" -I ci/check-sealed-rust-command-bin.py --digest "$darwin_ranlib_bin")"
+    darwin_strip_sha256="$("$python_bin" -I ci/check-sealed-rust-command-bin.py --digest "$darwin_strip_bin")"
+    for darwin_system_exec in \
+        /usr/bin/env /bin/sh /bin/pwd /bin/sleep /bin/zsh /usr/bin/dirname /bin/realpath; do
+        darwin_require_host_authority_path "$darwin_system_exec" 'Regular File'
+    done
 }
 if [ ! -x "$python_bin" ]; then
     echo "reviewed Python interpreter path is unavailable" >&2
@@ -446,7 +466,38 @@ sealed_command_bin="$scratch/sealed-rust-command-bin"
 for command in cargo-fmt cargo-clippy clippy-driver; do
     /bin/ln -s "$sealed_toolchain/bin/$command" "$sealed_command_bin/$command"
 done
+if [ "$host_system" = Darwin ]; then
+    /bin/ln -s "$darwin_cc_bin" "$sealed_command_bin/cc"
+    /bin/ln -s "$darwin_cxx_bin" "$sealed_command_bin/c++"
+    /bin/ln -s "$darwin_cc_bin" "$sealed_command_bin/clang"
+    /bin/ln -s "$darwin_cxx_bin" "$sealed_command_bin/clang++"
+    /bin/ln -s "$darwin_ar_bin" "$sealed_command_bin/ar"
+    /bin/ln -s "$darwin_as_bin" "$sealed_command_bin/as"
+    /bin/ln -s "$darwin_ld_bin" "$sealed_command_bin/ld"
+    /bin/ln -s "$darwin_nm_bin" "$sealed_command_bin/nm"
+    /bin/ln -s "$darwin_ranlib_bin" "$sealed_command_bin/ranlib"
+    /bin/ln -s "$darwin_strip_bin" "$sealed_command_bin/strip"
+fi
 /bin/chmod 0555 "$sealed_command_bin"
+check_sealed_command_bin() {
+    if [ "$host_system" = Darwin ]; then
+        for darwin_command_target in \
+            "$darwin_cc_bin" "$darwin_cxx_bin" "$darwin_ar_bin" "$darwin_as_bin" \
+            "$darwin_ld_bin" "$darwin_nm_bin" "$darwin_ranlib_bin" "$darwin_strip_bin"; do
+            darwin_require_host_authority_path "$darwin_command_target" 'Regular File'
+        done
+        python3 -I ci/check-sealed-rust-command-bin.py \
+            "$sealed_command_bin" "$sealed_toolchain" \
+            "$darwin_cc_bin" "$darwin_cxx_bin" "$darwin_cc_bin" "$darwin_cxx_bin" \
+            "$darwin_ar_bin" "$darwin_as_bin" "$darwin_ld_bin" "$darwin_nm_bin" \
+            "$darwin_ranlib_bin" "$darwin_strip_bin" \
+            "$darwin_cc_sha256" "$darwin_cxx_sha256" "$darwin_cc_sha256" "$darwin_cxx_sha256" \
+            "$darwin_ar_sha256" "$darwin_as_sha256" "$darwin_ld_sha256" "$darwin_nm_sha256" \
+            "$darwin_ranlib_sha256" "$darwin_strip_sha256"
+    else
+        python3 -I ci/check-sealed-rust-command-bin.py "$sealed_command_bin" "$sealed_toolchain"
+    fi
+}
 sealed_toolchain_authority="$scratch/sealed-toolchain-authority.jsonl"
 sealed_toolchain_authority_sha256="$(
     python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py \
@@ -532,7 +583,7 @@ for sealed in \
     /usr/bin/sudo -n "$chown_bin" -R 0 "$sealed"
 done
 python3 -I ci/check-pinned-rust-toolchain.py --root-owned-toolchain "$sealed_toolchain" >/dev/null
-python3 -I ci/check-sealed-rust-command-bin.py "$sealed_command_bin" "$sealed_toolchain" >/dev/null
+check_sealed_command_bin >/dev/null
 for authority in "$proof_snapshot_authority" "$proof_cache_authority" "$workspace_cache_authority" "$sealed_workspace_authority" "$sealed_toolchain_authority" "$sealed_probe_authority"; do
     /usr/bin/sudo -n /bin/chmod 0444 "$authority"
 done
@@ -556,7 +607,7 @@ python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py --verify-tree \
 python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py --verify-tree \
     "$sealed_toolchain" "$sealed_toolchain_authority" "$sealed_toolchain_authority_sha256" "$build_uid"
 python3 -I ci/check-pinned-rust-toolchain.py --root-owned-toolchain "$sealed_toolchain" >/dev/null
-python3 -I ci/check-sealed-rust-command-bin.py "$sealed_command_bin" "$sealed_toolchain" >/dev/null
+check_sealed_command_bin >/dev/null
 python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py --verify-tree \
     "$sealed_probe" "$sealed_probe_authority" "$sealed_probe_authority_sha256" "$build_uid"
 build_home="$scratch/build-home"
@@ -601,8 +652,10 @@ case "$host_system" in
             printf '%s\n' \
                 '(version 1)' \
                 '(deny default)' \
-                '(allow process*)' \
-                '(allow process-exec* (subpath "/System") (subpath "/usr") (subpath "/bin") (subpath "/sbin") (subpath "/Applications") (subpath "/Library/Developer"))' \
+                '(allow process-fork)' \
+                '(allow process-info* (target self))' \
+                '(allow process-exec* (literal "/usr/bin/env") (literal "/bin/sh") (literal "/bin/pwd") (literal "/bin/sleep") (literal "/bin/zsh") (literal "/usr/bin/dirname") (literal "/bin/realpath"))' \
+                "(allow process-exec* (literal \"$darwin_cc_bin\") (literal \"$darwin_cxx_bin\") (literal \"$darwin_ar_bin\") (literal \"$darwin_as_bin\") (literal \"$darwin_ld_bin\") (literal \"$darwin_nm_bin\") (literal \"$darwin_ranlib_bin\") (literal \"$darwin_strip_bin\"))" \
                 "(allow process-exec* (subpath \"$sealed_toolchain\") (subpath \"$sealed_command_bin\") (subpath \"$profile_target\"))" \
                 '(allow signal (target self))' \
                 '(allow sysctl-read)' \
@@ -672,6 +725,18 @@ if [ "$(run_sealed /bin/pwd -P)" != "$sealed_workspace" ]; then
     exit 1
 fi
 if [ "$host_system" = Darwin ]; then
+    for denied_darwin_tool in /usr/bin/cc /usr/bin/make /usr/bin/xcrun; do
+        if [ ! -x "$denied_darwin_tool" ] || ! run_sealed /bin/sh -c \
+            '"$1" --version >/dev/null 2>&1; [ "$?" -eq 126 ]' \
+            wlpq-denied-darwin-tool "$denied_darwin_tool"; then
+            echo "sealed Darwin system compiler shim remained executable" >&2
+            exit 1
+        fi
+    done
+    if ! run_sealed "$sealed_command_bin/as" --version >/dev/null; then
+        echo "sealed Darwin assembler wrapper could not reach its exact interpreter and helpers" >&2
+        exit 1
+    fi
     expected_darwin_rustc_version='rustc 1.96.0 (ac68faa20 2026-05-25)
 binary: rustc
 commit-hash: ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96
@@ -735,7 +800,7 @@ python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py --verify-tree \
 python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py --verify-tree \
     "$sealed_toolchain" "$sealed_toolchain_authority" "$sealed_toolchain_authority_sha256" "$build_uid"
 python3 -I ci/check-pinned-rust-toolchain.py --root-owned-toolchain "$sealed_toolchain" >/dev/null
-python3 -I ci/check-sealed-rust-command-bin.py "$sealed_command_bin" "$sealed_toolchain" >/dev/null
+check_sealed_command_bin >/dev/null
 python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py --verify-tree \
     "$sealed_probe" "$sealed_probe_authority" "$sealed_probe_authority_sha256" "$build_uid"
 cd "$sealed_workspace"
@@ -1653,7 +1718,7 @@ $decoder_uniqueness_mir"
         python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py --verify-tree \
             "$sealed_toolchain" "$sealed_toolchain_authority" "$sealed_toolchain_authority_sha256" "$build_uid"
         python3 -I ci/check-pinned-rust-toolchain.py --root-owned-toolchain "$sealed_toolchain" >/dev/null
-        python3 -I ci/check-sealed-rust-command-bin.py "$sealed_command_bin" "$sealed_toolchain" >/dev/null
+        check_sealed_command_bin >/dev/null
         python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py --verify-tree \
             "$sealed_probe" "$sealed_probe_authority" "$sealed_probe_authority_sha256" "$build_uid"
         ;;

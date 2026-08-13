@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -239,9 +240,87 @@ def replace_repository_root_with_symlink(root: Path) -> None:
     os.symlink(target, root, target_is_directory=True)
 
 
+def copy_mutable_tree(source: Path, destination: Path) -> None:
+    source_metadata = os.lstat(source)
+    if stat.S_ISLNK(source_metadata.st_mode) or not stat.S_ISDIR(source_metadata.st_mode):
+        raise AssertionError("mutable corpus copy source root is linked or not a directory")
+    shutil.copytree(source, destination, symlinks=True)
+    for directory, directories, files in os.walk(
+        destination,
+        topdown=False,
+        followlinks=False,
+    ):
+        directory_path = Path(directory)
+        for name in files:
+            path = directory_path / name
+            metadata = os.lstat(path)
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+                raise AssertionError("mutable corpus copy contains a linked or special file")
+            os.chmod(path, 0o600)
+        for name in directories:
+            path = directory_path / name
+            metadata = os.lstat(path)
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+                raise AssertionError("mutable corpus copy contains a linked or non-directory entry")
+            os.chmod(path, 0o700)
+        os.chmod(directory_path, 0o700)
+
+
+def copy_mutable_contracts(target: Path) -> None:
+    copy_mutable_tree(ROOT / "contracts", target / "contracts")
+
+
+def test_mutable_copy_modes(scratch: Path) -> None:
+    source = scratch / "mutable-copy-source"
+    nested = source / "nested"
+    nested.mkdir(parents=True)
+    source_file = nested / "fixture"
+    source_file.write_text("sealed\n", encoding="utf-8", newline="\n")
+    os.chmod(source_file, 0o444)
+    os.chmod(nested, 0o555)
+    os.chmod(source, 0o555)
+    try:
+        destination = scratch / "mutable-copy-destination"
+        copy_mutable_tree(source, destination)
+        destination_file = destination / "nested/fixture"
+        if (
+            stat.S_IMODE(os.lstat(source).st_mode) != 0o555
+            or stat.S_IMODE(os.lstat(nested).st_mode) != 0o555
+            or stat.S_IMODE(os.lstat(source_file).st_mode) != 0o444
+            or stat.S_IMODE(os.lstat(destination).st_mode) != 0o700
+            or stat.S_IMODE(os.lstat(destination / "nested").st_mode) != 0o700
+            or stat.S_IMODE(os.lstat(destination_file).st_mode) != 0o600
+        ):
+            raise AssertionError("mutable corpus copy modes differ from exact authority")
+        destination_file.write_text("changed\n", encoding="utf-8", newline="\n")
+        created = destination / "nested/created"
+        created.write_text("created\n", encoding="utf-8", newline="\n")
+        created.unlink()
+
+        for name, directory_link in (("file-link", False), ("directory-link", True)):
+            linked_source = scratch / f"mutable-copy-{name}-source"
+            linked_source.mkdir()
+            linked_target = linked_source / "target"
+            if directory_link:
+                linked_target.mkdir()
+            else:
+                linked_target.write_text("target\n", encoding="utf-8", newline="\n")
+            os.symlink(linked_target, linked_source / "linked", target_is_directory=directory_link)
+            try:
+                copy_mutable_tree(linked_source, scratch / f"mutable-copy-{name}-destination")
+            except AssertionError as error:
+                if "mutable corpus copy contains a linked" not in str(error):
+                    raise
+            else:
+                raise AssertionError(f"mutable corpus copy accepted a {name}")
+    finally:
+        os.chmod(source, 0o700)
+        os.chmod(nested, 0o700)
+
+
 def mutate(scratch: Path, name: str, action, *, close: bool = True, expected_error: str | None = None) -> None:
     target = scratch / name
-    shutil.copytree(ROOT / "contracts", target / "contracts")
+    copy_mutable_contracts(target)
     action(target)
     if close:
         reclose(target)
@@ -328,8 +407,9 @@ def main() -> int:
     test_transaction_scanner_guards(load_checker())
     with tempfile.TemporaryDirectory(prefix="wlpq-corpus-mutations-") as directory:
         scratch = Path(directory)
+        test_mutable_copy_modes(scratch)
         valid = scratch / "valid"
-        shutil.copytree(ROOT / "contracts", valid / "contracts")
+        copy_mutable_contracts(valid)
         run(valid, True)
 
         mutate(scratch, "frame-content", lambda root: replace(root / VECTORS / "frames/frame-test-toy-single.hex", "574c5051", "584c5051"), close=False)
