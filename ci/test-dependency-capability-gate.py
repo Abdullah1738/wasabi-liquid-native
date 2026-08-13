@@ -1697,7 +1697,8 @@ done'''
     darwin_root_read = "'(allow file-read* (literal \"/\"))'"
     darwin_tmp_parent_metadata = (
         "'(allow file-read-metadata (literal \"/private\") "
-        "(literal \"/private/tmp\"))'"
+        "(literal \"/private/tmp\") (literal \"/private/var\") "
+        "(literal \"/private/var/tmp\"))'"
     )
     darwin_system_read = (
         "'(allow file-read* (subpath \"/System\") (subpath \"/usr\") "
@@ -2029,12 +2030,16 @@ done'''
         (
             "private parent subtree metadata",
             darwin_tmp_parent_metadata,
-            "'(allow file-read-metadata (subpath \"/private\") (literal \"/private/tmp\"))'",
+            darwin_tmp_parent_metadata.replace(
+                '(literal \"/private\")', '(subpath \"/private\")'
+            ),
         ),
         (
             "private tmp subtree metadata",
             darwin_tmp_parent_metadata,
-            "'(allow file-read-metadata (literal \"/private\") (subpath \"/private/tmp\"))'",
+            darwin_tmp_parent_metadata.replace(
+                '(literal \"/private/tmp\")', '(subpath \"/private/tmp\")'
+            ),
         ),
         (
             "private tmp parent data read",
@@ -2044,12 +2049,36 @@ done'''
         (
             "missing private parent literal",
             darwin_tmp_parent_metadata,
-            "'(allow file-read-metadata (literal \"/private/tmp\"))'",
+            darwin_tmp_parent_metadata.replace('(literal \"/private\") ', ""),
         ),
         (
             "missing private tmp literal",
             darwin_tmp_parent_metadata,
-            "'(allow file-read-metadata (literal \"/private\"))'",
+            darwin_tmp_parent_metadata.replace(' (literal \"/private/tmp\")', ""),
+        ),
+        (
+            "missing private var parent literal",
+            darwin_tmp_parent_metadata,
+            darwin_tmp_parent_metadata.replace(' (literal \"/private/var\")', ""),
+        ),
+        (
+            "missing private var tmp literal",
+            darwin_tmp_parent_metadata,
+            darwin_tmp_parent_metadata.replace(' (literal \"/private/var/tmp\")', ""),
+        ),
+        (
+            "private var subtree metadata",
+            darwin_tmp_parent_metadata,
+            darwin_tmp_parent_metadata.replace(
+                '(literal \"/private/var\")', '(subpath \"/private/var\")'
+            ),
+        ),
+        (
+            "private var tmp subtree metadata",
+            darwin_tmp_parent_metadata,
+            darwin_tmp_parent_metadata.replace(
+                '(literal \"/private/var/tmp\")', '(subpath \"/private/var/tmp\")'
+            ),
         ),
         (
             "unfiltered private metadata",
@@ -2889,7 +2918,7 @@ fn require_linux_mount_boundary() {}'''
         "lexical source scan": 'plan_lexical_source="$(',
         "comment stripping": ".strip_rust_comments",
         "all-input dep-info": (
-            '--emit=dep-info=- >"$gate_output/ordinary-wallet-plan.dep-info"'
+            '--emit=dep-info="$plan_dep_info"'
         ),
         "bounded compiler diagnostics": (
             'python3 -I ci/capture-bounded-command-diagnostics.py \\\n'
@@ -2943,14 +2972,20 @@ fn require_linux_mount_boundary() {}'''
             raise AssertionError(f"ordinary-wallet plan shell {name} mutation was accepted")
     diagnostic_lifecycle_stanza = r'''plan_diagnostic_output="$gate_output/ordinary-wallet-plan.stderr"
 plan_diagnostic_status="$gate_output/ordinary-wallet-plan.status"
+plan_dep_info="$workspace_target/ordinary-wallet-plan-source-closure.d"
+if [ -e "$plan_dep_info" ] || [ -L "$plan_dep_info" ]; then
+    echo "ordinary-wallet plan compiler source closure already exists" >&2
+    exit 1
+fi
 if ! (
+    umask 022
     if run_sealed "$compiler_cargo_bin" rustc \
             -p wasabi-liquid-native-ordinary-wallet-plan \
             --lib \
             --locked \
             --offline \
             -- \
-            --emit=dep-info=- >"$gate_output/ordinary-wallet-plan.dep-info"
+            --emit=dep-info="$plan_dep_info"
     then
         plan_pipeline_status=0
     else
@@ -2987,6 +3022,7 @@ fi'''
         or len(re.findall(r"(?m)^plan_diagnostic_output=", gate)) != 1
         or len(re.findall(r"(?m)^plan_diagnostic_status=", gate)) != 1
         or len(re.findall(r"(?m)^plan_compile_status=", gate)) != 1
+        or len(re.findall(r"(?m)^plan_dep_info=", gate)) != 1
         or len(re.findall(r"(?m)^\s*plan_pipeline_status=", gate)) != 2
         or gate.count('--emit "$plan_diagnostic_output"') != 1
         or "ordinary-wallet-plan.stderr.fifo" in gate
@@ -3003,12 +3039,69 @@ fi'''
         ("status range", 'if [ "$plan_compile_status" -gt 255 ]; then\n'),
         ("failure-only emission", 'if [ "$plan_compile_status" -ne 0 ]; then\n'),
         ("bounded emission", '        --emit "$plan_diagnostic_output"; then\n'),
+        ("fresh dep-info", 'if [ -e "$plan_dep_info" ] || [ -L "$plan_dep_info" ]; then\n'),
+        ("writable dep-info", '            --emit=dep-info="$plan_dep_info"\n'),
+        ("dep-info mode", "    umask 022\n"),
     ):
         mutated = gate.replace(token, "", 1)
         if mutated == gate or mutated.count(diagnostic_lifecycle_stanza) != 0:
             raise AssertionError(f"bounded compiler diagnostic {name} mutation was accepted")
     if gate.count("python3 -I ci/test-bounded-command-diagnostics.py") != 1:
         raise AssertionError("bounded command diagnostic mutation test is not singular")
+    source_closure_reader = '''python3 -I ci/read-compiler-source-closure.py \\
+        "$sealed_workspace" "$workspace_target" "$plan_dep_info" 0 "$build_uid"'''
+    if (
+        gate.count("python3 -I ci/test-compiler-source-closure.py") != 1
+        or gate.count(source_closure_reader) != 1
+        or gate.count("ordinary-wallet-plan-source-closure.d") != 1
+        or '"$gate_output/ordinary-wallet-plan.dep-info"' in gate
+    ):
+        raise AssertionError("compiler source-closure reader wiring is not exact")
+    source_closure_helper = (
+        ROOT / "ci/read-compiler-source-closure.py"
+    ).read_text(encoding="utf-8")
+    source_closure_tokens = (
+        "MAX_DEP_INFO_BYTES = 64 * 1024",
+        'DEP_INFO_NAME = "ordinary-wallet-plan-source-closure.d"',
+        'target_root.name != "workspace-target"',
+        "target_root.parent != workspace_root.parent",
+        "stat.S_IMODE(root_metadata.st_mode) != 0o755",
+        "root_metadata.st_uid != expected_uid",
+        "stat.S_IMODE(workspace_metadata.st_mode) != 0o555",
+        "workspace_metadata.st_uid != expected_workspace_uid",
+        'os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)',
+        "or before.st_nlink != 1",
+        "or before.st_uid != expected_uid",
+        "or before.st_size > MAX_DEP_INFO_BYTES",
+        "or exact_identity(os.lstat(target_root)) != exact_identity(root_metadata)",
+        "parsed.as_posix() != token",
+        "source.relative_to(workspace_root)",
+        'part in ("", ".", "..")',
+        "if stat.S_ISLNK(source_metadata.st_mode):",
+        "exact_identity(os.lstat(workspace_root)) != exact_identity(workspace_metadata)",
+    )
+
+    def source_closure_helper_is_exact(candidate: str) -> bool:
+        return (
+            all(candidate.count(token) == 1 for token in source_closure_tokens)
+            and len(re.findall(r"(?m)^MAX_DEP_INFO_BYTES\s*=", candidate)) == 1
+            and len(re.findall(r"(?m)^DEP_INFO_NAME\s*=", candidate)) == 1
+        )
+
+    if not source_closure_helper_is_exact(source_closure_helper):
+        raise AssertionError("compiler source-closure authority is not exact")
+    for token in source_closure_tokens:
+        mutated = source_closure_helper.replace(token, "", 1)
+        if mutated == source_closure_helper or source_closure_helper_is_exact(mutated):
+            raise AssertionError(
+                f"compiler source-closure authority mutation was accepted: {token}"
+            )
+    for mutation in (
+        "\nMAX_DEP_INFO_BYTES = 1024 * 1024\n",
+        '\nDEP_INFO_NAME = "changed.d"\n',
+    ):
+        if source_closure_helper_is_exact(source_closure_helper + mutation):
+            raise AssertionError("compiler source-closure authority reassignment was accepted")
     diagnostic_helper = (
         ROOT / "ci/capture-bounded-command-diagnostics.py"
     ).read_text(encoding="utf-8")

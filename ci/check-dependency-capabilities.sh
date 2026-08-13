@@ -281,6 +281,7 @@ python3 -I ci/test-pinned-rust-toolchain.py
 python3 -I ci/test-cargo-fetch-preflight.py
 python3 -I ci/test-sealed-rust-command-bin.py
 python3 -I ci/test-bounded-command-diagnostics.py
+python3 -I ci/test-compiler-source-closure.py
 python3 -I ci/test-sealed-tree-readable.py
 python3 -I ci/test-cargo-credential-provider.py
 source_cargo_home="$scratch/source-cargo-home"
@@ -665,7 +666,7 @@ case "$host_system" in
                 '(allow file-read* (literal "/"))' \
                 '(allow file-read* (subpath "/System") (subpath "/usr") (subpath "/bin") (subpath "/sbin") (subpath "/Applications") (subpath "/Library/Developer") (subpath "/private/etc") (subpath "/private/var/db"))' \
                 '(allow file-read-metadata (literal "/var") (literal "/private/var/select/developer_dir") (literal "/private/var/select/sh"))' \
-                '(allow file-read-metadata (literal "/private") (literal "/private/tmp"))' \
+                '(allow file-read-metadata (literal "/private") (literal "/private/tmp") (literal "/private/var") (literal "/private/var/tmp"))' \
                 "(allow file-read* (subpath \"$scratch\"))" \
                 "(allow file-read-metadata (literal \"$var_tmp_target\"))" \
                 '(allow file-map-executable (subpath "/System") (subpath "/usr") (subpath "/bin") (subpath "/sbin") (subpath "/Applications") (subpath "/Library/Developer"))' \
@@ -1268,14 +1269,20 @@ if [ "$plan_trait_impl_count" -ne 42 ] || grep -En '^[[:space:]]+impl[[:space:]<
 fi
 plan_diagnostic_output="$gate_output/ordinary-wallet-plan.stderr"
 plan_diagnostic_status="$gate_output/ordinary-wallet-plan.status"
+plan_dep_info="$workspace_target/ordinary-wallet-plan-source-closure.d"
+if [ -e "$plan_dep_info" ] || [ -L "$plan_dep_info" ]; then
+    echo "ordinary-wallet plan compiler source closure already exists" >&2
+    exit 1
+fi
 if ! (
+    umask 022
     if run_sealed "$compiler_cargo_bin" rustc \
             -p wasabi-liquid-native-ordinary-wallet-plan \
             --lib \
             --locked \
             --offline \
             -- \
-            --emit=dep-info=- >"$gate_output/ordinary-wallet-plan.dep-info"
+            --emit=dep-info="$plan_dep_info"
     then
         plan_pipeline_status=0
     else
@@ -1308,16 +1315,8 @@ if [ "$plan_compile_status" -ne 0 ]; then
     exit 1
 fi
 plan_compiled_sources="$(
-    python3 -I -c 'import pathlib, sys; root = pathlib.Path.cwd().resolve(); found = set(); lines = pathlib.Path(sys.argv[1]).read_text().splitlines();
-for line in lines:
-    if ":" not in line: continue
-    for token in line.split(":", 1)[1].split():
-        path = pathlib.Path(token); path = path if path.is_absolute() else root / path
-        if not path.exists(): continue
-        path = path.resolve()
-        try: found.add(path.relative_to(root).as_posix())
-        except ValueError: found.add(path.as_posix())
-print("\n".join(sorted(found)))' "$gate_output/ordinary-wallet-plan.dep-info"
+    python3 -I ci/read-compiler-source-closure.py \
+        "$sealed_workspace" "$workspace_target" "$plan_dep_info" 0 "$build_uid"
 )"
 expected_plan_compiled_sources='crates/ordinary-wallet-plan/src/lib.rs
 crates/ordinary-wallet-plan/src/reader.rs
