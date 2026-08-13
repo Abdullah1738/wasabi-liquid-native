@@ -450,9 +450,9 @@ gate_output="$scratch/gate-output"
 /bin/chmod 0755 "$gate_output"
 for writable in "$build_home" "$proof_target" "$workspace_target" "$build_tmp"; do
     /usr/bin/sudo -n "$chown_bin" "$build_uid" "$writable"
-    /bin/chmod 0700 "$writable"
+    /usr/bin/sudo -n /bin/chmod 0700 "$writable"
 done
-/bin/chmod 0755 "$proof_target" "$workspace_target"
+/usr/bin/sudo -n /bin/chmod 0755 "$proof_target" "$workspace_target"
 host_write_target="$scratch/host-write-probe"
 var_tmp_target="/var/tmp/wasabi-liquid-build-write-probe.$$"
 delayed_write_target="$build_home/delayed-descendant-write"
@@ -460,7 +460,7 @@ delayed_write_target="$build_home/delayed-descendant-write"
 /usr/bin/sudo -n /usr/bin/touch "$var_tmp_target"
 for denied_write in "$host_write_target" "$var_tmp_target"; do
     /usr/bin/sudo -n "$chown_bin" "$build_uid" "$denied_write"
-    /bin/chmod 0600 "$denied_write"
+    /usr/bin/sudo -n /bin/chmod 0600 "$denied_write"
 done
 /bin/chmod 0711 "$scratch"
 compiler_toolchain_root="$sealed_toolchain"
@@ -494,7 +494,7 @@ case "$host_system" in
                 '(allow file-write-data (literal "/dev/null"))' \
                 '(deny network*)' >"$sandbox_profile"
             /usr/bin/sudo -n "$chown_bin" 0 "$sandbox_profile"
-            /bin/chmod 0444 "$sandbox_profile"
+            /usr/bin/sudo -n /bin/chmod 0444 "$sandbox_profile"
         done
         run_sealed() {
             case "$CARGO_TARGET_DIR" in

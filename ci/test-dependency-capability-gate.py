@@ -1061,6 +1061,138 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
     for token in privilege_tokens:
         if gate.count(token) != 1:
             raise AssertionError(f"sealed compiler boundary token is not exact: {token}")
+    writable_handoff = '''for writable in "$build_home" "$proof_target" "$workspace_target" "$build_tmp"; do
+    /usr/bin/sudo -n "$chown_bin" "$build_uid" "$writable"
+    /usr/bin/sudo -n /bin/chmod 0700 "$writable"
+done
+/usr/bin/sudo -n /bin/chmod 0755 "$proof_target" "$workspace_target"'''
+    denied_write_handoff = '''for denied_write in "$host_write_target" "$var_tmp_target"; do
+    /usr/bin/sudo -n "$chown_bin" "$build_uid" "$denied_write"
+    /usr/bin/sudo -n /bin/chmod 0600 "$denied_write"
+done'''
+    sandbox_profile_handoff = '''            /usr/bin/sudo -n "$chown_bin" 0 "$sandbox_profile"
+            /usr/bin/sudo -n /bin/chmod 0444 "$sandbox_profile"'''
+
+    def handoff_is_exact(candidate: str) -> bool:
+        if any(
+            candidate.count(stanza) != 1
+            for stanza in (
+                writable_handoff,
+                denied_write_handoff,
+                sandbox_profile_handoff,
+            )
+        ):
+            return False
+        return (
+            candidate.index(writable_handoff)
+            < candidate.index(denied_write_handoff)
+            < candidate.index('/bin/chmod 0711 "$scratch"')
+            < candidate.index(sandbox_profile_handoff)
+        )
+
+    if not handoff_is_exact(gate):
+        raise AssertionError("sealed writable ownership handoff is not exact")
+    handoff_mutations = {
+        "writable mode privilege": gate.replace(
+            '/usr/bin/sudo -n /bin/chmod 0700 "$writable"',
+            '/bin/chmod 0700 "$writable"',
+            1,
+        ),
+        "target mode privilege": gate.replace(
+            '/usr/bin/sudo -n /bin/chmod 0755 "$proof_target" "$workspace_target"',
+            '/bin/chmod 0755 "$proof_target" "$workspace_target"',
+            1,
+        ),
+        "denied-write mode privilege": gate.replace(
+            '/usr/bin/sudo -n /bin/chmod 0600 "$denied_write"',
+            '/bin/chmod 0600 "$denied_write"',
+            1,
+        ),
+        "sandbox-profile mode privilege": gate.replace(
+            '/usr/bin/sudo -n /bin/chmod 0444 "$sandbox_profile"',
+            '/bin/chmod 0444 "$sandbox_profile"',
+            1,
+        ),
+        "writable ownership ordering": gate.replace(
+            writable_handoff,
+            writable_handoff.replace(
+                '    /usr/bin/sudo -n "$chown_bin" "$build_uid" "$writable"\n'
+                '    /usr/bin/sudo -n /bin/chmod 0700 "$writable"',
+                '    /usr/bin/sudo -n /bin/chmod 0700 "$writable"\n'
+                '    /usr/bin/sudo -n "$chown_bin" "$build_uid" "$writable"',
+                1,
+            ),
+            1,
+        ),
+        "denied-write ownership ordering": gate.replace(
+            denied_write_handoff,
+            denied_write_handoff.replace(
+                '    /usr/bin/sudo -n "$chown_bin" "$build_uid" "$denied_write"\n'
+                '    /usr/bin/sudo -n /bin/chmod 0600 "$denied_write"',
+                '    /usr/bin/sudo -n /bin/chmod 0600 "$denied_write"\n'
+                '    /usr/bin/sudo -n "$chown_bin" "$build_uid" "$denied_write"',
+                1,
+            ),
+            1,
+        ),
+        "sandbox-profile ownership ordering": gate.replace(
+            sandbox_profile_handoff,
+            sandbox_profile_handoff.replace(
+                '            /usr/bin/sudo -n "$chown_bin" 0 "$sandbox_profile"\n'
+                '            /usr/bin/sudo -n /bin/chmod 0444 "$sandbox_profile"',
+                '            /usr/bin/sudo -n /bin/chmod 0444 "$sandbox_profile"\n'
+                '            /usr/bin/sudo -n "$chown_bin" 0 "$sandbox_profile"',
+                1,
+            ),
+            1,
+        ),
+    }
+    for name, mutated_gate in handoff_mutations.items():
+        if mutated_gate == gate or handoff_is_exact(mutated_gate):
+            raise AssertionError(f"sealed writable {name} mutation was accepted")
+
+    def darwin_cleanup_is_exact(candidate: str) -> bool:
+        cleanup_start = candidate.find("cleanup() {")
+        cleanup_end = candidate.find("\n}\ntrap cleanup EXIT HUP INT TERM", cleanup_start)
+        if cleanup_start < 0 or cleanup_end < 0:
+            return False
+        cleanup = candidate[cleanup_start:cleanup_end]
+        lifecycle = (
+            'if darwin_marker_matches; then',
+            'if /usr/bin/sudo -n /usr/bin/dscl . -read "/Users/$build_user" >/dev/null 2>&1; then',
+            'if darwin_account_matches; then',
+            '/usr/bin/sudo -n /usr/bin/pkill -TERM -u "$build_uid" 2>/dev/null || :',
+            '/bin/sleep 1',
+            '/usr/bin/sudo -n /usr/bin/pkill -KILL -u "$build_uid" 2>/dev/null || :',
+            'if /usr/bin/sudo -n /usr/bin/pgrep -u "$build_uid" >/dev/null 2>&1; then',
+            '/usr/bin/sudo -n /usr/bin/dscl . -delete "/Users/$build_user"',
+            'if ! /usr/bin/sudo -n /usr/bin/dscl . -read "/Users/$build_user" >/dev/null 2>&1; then',
+            '/usr/bin/sudo -n /bin/rm "$darwin_account_marker"',
+            '/usr/bin/sudo -n /bin/rmdir "$darwin_account_lock"',
+            'if [ -n "$var_tmp_target" ]; then',
+            '/usr/bin/sudo -n /bin/rm -f "$var_tmp_target" 2>/dev/null || :',
+            'if [ -d "$scratch" ]; then',
+            '/usr/bin/sudo -n "$chown_bin" -R "$(/usr/bin/id -u)" "$scratch" 2>/dev/null || :',
+            'chmod -R u+w "$scratch" 2>/dev/null || :',
+            'rm -rf "$scratch"',
+        )
+        return all(cleanup.count(token) == 1 for token in lifecycle) and [
+            cleanup.index(token) for token in lifecycle
+        ] == sorted(cleanup.index(token) for token in lifecycle)
+
+    if gate.count("trap cleanup EXIT HUP INT TERM") != 1 or not darwin_cleanup_is_exact(gate):
+        raise AssertionError("Darwin account, lock, or scratch cleanup lifecycle is not exact")
+    for name, token in (
+        (
+            "account deletion",
+            '/usr/bin/sudo -n /usr/bin/dscl . -delete "/Users/$build_user"',
+        ),
+        ("marker removal", '/usr/bin/sudo -n /bin/rm "$darwin_account_marker"'),
+        ("lock removal", '/usr/bin/sudo -n /bin/rmdir "$darwin_account_lock"'),
+    ):
+        mutated = gate.replace(token, "", 1)
+        if mutated == gate or darwin_cleanup_is_exact(mutated):
+            raise AssertionError(f"Darwin cleanup {name} mutation was accepted")
     for token, expected in (
         ('(deny default)', 1),
         ('(allow file-write* (subpath', 1),
