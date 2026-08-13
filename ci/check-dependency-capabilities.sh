@@ -486,6 +486,8 @@ case "$host_system" in
                 '(version 1)' \
                 '(deny default)' \
                 '(allow process*)' \
+                '(allow process-exec* (subpath "/System") (subpath "/usr") (subpath "/bin") (subpath "/sbin") (subpath "/Applications") (subpath "/Library/Developer"))' \
+                "(allow process-exec* (subpath \"$sealed_toolchain\") (subpath \"$sealed_command_bin\") (subpath \"$profile_target\"))" \
                 '(allow signal (target self))' \
                 '(allow sysctl-read)' \
                 '(allow mach-lookup)' \
@@ -550,6 +552,19 @@ export SEALED_DEPENDENCY_TARGET SEALED_WORKSPACE_TARGET
 if [ "$(run_sealed /bin/pwd -P)" != "$sealed_workspace" ]; then
     echo "sealed command current directory differs from the workspace authority" >&2
     exit 1
+fi
+if [ "$host_system" = Darwin ]; then
+    expected_darwin_rustc_version='rustc 1.96.0 (ac68faa20 2026-05-25)
+binary: rustc
+commit-hash: ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96
+commit-date: 2026-05-25
+host: aarch64-apple-darwin
+release: 1.96.0
+LLVM version: 22.1.2'
+    if [ "$(run_sealed /usr/bin/env "$compiler_rustc_bin" -vV)" != "$expected_darwin_rustc_version" ]; then
+        echo "isolated Darwin child-exec Rust compiler identity mismatch" >&2
+        exit 1
+    fi
 fi
 case "$(run_sealed "$compiler_cargo_bin" --version --verbose)" in
     cargo\ 1.96.0\ *30a34c6821b57de0aaec83a901aca39f88f6778c*) ;;

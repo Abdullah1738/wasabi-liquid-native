@@ -1250,12 +1250,23 @@ done'''
         r'"(allow file-map-executable (subpath \"$sealed_toolchain\") '
         r'(subpath \"$sealed_command_bin\") (subpath \"$profile_target\"))"'
     )
+    darwin_system_exec = (
+        "'(allow process-exec* (subpath \"/System\") (subpath \"/usr\") "
+        "(subpath \"/bin\") (subpath \"/sbin\") (subpath \"/Applications\") "
+        "(subpath \"/Library/Developer\"))'"
+    )
+    darwin_private_exec = (
+        r'"(allow process-exec* (subpath \"$sealed_toolchain\") '
+        r'(subpath \"$sealed_command_bin\") (subpath \"$profile_target\"))"'
+    )
     darwin_private_write = (
         r'"(allow file-write* (subpath \"$build_home\") '
         r'(subpath \"$build_tmp\") (subpath \"$profile_target\"))"'
     )
     darwin_allow_tokens = (
         "'(allow process*)'",
+        darwin_system_exec,
+        darwin_private_exec,
         "'(allow signal (target self))'",
         "'(allow sysctl-read)'",
         "'(allow mach-lookup)'",
@@ -1283,13 +1294,17 @@ done'''
             or len(re.findall(r"\(\s*deny(?:\s|\))", candidate)) != 2
             or candidate.count("(allow file-read") != 5
             or candidate.count("(allow file-map-executable") != 2
+            or candidate.count("(allow process-exec") != 2
             or '(subpath "/")' in candidate
             or "(allow file-read*)" in candidate
             or "(allow file-map-executable)" in candidate
+            or "(allow process-exec*)" in candidate
+            or "(with no-sandbox)" in candidate
             or '(subpath "$scratch")' in candidate
             or '(subpath "$build_home")' in candidate
             or '(subpath "$build_tmp")' in candidate
             or '(subpath "$sealed_workspace")' in candidate
+            or '(subpath "$trusted_bin")' in candidate
             or '(subpath "$proof_target")' in candidate
             or '(subpath "$workspace_target")' in candidate
             or '(subpath "/dev")' in candidate
@@ -1327,6 +1342,7 @@ done'''
     for name, clause in (
         ("umbrella file capability", "'(allow file*)'"),
         ("unfiltered write capability", "'(allow file-write*)'"),
+        ("unfiltered child-exec capability", "'(allow process-exec*)'"),
         ("dynamic-code capability", "'(allow dynamic-code-generation)'"),
         ("network capability", "'(allow network*)'"),
     ):
@@ -1348,6 +1364,68 @@ done'''
         if mutated == gate or darwin_profile_is_exact(mutated):
             raise AssertionError(f"sealed Darwin {name} mutation was accepted")
     for name, original, replacement in (
+        ("missing system child execution", darwin_system_exec, ""),
+        ("missing private child execution", darwin_private_exec, ""),
+        (
+            "unfiltered child execution",
+            darwin_system_exec,
+            "'(allow process-exec*)'",
+        ),
+        (
+            "root child execution",
+            darwin_system_exec,
+            "'(allow process-exec* (subpath \"/\"))'",
+        ),
+        (
+            "no-sandbox child execution",
+            darwin_system_exec,
+            "'(allow process-exec* (with no-sandbox) (subpath \"/System\"))'",
+        ),
+        (
+            "interpreter-only child execution",
+            darwin_system_exec,
+            "'(allow process-exec* (literal \"/usr/bin/env\"))'",
+        ),
+        (
+            "interpreter operation substitution",
+            darwin_system_exec,
+            "'(allow process-exec-interpreter (literal \"/usr/bin/env\"))'",
+        ),
+        (
+            "scratch child execution",
+            darwin_private_exec,
+            r'"(allow process-exec* (subpath \"$scratch\"))"',
+        ),
+        (
+            "build-home child execution",
+            darwin_private_exec,
+            r'"(allow process-exec* (subpath \"$build_home\"))"',
+        ),
+        (
+            "build-tmp child execution",
+            darwin_private_exec,
+            r'"(allow process-exec* (subpath \"$build_tmp\"))"',
+        ),
+        (
+            "sealed-workspace child execution",
+            darwin_private_exec,
+            r'"(allow process-exec* (subpath \"$sealed_workspace\"))"',
+        ),
+        (
+            "trusted-bin child execution",
+            darwin_private_exec,
+            r'"(allow process-exec* (subpath \"$trusted_bin\"))"',
+        ),
+        (
+            "external temporary child execution",
+            darwin_private_exec,
+            "'(allow process-exec* (subpath \"/private/tmp\") (subpath \"/var/tmp\"))'",
+        ),
+        (
+            "both-target child execution",
+            darwin_private_exec,
+            r'"(allow process-exec* (subpath \"$sealed_toolchain\") (subpath \"$sealed_command_bin\") (subpath \"$proof_target\") (subpath \"$workspace_target\"))"',
+        ),
         ("missing system executable map", darwin_system_map, ""),
         ("missing private executable map", darwin_private_map, ""),
         (
@@ -1631,6 +1709,47 @@ fi'''
         mutated_gate = gate.replace(sealed_cwd_probe, replacement, 1)
         if mutated_gate == gate or mutated_gate.count(sealed_cwd_probe) != 0:
             raise AssertionError(f"sealed command live CWD {name} mutation was accepted")
+    darwin_child_exec_probe = '''if [ "$host_system" = Darwin ]; then
+    expected_darwin_rustc_version='rustc 1.96.0 (ac68faa20 2026-05-25)
+binary: rustc
+commit-hash: ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96
+commit-date: 2026-05-25
+host: aarch64-apple-darwin
+release: 1.96.0
+LLVM version: 22.1.2'
+    if [ "$(run_sealed /usr/bin/env "$compiler_rustc_bin" -vV)" != "$expected_darwin_rustc_version" ]; then
+        echo "isolated Darwin child-exec Rust compiler identity mismatch" >&2
+        exit 1
+    fi
+fi'''
+    if (
+        gate.count(darwin_child_exec_probe) != 1
+        or gate.index(sealed_cwd_probe)
+        > gate.index(darwin_child_exec_probe)
+        or gate.index(darwin_child_exec_probe)
+        > gate.index('case "$(run_sealed "$compiler_cargo_bin" --version --verbose)" in')
+    ):
+        raise AssertionError("sealed Darwin child-exec identity probe is not exact")
+    for name, replacement in (
+        ("missing", ""),
+        (
+            "direct compiler launch",
+            darwin_child_exec_probe.replace(
+                'run_sealed /usr/bin/env "$compiler_rustc_bin" -vV',
+                'run_sealed "$compiler_rustc_bin" -vV',
+            ),
+        ),
+        (
+            "unchecked compiler launch",
+            darwin_child_exec_probe.replace(
+                'if [ "$(run_sealed /usr/bin/env "$compiler_rustc_bin" -vV)" != "$expected_darwin_rustc_version" ]; then',
+                'if ! run_sealed /usr/bin/env "$compiler_rustc_bin" -vV >/dev/null; then',
+            ),
+        ),
+    ):
+        mutated_gate = gate.replace(darwin_child_exec_probe, replacement, 1)
+        if mutated_gate == gate or mutated_gate.count(darwin_child_exec_probe) != 0:
+            raise AssertionError(f"sealed Darwin child-exec probe {name} mutation was accepted")
     signal_diagnostic = '''status=$?
 if [ "$status" -gt 128 ]; then
     echo "sealed Darwin command returned signal-style status $status (signal $((status - 128)))" >&2
