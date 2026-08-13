@@ -9,7 +9,9 @@ import io
 import json
 import os
 import shutil
+import stat
 import subprocess
+import sys
 import tarfile
 import tempfile
 from pathlib import Path
@@ -18,6 +20,50 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PREPARER = ROOT / "ci/prepare-ordinary-wallet-plan-proof-snapshot.py"
 CHECKER = ROOT / "ci/check-ordinary-wallet-plan-public-proof-surface.py"
+
+
+def explicit_source_cargo_home(arguments: list[str]) -> Path:
+    if len(arguments) != 2:
+        raise AssertionError(
+            "usage: test-ordinary-wallet-plan-proof-snapshot.py ABSOLUTE_SOURCE_CARGO_HOME"
+        )
+    source_cargo_home = Path(arguments[1])
+    if not source_cargo_home.is_absolute():
+        raise AssertionError("absolute source Cargo home is required")
+    metadata = os.lstat(source_cargo_home)
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise AssertionError("source Cargo home must be an unlinked directory")
+    return source_cargo_home
+
+
+def test_source_cargo_home_argument(source_cargo_home: Path, scratch: Path) -> None:
+    invalid_arguments = (
+        ["test-ordinary-wallet-plan-proof-snapshot.py"],
+        ["test-ordinary-wallet-plan-proof-snapshot.py", "relative-cargo-home"],
+        [
+            "test-ordinary-wallet-plan-proof-snapshot.py",
+            str(source_cargo_home),
+            "unexpected-extra-argument",
+        ],
+    )
+    for arguments in invalid_arguments:
+        try:
+            explicit_source_cargo_home(arguments)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError(f"invalid source Cargo home arguments were accepted: {arguments!r}")
+
+    linked_source_cargo_home = scratch / "linked-source-cargo-home"
+    linked_source_cargo_home.symlink_to(source_cargo_home, target_is_directory=True)
+    try:
+        explicit_source_cargo_home(
+            ["test-ordinary-wallet-plan-proof-snapshot.py", str(linked_source_cargo_home)]
+        )
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("symlinked source Cargo home was accepted")
 
 
 def load(path: Path, name: str):
@@ -251,16 +297,17 @@ def mutate_sparse_locked_record(path: Path, version: str, mutation) -> None:
 
 
 def main() -> int:
+    source_cargo_home = explicit_source_cargo_home(sys.argv)
     preparer = load(PREPARER, "proof_snapshot_preparer")
     checker = load(CHECKER, "proof_snapshot_surface")
     with tempfile.TemporaryDirectory(prefix="wlpq-proof-snapshot-") as directory:
         scratch = Path(directory)
+        test_source_cargo_home_argument(source_cargo_home, scratch)
         test_archive_and_git_topology_rejections(preparer, scratch)
         source = scratch / "source"
         copy_exact_inputs(preparer, source)
 
         cargo_home = scratch / "source-cargo-home"
-        source_cargo_home = Path.home() / ".cargo"
         lock_bytes = (source / "ci/ordinary-wallet-plan-public-proof.Cargo.lock").read_bytes()
         preparer.copy_safe_cargo_cache(source_cargo_home, cargo_home, lock_bytes)
         selected_cache = preparer.exact_cache_sources(source_cargo_home, lock_bytes)

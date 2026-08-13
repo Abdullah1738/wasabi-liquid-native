@@ -771,7 +771,9 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
             raise AssertionError(f"dynamic-loader override pattern was accepted: {assignment}")
     proof_preflight = '"$python_bin" -I ci/check-ordinary-wallet-plan-public-proof-surface.py "$repository_root"'
     proof_surface_mutations = "python3 -I ci/test-ordinary-wallet-plan-public-proof-surface.py"
-    proof_snapshot_mutations = "python3 -I ci/test-ordinary-wallet-plan-proof-snapshot.py"
+    proof_snapshot_mutations = (
+        'python3 -I ci/test-ordinary-wallet-plan-proof-snapshot.py "$source_cargo_home"'
+    )
     if (
         gate.count(proof_preflight) != 1
         or gate.count(proof_surface_mutations) != 1
@@ -782,11 +784,70 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
     if gate.index(proof_preflight) > first_cargo_invocation:
         raise AssertionError("ordinary-wallet plan public proof preflight does not precede Cargo")
     first_build_capable_cargo = gate.index('tree_raw="$(')
-    if (
-        gate.index(proof_surface_mutations) > first_build_capable_cargo
-        or gate.index(proof_snapshot_mutations) > first_build_capable_cargo
-    ):
-        raise AssertionError("public proof mutation preflight does not precede build-capable Cargo")
+    if gate.index(proof_surface_mutations) > first_build_capable_cargo:
+        raise AssertionError("public proof surface mutations do not precede build-capable Cargo")
+
+    def proof_snapshot_wiring_is_exact(candidate: str) -> bool:
+        if (
+            candidate.count(proof_snapshot_mutations) != 1
+            or candidate.count("python3 -I ci/test-ordinary-wallet-plan-proof-snapshot.py") != 1
+        ):
+            return False
+        fetches = [
+            index
+            for index in range(len(candidate))
+            if candidate.startswith('"$compiler_cargo_bin" fetch \\', index)
+        ]
+        if len(fetches) != 2:
+            return False
+        try:
+            source_home = candidate.index('source_cargo_home="$scratch/source-cargo-home"')
+            snapshot_mutations = candidate.index(proof_snapshot_mutations)
+            credential_sentinel_check = candidate.index('if [ -e "$credential_sentinel" ]; then')
+            credential_sentinel_clear = candidate.index("fi\n", credential_sentinel_check) + len("fi\n")
+            first_cache_copy = candidate.index(
+                "python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py \\\n"
+                "    --copy-cache \\\n"
+            )
+            first_build = candidate.index('tree_raw="$(')
+        except ValueError:
+            return False
+        return (
+            source_home < fetches[0] < fetches[1] < credential_sentinel_check
+            < credential_sentinel_clear <= snapshot_mutations < first_cache_copy < first_build
+        )
+
+    if not proof_snapshot_wiring_is_exact(gate):
+        raise AssertionError("private proof snapshot mutations do not consume the isolated fetched Cargo home")
+    snapshot_without_call = gate.replace(proof_snapshot_mutations + "\n", "", 1)
+    snapshot_wiring_mutations = {
+        "missing source Cargo home": gate.replace(
+            proof_snapshot_mutations,
+            proof_snapshot_mutations.rsplit(" ", 1)[0],
+            1,
+        ),
+        "ambient Cargo home": gate.replace(
+            proof_snapshot_mutations,
+            'python3 -I ci/test-ordinary-wallet-plan-proof-snapshot.py "$HOME/.cargo"',
+            1,
+        ),
+        "before fetch": snapshot_without_call.replace(
+            "(\n    cd /\n",
+            proof_snapshot_mutations + "\n(\n    cd /\n",
+            1,
+        ),
+        "after cache copy": snapshot_without_call.replace(
+            "python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py \\\n"
+            "    --workspace-cache \\\n",
+            proof_snapshot_mutations
+            + "\npython3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py \\\n"
+            "    --workspace-cache \\\n",
+            1,
+        ),
+    }
+    for name, mutated_gate in snapshot_wiring_mutations.items():
+        if mutated_gate == gate or proof_snapshot_wiring_is_exact(mutated_gate):
+            raise AssertionError(f"private proof snapshot {name} wiring mutation was accepted")
     checker_call = 'python3 -I ci/check-wallet-facts-conformance.py "$repository_root"'
     if gate.count(checker_call) != 1:
         raise AssertionError("conformance checker invocation is not fixed and singular")

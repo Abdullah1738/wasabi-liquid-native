@@ -17,20 +17,56 @@ PROOF_TOOL = "tools/ordinary-wallet-plan-public-proof-verifier"
 DENIED_NAMES = {".gitconfig", ".netrc", "credentials", "credentials.toml"}
 
 
+def stable_identity(
+    metadata: os.stat_result,
+) -> tuple[int, int, int, int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
 def read_regular(root: Path, relative: Path, maximum: int = 1024 * 1024) -> bytes:
     path = root / relative
-    metadata = os.lstat(path)
+    path_metadata = os.lstat(path)
     if (
-        stat.S_ISLNK(metadata.st_mode)
-        or not stat.S_ISREG(metadata.st_mode)
-        or metadata.st_nlink != 1
-        or metadata.st_size > maximum
+        not stat.S_ISREG(path_metadata.st_mode)
+        or path_metadata.st_nlink != 1
+        or path_metadata.st_size > maximum
     ):
-        raise ValueError(f"fetch preflight input is linked, hardlinked, nonregular, or oversized: {relative}")
-    data = path.read_bytes()
-    if len(data) != metadata.st_size or os.lstat(path) != metadata:
-        raise ValueError(f"fetch preflight input changed during read: {relative}")
-    return data
+        raise ValueError(
+            f"fetch preflight input is linked, hardlinked, nonregular, or oversized: {relative}"
+        )
+    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        metadata = os.fstat(descriptor)
+        identity = stable_identity(path_metadata)
+        if stable_identity(metadata) != identity:
+            raise ValueError(
+                f"fetch preflight input is linked, hardlinked, nonregular, or oversized: {relative}"
+            )
+        expected_size = metadata.st_size
+        data = bytearray()
+        while len(data) <= maximum:
+            chunk = os.read(descriptor, min(64 * 1024, maximum + 1 - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+        if len(data) != expected_size:
+            raise ValueError(f"fetch preflight input changed size during read: {relative}")
+        if (
+            stable_identity(os.fstat(descriptor)) != identity
+            or stable_identity(os.lstat(path)) != identity
+        ):
+            raise ValueError(f"fetch preflight input changed during read: {relative}")
+        return bytes(data)
+    finally:
+        os.close(descriptor)
 
 
 def validate(root: Path) -> None:
