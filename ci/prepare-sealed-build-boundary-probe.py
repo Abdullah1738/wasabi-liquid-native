@@ -62,6 +62,47 @@ fn require_allowed_write(name: &str) {
     fs::remove_file(path).expect("allowed write probe cleanup");
 }
 
+#[cfg(target_os = "linux")]
+fn require_linux_mount_boundary() {
+    let build_roots = [
+        env::var("SEALED_BUILD_HOME").expect("build home path"),
+        env::var("SEALED_BUILD_TMP").expect("build temporary path"),
+        env::var("SEALED_BUILD_TARGET").expect("build target path"),
+    ];
+    let mountinfo = fs::read_to_string("/proc/self/mountinfo").expect("Linux mountinfo");
+    assert!(!mountinfo.is_empty(), "Linux mountinfo is empty");
+    let mut writable_counts = [0_usize; 3];
+    let mut root_read_only = false;
+    for line in mountinfo.lines() {
+        let mut fields = line.split_whitespace();
+        let mountpoint = fields.nth(4).expect("mountinfo mountpoint");
+        let options = fields.next().expect("mountinfo VFS options");
+        let read_only = options.split(',').any(|option| option == "ro");
+        let read_write = options.split(',').any(|option| option == "rw");
+        assert_ne!(read_only, read_write, "mountinfo has ambiguous VFS access mode");
+        if mountpoint == "/" {
+            assert!(read_only, "Linux root mount is writable");
+            root_read_only = true;
+        }
+        if read_write {
+            let index = build_roots
+                .iter()
+                .position(|root| root == mountpoint)
+                .expect("unexpected writable Linux mount");
+            writable_counts[index] += 1;
+        }
+    }
+    assert!(root_read_only, "Linux root mount is absent");
+    assert_eq!(
+        writable_counts,
+        [1, 1, 1],
+        "exact Linux writable mount roots must appear once each"
+    );
+}
+
+#[cfg(not(target_os = "linux"))]
+fn require_linux_mount_boundary() {}
+
 fn spawn_delayed_writer() {
     let target = env::var_os("SEALED_DELAYED_WRITE_TARGET").expect("delayed writer target");
     Command::new("/bin/sh")
@@ -86,6 +127,7 @@ fn main() {
     require_denied_write("SEALED_VAR_TMP_TARGET");
     require_denied_write("SEALED_INACTIVE_BUILD_TARGET");
     require_hidden_home();
+    require_linux_mount_boundary();
     require_allowed_write("SEALED_BUILD_HOME");
     require_allowed_write("SEALED_BUILD_TMP");
     require_allowed_write("SEALED_BUILD_TARGET");

@@ -75,20 +75,65 @@ if ! /usr/bin/awk '$1 == "NSpid:" && $NF == "1" { accepted = 1 } END { exit !acc
 fi
 /usr/bin/mount --bind "$hidden_home" "$original_home"
 
-# Every inherited host mount is read-only in this private namespace. Only the
-# exact per-command build roots are rebound writable below.
-mountpoints="$(/usr/bin/findmnt --kernel --list --noheadings --output TARGET | /usr/bin/sort -r)"
-old_ifs=$IFS
-IFS='
-'
-for mountpoint in $mountpoints; do
-    /usr/bin/mount -o remount,bind,ro "$mountpoint"
-done
-IFS=$old_ifs
+# Make the complete inherited VFS mount tree read-only without resolving stale
+# or covered nested mountpoint names. Kernel mountinfo is then the authority
+# that recursive semantics were applied to every record.
+/usr/bin/mount -o remount,ro=recursive /
+if ! /usr/bin/awk '
+function has_option(options, wanted, count, index, fields) {
+    count = split(options, fields, ",")
+    for (index = 1; index <= count; index++) {
+        if (fields[index] == wanted) return 1
+    }
+    return 0
+}
+NF < 6 { invalid = 1; next }
+{
+    read_only = has_option($6, "ro")
+    read_write = has_option($6, "rw")
+    if (!read_only || read_write) invalid = 1
+    if ($5 == "/" && read_only && !read_write) root_read_only = 1
+}
+END { exit !(NR > 0 && root_read_only && !invalid) }
+' /proc/self/mountinfo; then
+    echo "sealed Linux recursive read-only mount transition is incomplete" >&2
+    exit 1
+fi
+
+# Only the exact per-command build roots are rebound writable.
 for writable in "$build_home" "$build_tmp" "$target_dir"; do
     /usr/bin/mount --bind "$writable" "$writable"
     /usr/bin/mount -o remount,bind,rw "$writable"
 done
+if ! /usr/bin/awk -v build_home="$build_home" -v build_tmp="$build_tmp" -v target_dir="$target_dir" '
+function has_option(options, wanted, count, index, fields) {
+    count = split(options, fields, ",")
+    for (index = 1; index <= count; index++) {
+        if (fields[index] == wanted) return 1
+    }
+    return 0
+}
+NF < 6 { invalid = 1; next }
+{
+    read_only = has_option($6, "ro")
+    read_write = has_option($6, "rw")
+    if (read_only == read_write) invalid = 1
+    if ($5 == "/" && read_only && !read_write) root_read_only = 1
+    if (read_write) {
+        if ($5 == build_home) build_home_count++
+        else if ($5 == build_tmp) build_tmp_count++
+        else if ($5 == target_dir) target_dir_count++
+        else invalid = 1
+    }
+}
+END {
+    exit !(NR > 0 && root_read_only && !invalid &&
+        build_home_count == 1 && build_tmp_count == 1 && target_dir_count == 1)
+}
+' /proc/self/mountinfo; then
+    echo "sealed Linux writable mount inventory differs from the exact build roots" >&2
+    exit 1
+fi
 
 cd -P "$sealed_workspace_root"
 if [ "$(/bin/pwd -P)" != "$sealed_workspace_root" ]; then

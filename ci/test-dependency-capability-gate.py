@@ -1573,7 +1573,10 @@ done'''
         ('NSpid:', 1),
         ('/proc/1/status', 2),
         ('/usr/bin/mount --bind "$hidden_home" "$original_home"', 1),
-        ('/usr/bin/mount -o remount,bind,ro "$mountpoint"', 1),
+        ('/usr/bin/mount -o remount,ro=recursive /', 1),
+        ('/proc/self/mountinfo', 2),
+        ('sealed Linux recursive read-only mount transition is incomplete', 1),
+        ('sealed Linux writable mount inventory differs from the exact build roots', 1),
         ('/usr/bin/mount -o remount,bind,rw "$writable"', 1),
         ('/usr/bin/setpriv --reuid="$build_uid" --regid="$build_uid" --clear-groups', 1),
         ('/usr/bin/env -i HOME="$build_home" TMPDIR="$build_tmp" PATH="$trusted_bin:/usr/bin:/bin"', 1),
@@ -1583,10 +1586,122 @@ done'''
     ):
         if linux_wrapper.count(token) != expected:
             raise AssertionError(f"sealed Linux boundary token is not exact: {token}")
+    linux_recursive_read_only = '/usr/bin/mount -o remount,ro=recursive /'
+    linux_all_read_only_audit = '''if ! /usr/bin/awk '
+function has_option(options, wanted, count, index, fields) {
+    count = split(options, fields, ",")
+    for (index = 1; index <= count; index++) {
+        if (fields[index] == wanted) return 1
+    }
+    return 0
+}
+NF < 6 { invalid = 1; next }
+{
+    read_only = has_option($6, "ro")
+    read_write = has_option($6, "rw")
+    if (!read_only || read_write) invalid = 1
+    if ($5 == "/" && read_only && !read_write) root_read_only = 1
+}
+END { exit !(NR > 0 && root_read_only && !invalid) }
+' /proc/self/mountinfo; then
+    echo "sealed Linux recursive read-only mount transition is incomplete" >&2
+    exit 1
+fi'''
+    linux_writable_loop = '''for writable in "$build_home" "$build_tmp" "$target_dir"; do
+    /usr/bin/mount --bind "$writable" "$writable"
+    /usr/bin/mount -o remount,bind,rw "$writable"
+done'''
+    linux_exact_writable_audit = '''if ! /usr/bin/awk -v build_home="$build_home" -v build_tmp="$build_tmp" -v target_dir="$target_dir" '
+function has_option(options, wanted, count, index, fields) {
+    count = split(options, fields, ",")
+    for (index = 1; index <= count; index++) {
+        if (fields[index] == wanted) return 1
+    }
+    return 0
+}
+NF < 6 { invalid = 1; next }
+{
+    read_only = has_option($6, "ro")
+    read_write = has_option($6, "rw")
+    if (read_only == read_write) invalid = 1
+    if ($5 == "/" && read_only && !read_write) root_read_only = 1
+    if (read_write) {
+        if ($5 == build_home) build_home_count++
+        else if ($5 == build_tmp) build_tmp_count++
+        else if ($5 == target_dir) target_dir_count++
+        else invalid = 1
+    }
+}
+END {
+    exit !(NR > 0 && root_read_only && !invalid &&
+        build_home_count == 1 && build_tmp_count == 1 && target_dir_count == 1)
+}
+' /proc/self/mountinfo; then
+    echo "sealed Linux writable mount inventory differs from the exact build roots" >&2
+    exit 1
+fi'''
+
+    def linux_mount_boundary_is_exact(candidate: str) -> bool:
+        required = (
+            linux_recursive_read_only,
+            linux_all_read_only_audit,
+            linux_writable_loop,
+            linux_exact_writable_audit,
+        )
+        if any(candidate.count(token) != 1 for token in required):
+            return False
+        forbidden = (
+            'mountpoints="$(/usr/bin/findmnt',
+            'for mountpoint in $mountpoints',
+            'remount,bind,ro "$mountpoint"',
+            'remount,rw=recursive',
+            'remount,ro /',
+            'remount,ro=recursive / || :',
+        )
+        if any(token in candidate for token in forbidden):
+            return False
+        return (
+            candidate.index('/usr/bin/mount --bind "$hidden_home" "$original_home"')
+            < candidate.index(linux_recursive_read_only)
+            < candidate.index(linux_all_read_only_audit)
+            < candidate.index(linux_writable_loop)
+            < candidate.index(linux_exact_writable_audit)
+            < candidate.index('cd -P "$sealed_workspace_root"')
+        )
+
+    if not linux_mount_boundary_is_exact(linux_wrapper):
+        raise AssertionError("sealed Linux recursive mount boundary is not exact")
+    linux_mount_mutations = {
+        "missing recursive transition": linux_wrapper.replace(linux_recursive_read_only, "", 1),
+        "writable recursive transition": linux_wrapper.replace("ro=recursive", "rw=recursive", 1),
+        "nonrecursive transition": linux_wrapper.replace("ro=recursive", "ro", 1),
+        "non-root transition": linux_wrapper.replace("ro=recursive /", 'ro=recursive "$original_home"', 1),
+        "ignored recursive failure": linux_wrapper.replace(
+            linux_recursive_read_only, linux_recursive_read_only + " || :", 1
+        ),
+        "missing all-read-only audit": linux_wrapper.replace(linux_all_read_only_audit, "", 1),
+        "missing exact-writable audit": linux_wrapper.replace(linux_exact_writable_audit, "", 1),
+        "unexpected writable accepted": linux_wrapper.replace(
+            "        else invalid = 1", "        else next", 1
+        ),
+        "prefix writable accepted": linux_wrapper.replace(
+            "if ($5 == build_home)", "if (index($5, build_home) == 1)", 1
+        ),
+        "missing build-home count": linux_wrapper.replace("build_home_count == 1 && ", "", 1),
+        "missing build-tmp count": linux_wrapper.replace("build_tmp_count == 1 && ", "", 1),
+        "missing target count": linux_wrapper.replace(" && target_dir_count == 1", "", 1),
+        "duplicate build-home accepted": linux_wrapper.replace("build_home_count == 1", "build_home_count >= 1", 1),
+        "restored target loop": linux_wrapper.replace(
+            linux_recursive_read_only,
+            'mountpoints="$(/usr/bin/findmnt --kernel --list --noheadings --output TARGET)"\nfor mountpoint in $mountpoints; do /usr/bin/mount -o remount,bind,ro "$mountpoint"; done',
+            1,
+        ),
+    }
+    for name, mutated in linux_mount_mutations.items():
+        if mutated == linux_wrapper or linux_mount_boundary_is_exact(mutated):
+            raise AssertionError(f"sealed Linux mount boundary {name} mutation was accepted")
     for name, original, replacement in (
-        ("inherited read-only remount", 'remount,bind,ro "$mountpoint"', 'remount,bind,rw "$mountpoint"'),
         ("writable target remount", 'remount,bind,rw "$writable"', 'remount,bind,ro "$writable"'),
-        ("inherited bind scope", 'remount,bind,ro "$mountpoint"', 'remount,ro "$mountpoint"'),
         ("writable bind scope", 'remount,bind,rw "$writable"', 'remount,rw "$writable"'),
     ):
         mutated = linux_wrapper.replace(original, replacement, 1)
@@ -1814,9 +1929,90 @@ fi'''
         ('std::path::Path::new(&path).join("sealed-denied-write-probe")', 1),
         ('let wrote = fs::write(&write_path, b"boundary escape").is_ok();', 1),
         ('require_allowed_write("SEALED_BUILD_', 3),
+        ('require_linux_mount_boundary();', 1),
     ):
         if probe_source.count(token) != expected:
             raise AssertionError(f"sealed boundary probe token is not exact: {token}")
+    linux_probe_mount_assertion = '''#[cfg(target_os = "linux")]
+fn require_linux_mount_boundary() {
+    let build_roots = [
+        env::var("SEALED_BUILD_HOME").expect("build home path"),
+        env::var("SEALED_BUILD_TMP").expect("build temporary path"),
+        env::var("SEALED_BUILD_TARGET").expect("build target path"),
+    ];
+    let mountinfo = fs::read_to_string("/proc/self/mountinfo").expect("Linux mountinfo");
+    assert!(!mountinfo.is_empty(), "Linux mountinfo is empty");
+    let mut writable_counts = [0_usize; 3];
+    let mut root_read_only = false;
+    for line in mountinfo.lines() {
+        let mut fields = line.split_whitespace();
+        let mountpoint = fields.nth(4).expect("mountinfo mountpoint");
+        let options = fields.next().expect("mountinfo VFS options");
+        let read_only = options.split(',').any(|option| option == "ro");
+        let read_write = options.split(',').any(|option| option == "rw");
+        assert_ne!(read_only, read_write, "mountinfo has ambiguous VFS access mode");
+        if mountpoint == "/" {
+            assert!(read_only, "Linux root mount is writable");
+            root_read_only = true;
+        }
+        if read_write {
+            let index = build_roots
+                .iter()
+                .position(|root| root == mountpoint)
+                .expect("unexpected writable Linux mount");
+            writable_counts[index] += 1;
+        }
+    }
+    assert!(root_read_only, "Linux root mount is absent");
+    assert_eq!(
+        writable_counts,
+        [1, 1, 1],
+        "exact Linux writable mount roots must appear once each"
+    );
+}
+
+#[cfg(not(target_os = "linux"))]
+fn require_linux_mount_boundary() {}'''
+
+    def linux_probe_mount_assertion_is_exact(candidate: str) -> bool:
+        return (
+            candidate.count(linux_probe_mount_assertion) == 1
+            and candidate.count("require_linux_mount_boundary();") == 1
+            and candidate.index(linux_probe_mount_assertion)
+            < candidate.index("fn main()")
+            < candidate.index("require_linux_mount_boundary();")
+            < candidate.index('require_allowed_write("SEALED_BUILD_HOME")')
+        )
+
+    if not linux_probe_mount_assertion_is_exact(probe_source):
+        raise AssertionError("post-drop Linux mount boundary assertion is not exact")
+    linux_probe_mount_mutations = {
+        "missing assertion": probe_source.replace(linux_probe_mount_assertion, "", 1),
+        "missing call": probe_source.replace("    require_linux_mount_boundary();\n", "", 1),
+        "root read-only removed": probe_source.replace(
+            '            assert!(read_only, "Linux root mount is writable");\n', "", 1
+        ),
+        "unexpected writable accepted": probe_source.replace(
+            '.expect("unexpected writable Linux mount")', ".unwrap_or(0)", 1
+        ),
+        "prefix writable accepted": probe_source.replace(
+            ".position(|root| root == mountpoint)",
+            ".position(|root| mountpoint.starts_with(root))",
+            1,
+        ),
+        "fourth writable root": probe_source.replace(
+            '        env::var("SEALED_BUILD_TARGET").expect("build target path"),',
+            '        env::var("SEALED_BUILD_TARGET").expect("build target path"),\n'
+            '        env::var("SEALED_INACTIVE_BUILD_TARGET").expect("inactive target path"),',
+            1,
+        ),
+        "duplicate accepted": probe_source.replace(
+            "        [1, 1, 1],", "        [writable_counts[0], 1, 1],", 1
+        ),
+    }
+    for name, mutated in linux_probe_mount_mutations.items():
+        if mutated == probe_source or linux_probe_mount_assertion_is_exact(mutated):
+            raise AssertionError(f"post-drop Linux mount {name} mutation was accepted")
     supervisor = (ROOT / "ci/run-sealed-command-supervisor.py").read_text(encoding="utf-8")
     for token in (
         'if os.getpid() != 1',
