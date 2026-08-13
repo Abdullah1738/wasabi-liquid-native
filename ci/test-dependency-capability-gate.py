@@ -1241,8 +1241,20 @@ done'''
         "'(allow file-read-metadata (literal \"/var\") "
         "(literal \"/private/var/select/developer_dir\"))'"
     )
-    darwin_profile_tokens = (
-        "'(deny default)'",
+    darwin_system_map = (
+        "'(allow file-map-executable (subpath \"/System\") (subpath \"/usr\") "
+        "(subpath \"/bin\") (subpath \"/sbin\") (subpath \"/Applications\") "
+        "(subpath \"/Library/Developer\"))'"
+    )
+    darwin_private_map = (
+        r'"(allow file-map-executable (subpath \"$sealed_toolchain\") '
+        r'(subpath \"$sealed_command_bin\") (subpath \"$profile_target\"))"'
+    )
+    darwin_private_write = (
+        r'"(allow file-write* (subpath \"$build_home\") '
+        r'(subpath \"$build_tmp\") (subpath \"$profile_target\"))"'
+    )
+    darwin_allow_tokens = (
         "'(allow process*)'",
         "'(allow signal (target self))'",
         "'(allow sysctl-read)'",
@@ -1252,8 +1264,14 @@ done'''
         darwin_xcode_select_read,
         r'"(allow file-read* (subpath \"$scratch\"))"',
         r'"(allow file-read-metadata (literal \"$var_tmp_target\"))"',
-        r'"(allow file-write* (subpath \"$build_home\")',
+        darwin_system_map,
+        darwin_private_map,
+        darwin_private_write,
         "'(allow file-write-data (literal \"/dev/null\"))'",
+    )
+    darwin_profile_tokens = (
+        "'(deny default)'",
+        *darwin_allow_tokens,
         "'(deny network*)'",
     )
 
@@ -1261,9 +1279,19 @@ done'''
         if any(candidate.count(token) != 1 for token in darwin_profile_tokens):
             return False
         if (
-            candidate.count("(allow file-read") != 5
+            len(re.findall(r"\(\s*allow(?:\s|\))", candidate)) != len(darwin_allow_tokens)
+            or len(re.findall(r"\(\s*deny(?:\s|\))", candidate)) != 2
+            or candidate.count("(allow file-read") != 5
+            or candidate.count("(allow file-map-executable") != 2
             or '(subpath "/")' in candidate
             or "(allow file-read*)" in candidate
+            or "(allow file-map-executable)" in candidate
+            or '(subpath "$scratch")' in candidate
+            or '(subpath "$build_home")' in candidate
+            or '(subpath "$build_tmp")' in candidate
+            or '(subpath "$sealed_workspace")' in candidate
+            or '(subpath "$proof_target")' in candidate
+            or '(subpath "$workspace_target")' in candidate
             or '(subpath "/dev")' in candidate
             or '(subpath "/dev/fd")' in candidate
         ):
@@ -1296,6 +1324,71 @@ done'''
     )
     if reordered == gate or darwin_profile_is_exact(reordered):
         raise AssertionError("sealed Darwin root-directory grant reordering was accepted")
+    for name, clause in (
+        ("umbrella file capability", "'(allow file*)'"),
+        ("unfiltered write capability", "'(allow file-write*)'"),
+        ("dynamic-code capability", "'(allow dynamic-code-generation)'"),
+        ("network capability", "'(allow network*)'"),
+    ):
+        mutated = gate.replace(
+            "                '(deny network*)'",
+            f"                {clause} \\\n                '(deny network*)'",
+            1,
+        )
+        if mutated == gate or darwin_profile_is_exact(mutated):
+            raise AssertionError(f"sealed Darwin additive {name} mutation was accepted")
+    for name, extra_path in (
+        ("scratch write", r'(subpath \"$scratch\")'),
+        ("sealed-workspace write", r'(subpath \"$sealed_workspace\")'),
+        ("sealed-toolchain write", r'(subpath \"$sealed_toolchain\")'),
+        ("external temporary write", '(subpath "/private/tmp")'),
+    ):
+        broadened_write = darwin_private_write.replace('))"', f" {extra_path}))\"", 1)
+        mutated = gate.replace(darwin_private_write, broadened_write, 1)
+        if mutated == gate or darwin_profile_is_exact(mutated):
+            raise AssertionError(f"sealed Darwin {name} mutation was accepted")
+    for name, original, replacement in (
+        ("missing system executable map", darwin_system_map, ""),
+        ("missing private executable map", darwin_private_map, ""),
+        (
+            "unfiltered executable map",
+            darwin_system_map,
+            "'(allow file-map-executable)'",
+        ),
+        (
+            "root executable map",
+            darwin_system_map,
+            "'(allow file-map-executable (subpath \"/\"))'",
+        ),
+        (
+            "scratch executable map",
+            darwin_private_map,
+            r'"(allow file-map-executable (subpath \"$scratch\"))"',
+        ),
+        (
+            "build-home executable map",
+            darwin_private_map,
+            r'"(allow file-map-executable (subpath \"$build_home\"))"',
+        ),
+        (
+            "build-tmp executable map",
+            darwin_private_map,
+            r'"(allow file-map-executable (subpath \"$build_tmp\"))"',
+        ),
+        (
+            "sealed-workspace executable map",
+            darwin_private_map,
+            r'"(allow file-map-executable (subpath \"$sealed_workspace\"))"',
+        ),
+        (
+            "both-target executable map",
+            darwin_private_map,
+            r'"(allow file-map-executable (subpath \"$sealed_toolchain\") (subpath \"$sealed_command_bin\") (subpath \"$proof_target\") (subpath \"$workspace_target\"))"',
+        ),
+    ):
+        mutated = gate.replace(original, replacement, 1)
+        if mutated == gate or darwin_profile_is_exact(mutated):
+            raise AssertionError(f"sealed Darwin {name} mutation was accepted")
     for name, original, replacement in (
         (
             "additive user subtree read",

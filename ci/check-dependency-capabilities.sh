@@ -494,6 +494,8 @@ case "$host_system" in
                 '(allow file-read-metadata (literal "/var") (literal "/private/var/select/developer_dir"))' \
                 "(allow file-read* (subpath \"$scratch\"))" \
                 "(allow file-read-metadata (literal \"$var_tmp_target\"))" \
+                '(allow file-map-executable (subpath "/System") (subpath "/usr") (subpath "/bin") (subpath "/sbin") (subpath "/Applications") (subpath "/Library/Developer"))' \
+                "(allow file-map-executable (subpath \"$sealed_toolchain\") (subpath \"$sealed_command_bin\") (subpath \"$profile_target\"))" \
                 "(allow file-write* (subpath \"$build_home\") (subpath \"$build_tmp\") (subpath \"$profile_target\"))" \
                 '(allow file-write-data (literal "/dev/null"))' \
                 '(deny network*)' >"$sandbox_profile"
