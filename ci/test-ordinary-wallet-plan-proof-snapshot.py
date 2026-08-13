@@ -392,15 +392,222 @@ def mutate_sparse_locked_record(path: Path, version: str, mutation) -> None:
     path.write_bytes(data[:5] + b"\0".join(fields) + (b"\0" if trailing else b""))
 
 
+def cargo_proof_binary_layout(
+    scratch: Path,
+    name: str,
+    *,
+    hardlinked: bool,
+    top_data: bytes = b"reviewed proof binary",
+    dependency_data: bytes | None = None,
+) -> tuple[Path, Path, Path]:
+    target = scratch / name / "ordinary-wallet-plan-public-proof-target"
+    dependencies = target / "debug/deps"
+    dependencies.mkdir(parents=True)
+    dep_info = dependencies / "ordinary_wallet_plan_public_proof_verifier-0123456789abcdef.d"
+    dep_info.write_text("reviewed dep-info\n", encoding="utf-8")
+    dep_info.chmod(0o644)
+    top = target / "debug/ordinary-wallet-plan-public-proof-verifier"
+    dependency = dep_info.with_suffix("")
+    top.write_bytes(top_data)
+    top.chmod(0o755)
+    if hardlinked:
+        os.link(top, dependency)
+    else:
+        dependency.write_bytes(top_data if dependency_data is None else dependency_data)
+        dependency.chmod(0o755)
+    return target, dep_info, target.parent / "ordinary-wallet-plan-public-proof-verifier"
+
+
+def test_cargo_proof_binary_sealing(preparer, scratch: Path) -> None:
+    owner = os.getuid()
+    for name, hardlinked in (("hardlinked-binary", True), ("copied-binary", False)):
+        target, dep_info, destination = cargo_proof_binary_layout(
+            scratch, name, hardlinked=hardlinked
+        )
+        preparer.seal_cargo_proof_binary(target, dep_info, destination, owner)
+        metadata = os.lstat(destination)
+        if (
+            destination.read_bytes() != b"reviewed proof binary"
+            or not stat.S_ISREG(metadata.st_mode)
+            or stat.S_IMODE(metadata.st_mode) != 0o555
+            or metadata.st_nlink != 1
+            or preparer.sealed_binary_digest(destination, owner)
+            != hashlib.sha256(b"reviewed proof binary").hexdigest()
+        ):
+            raise AssertionError("sealed Cargo proof binary differs from exact authority")
+
+    target, dep_info, destination = cargo_proof_binary_layout(
+        scratch, "wrong-owner-binary", hardlinked=False
+    )
+    expect_snapshot_error(
+        preparer,
+        lambda: preparer.seal_cargo_proof_binary(
+            target, dep_info, destination, owner + 1
+        ),
+        "Cargo proof binary owned by a different UID was accepted",
+    )
+
+    target, dep_info, destination = cargo_proof_binary_layout(
+        scratch, "replaced-between-reads", hardlinked=False
+    )
+    dependency = dep_info.with_suffix("")
+    displaced_dependency = dependency.with_name(dependency.name + "-displaced")
+    original_read = preparer.read_binary_descriptor
+    read_count = 0
+
+    def replace_between_reads(descriptor, expected):
+        nonlocal read_count
+        data = original_read(descriptor, expected)
+        read_count += 1
+        if read_count == 1:
+            dependency.rename(displaced_dependency)
+            dependency.write_bytes(data)
+            dependency.chmod(0o755)
+        return data
+
+    preparer.read_binary_descriptor = replace_between_reads
+    try:
+        expect_snapshot_error(
+            preparer,
+            lambda: preparer.seal_cargo_proof_binary(
+                target, dep_info, destination, owner
+            ),
+            "Cargo proof dependency binary replaced between reads was accepted",
+        )
+    finally:
+        preparer.read_binary_descriptor = original_read
+
+    target, dep_info, destination = cargo_proof_binary_layout(
+        scratch, "mutated-and-restored", hardlinked=False
+    )
+    top = target / "debug/ordinary-wallet-plan-public-proof-verifier"
+    original_read = preparer.read_binary_descriptor
+    read_count = 0
+
+    def mutate_and_restore_after_reads(descriptor, expected):
+        nonlocal read_count
+        data = original_read(descriptor, expected)
+        read_count += 1
+        if read_count == 2:
+            original = top.read_bytes()
+            top.write_bytes(original[::-1])
+            top.write_bytes(original)
+            top.chmod(0o755)
+        return data
+
+    preparer.read_binary_descriptor = mutate_and_restore_after_reads
+    try:
+        expect_snapshot_error(
+            preparer,
+            lambda: preparer.seal_cargo_proof_binary(
+                target, dep_info, destination, owner
+            ),
+            "Cargo proof binary mutation restored before revalidation was accepted",
+        )
+    finally:
+        preparer.read_binary_descriptor = original_read
+
+    target, dep_info, destination = cargo_proof_binary_layout(
+        scratch, "third-hardlink-binary", hardlinked=True
+    )
+    os.link(dep_info.with_suffix(""), target / "debug/third-link")
+    expect_snapshot_error(
+        preparer,
+        lambda: preparer.seal_cargo_proof_binary(target, dep_info, destination, owner),
+        "Cargo proof binary with a third hardlink was accepted",
+    )
+
+    target, dep_info, destination = cargo_proof_binary_layout(
+        scratch,
+        "mismatched-copied-binary",
+        hardlinked=False,
+        dependency_data=b"different proof binary",
+    )
+    expect_snapshot_error(
+        preparer,
+        lambda: preparer.seal_cargo_proof_binary(target, dep_info, destination, owner),
+        "mismatched Cargo proof binary pair was accepted",
+    )
+
+    for name, mutate in (
+        (
+            "linked-top-binary",
+            lambda target, dep_info, destination: (
+                (target / "debug/ordinary-wallet-plan-public-proof-verifier").unlink(),
+                os.symlink(dep_info.with_suffix(""), target / "debug/ordinary-wallet-plan-public-proof-verifier"),
+            ),
+        ),
+        (
+            "nonexecutable-top-binary",
+            lambda target, dep_info, destination: os.chmod(
+                target / "debug/ordinary-wallet-plan-public-proof-verifier", 0o644
+            ),
+        ),
+        (
+            "linked-dep-info",
+            lambda target, dep_info, destination: (
+                dep_info.rename(dep_info.with_name("dep-info-target")),
+                os.symlink(dep_info.with_name("dep-info-target"), dep_info),
+            ),
+        ),
+        (
+            "preexisting-destination",
+            lambda target, dep_info, destination: destination.write_bytes(b"existing"),
+        ),
+    ):
+        target, dep_info, destination = cargo_proof_binary_layout(
+            scratch, name, hardlinked=False
+        )
+        mutate(target, dep_info, destination)
+        expect_snapshot_error(
+            preparer,
+            lambda target=target, dep_info=dep_info, destination=destination: preparer.seal_cargo_proof_binary(
+                target, dep_info, destination, owner
+            ),
+            f"Cargo proof binary {name} mutation was accepted",
+        )
+
+    target, dep_info, destination = cargo_proof_binary_layout(
+        scratch, "wrong-dep-info-name", hardlinked=False
+    )
+    wrong_dep_info = dep_info.with_name("ordinary_wallet_plan_public_proof_verifier-nothex.d")
+    dep_info.rename(wrong_dep_info)
+    expect_snapshot_error(
+        preparer,
+        lambda: preparer.seal_cargo_proof_binary(
+            target, wrong_dep_info, destination, owner
+        ),
+        "noncanonical Cargo proof dep-info name was accepted",
+    )
+
+    digest_target = scratch / "mutable-sealed-binary"
+    digest_target.write_bytes(b"reviewed proof binary")
+    digest_target.chmod(0o755)
+    expect_snapshot_error(
+        preparer,
+        lambda: preparer.sealed_binary_digest(digest_target, owner),
+        "writable sealed proof binary was accepted",
+    )
+    digest_target.chmod(0o555)
+    digest_alias = scratch / "mutable-sealed-binary-alias"
+    os.link(digest_target, digest_alias)
+    expect_snapshot_error(
+        preparer,
+        lambda: preparer.sealed_binary_digest(digest_target, owner),
+        "hardlinked sealed proof binary was accepted",
+    )
+
+
 def main() -> int:
     source_cargo_home = explicit_source_cargo_home(sys.argv)
     preparer = load(PREPARER, "proof_snapshot_preparer")
     checker = load(CHECKER, "proof_snapshot_surface")
     with tempfile.TemporaryDirectory(prefix="wlpq-proof-snapshot-") as directory:
-        scratch = Path(directory)
+        scratch = Path(directory).resolve()
         test_source_cargo_home_argument(source_cargo_home, scratch)
         test_run_git_environment(preparer)
         test_archive_and_git_topology_rejections(preparer, scratch)
+        test_cargo_proof_binary_sealing(preparer, scratch)
         source = scratch / "source"
         copy_exact_inputs(preparer, source)
 

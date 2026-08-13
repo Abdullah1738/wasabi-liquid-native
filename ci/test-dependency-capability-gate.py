@@ -1022,6 +1022,30 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
             raise AssertionError(f"private proof snapshot Darwin SDK boundary is not exact: {token}")
     if 'environment["DEVELOPER_DIR"]' in proof_snapshot_test:
         raise AssertionError("private proof snapshot inherited a Darwin developer-directory override")
+    snapshot_preparer_source = (
+        ROOT / "ci/prepare-ordinary-wallet-plan-proof-snapshot.py"
+    ).read_text(encoding="utf-8")
+    cargo_binary_authority_tokens = (
+        "or before.st_uid != expected_uid",
+        "or dep_info_metadata.st_uid != expected_uid",
+        "value.st_ctime_ns,",
+        "binary_identity(os.fstat(top_descriptor)) != binary_identity(top_metadata)",
+        "or binary_identity(os.fstat(dependency_descriptor))",
+        "or binary_identity(os.lstat(top_binary)) != binary_identity(top_metadata)",
+        "or binary_identity(os.lstat(dependency_binary))",
+    )
+
+    def cargo_binary_authority_is_exact(candidate: str) -> bool:
+        return all(candidate.count(token) == 1 for token in cargo_binary_authority_tokens)
+
+    if not cargo_binary_authority_is_exact(snapshot_preparer_source):
+        raise AssertionError("Cargo proof binary ownership and race authority is not exact")
+    for token in cargo_binary_authority_tokens:
+        mutated = snapshot_preparer_source.replace(token, "", 1)
+        if mutated == snapshot_preparer_source or cargo_binary_authority_is_exact(mutated):
+            raise AssertionError(
+                f"Cargo proof binary authority mutation was accepted: {token}"
+            )
     snapshot_without_call = gate.replace(proof_snapshot_mutations + "\n", "", 1)
     snapshot_wiring_mutations = {
         "missing source Cargo home": gate.replace(
@@ -1178,7 +1202,7 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
     for name, (token, expected_count) in {
         "surface checker": ("check-ordinary-wallet-plan-public-proof-surface.py", 3),
         "surface mutations": (proof_surface_mutations, 1),
-        "dep-info path": ('"$proof_dep_info"', 4),
+        "dep-info path": ('"$proof_dep_info"', 5),
         "direct binary execution": ('"$proof_binary" "$proof_snapshot"', 1),
         "binary digest": ("--binary-digest \"$proof_binary\"", 2),
     }.items():
@@ -1186,7 +1210,7 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
             raise AssertionError(f"ordinary-wallet plan public proof verifier {name} is not singular")
     snapshot_preparer = "python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py"
     if (
-        gate.count(snapshot_preparer) != 32
+        gate.count(snapshot_preparer) != 33
         or gate.count("    --verify \\\n") != 4
         or gate.count("    --verify-cache \\\n") != 3
         or gate.count("--verify-tree \\\n") != 11
@@ -1195,8 +1219,41 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
         or gate.count("    --snapshot-only \\\n") != 1
         or gate.count("        --finalize-cache \\\n") != 2
         or gate.count("        --seal-tree \\\n") != 4
+        or gate.count("    --seal-binary \\\n") != 1
     ):
         raise AssertionError("ordinary-wallet plan private proof state checks are not exact")
+    sealed_binary_stanza = '''proof_binary="$sealed_proof_binary"
+python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py \\
+    --seal-binary \\
+    "$proof_target" \\
+    "$proof_dep_info" \\
+    "$proof_binary" \\
+    "$build_uid"
+/usr/bin/sudo -n "$chown_bin" 0 "$proof_binary"
+/usr/bin/sudo -n /bin/chmod 0555 "$proof_binary"
+proof_binary_sha256="$(python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py --binary-digest "$proof_binary")"'''
+    if (
+        gate.count('sealed_proof_binary="$scratch/ordinary-wallet-plan-public-proof-verifier"') != 1
+        or gate.count(sealed_binary_stanza) != 1
+        or gate.count('"$proof_target/debug/ordinary-wallet-plan-public-proof-verifier"') != 0
+        or not (
+            gate.index(proof_build_stanza)
+            < gate.index('proof_dep_info="$(')
+            < gate.index(sealed_binary_stanza)
+            < gate.index('run_sealed "$proof_binary" "$proof_snapshot"')
+        )
+    ):
+        raise AssertionError("ordinary-wallet plan sealed proof binary handoff is not exact")
+    for name, replacement in (
+        ("missing seal", sealed_binary_stanza.replace('    --seal-binary \\\n', "", 1)),
+        ("live target binary", sealed_binary_stanza.replace('proof_binary="$sealed_proof_binary"', 'proof_binary="$proof_target/debug/ordinary-wallet-plan-public-proof-verifier"', 1)),
+        ("missing root handoff", sealed_binary_stanza.replace('/usr/bin/sudo -n "$chown_bin" 0 "$proof_binary"\n', "", 1)),
+        ("writable sealed binary", sealed_binary_stanza.replace('/usr/bin/sudo -n /bin/chmod 0555 "$proof_binary"', '/usr/bin/sudo -n /bin/chmod 0755 "$proof_binary"', 1)),
+        ("unsealed first digest", sealed_binary_stanza.replace('--binary-digest "$proof_binary"', '--binary-digest "$proof_target/debug/ordinary-wallet-plan-public-proof-verifier"', 1)),
+    ):
+        mutated = gate.replace(sealed_binary_stanza, replacement, 1)
+        if mutated == gate or mutated.count(sealed_binary_stanza) != 0:
+            raise AssertionError(f"ordinary-wallet plan proof binary {name} mutation was accepted")
     proof_materialization_stanza = '''CARGO_HOME="$proof_materialized_cargo_home" CARGO_TARGET_DIR="$scratch/proof-materialize-target" \\
     "$compiler_cargo_bin" metadata \\
         --manifest-path "$proof_snapshot/Cargo.toml" \\
@@ -1288,7 +1345,7 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
         'export RUSTDOC="$compiler_rustdoc_bin"',
         '--snapshot "$proof_snapshot"',
         'proof_target="$scratch/ordinary-wallet-plan-public-proof-target"',
-        'proof_binary="$proof_target/debug/ordinary-wallet-plan-public-proof-verifier"',
+        'proof_binary="$sealed_proof_binary"',
     ):
         expected_count = 2 if token in ('--snapshot "$proof_snapshot"', 'CARGO_TARGET_DIR="$workspace_target"') else 1
         if gate.count(token) != expected_count:
@@ -1332,7 +1389,7 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
     fi
 }'''
     darwin_system_exec_authority = '''    for darwin_system_exec in \\
-        /usr/bin/env /bin/sh /bin/pwd /bin/sleep /bin/zsh /usr/bin/dirname /bin/realpath; do
+        /usr/bin/env /bin/sh /bin/bash /bin/pwd /bin/sleep /bin/zsh /usr/bin/dirname /bin/realpath; do
         darwin_require_host_authority_path "$darwin_system_exec" 'Regular File'
     done'''
     darwin_toolchain_authority_tokens = (
@@ -1656,13 +1713,14 @@ done'''
     )
     darwin_private_map = (
         r'"(allow file-map-executable (subpath \"$sealed_toolchain\") '
-        r'(subpath \"$sealed_command_bin\") (subpath \"$profile_target\"))"'
+        r'(subpath \"$sealed_command_bin\") (subpath \"$profile_target\") '
+        r'(literal \"$sealed_proof_binary\"))"'
     )
     darwin_process_fork = "'(allow process-fork)'"
     darwin_process_info = "'(allow process-info* (target self))'"
     darwin_system_exec = (
         "'(allow process-exec* (literal \"/usr/bin/env\") "
-        "(literal \"/bin/sh\") (literal \"/bin/pwd\") "
+        "(literal \"/bin/sh\") (literal \"/bin/bash\") (literal \"/bin/pwd\") "
         "(literal \"/bin/sleep\") (literal \"/bin/zsh\") "
         "(literal \"/usr/bin/dirname\") (literal \"/bin/realpath\"))'"
     )
@@ -1675,7 +1733,8 @@ done'''
     )
     darwin_private_exec = (
         r'"(allow process-exec* (subpath \"$sealed_toolchain\") '
-        r'(subpath \"$sealed_command_bin\") (subpath \"$profile_target\"))"'
+        r'(subpath \"$sealed_command_bin\") (subpath \"$profile_target\") '
+        r'(literal \"$sealed_proof_binary\"))"'
     )
     darwin_private_write = (
         r'"(allow file-write* (subpath \"$build_home\") '
@@ -1731,6 +1790,7 @@ done'''
             or '(subpath "$trusted_bin")' in candidate
             or '(subpath "$proof_target")' in candidate
             or '(subpath "$workspace_target")' in candidate
+            or '(subpath "$sealed_proof_binary")' in candidate
             or '(subpath "/dev")' in candidate
             or '(subpath "/dev/fd")' in candidate
         ):
@@ -1881,6 +1941,22 @@ done'''
             darwin_private_exec,
             r'"(allow process-exec* (subpath \"$sealed_toolchain\") (subpath \"$sealed_command_bin\") (subpath \"$proof_target\") (subpath \"$workspace_target\"))"',
         ),
+        (
+            "missing sealed proof execution",
+            darwin_private_exec,
+            darwin_private_exec.replace(
+                r' (literal \"$sealed_proof_binary\")', "", 1
+            ),
+        ),
+        (
+            "sealed proof subtree execution",
+            darwin_private_exec,
+            darwin_private_exec.replace(
+                r'(literal \"$sealed_proof_binary\")',
+                r'(subpath \"$sealed_proof_binary\")',
+                1,
+            ),
+        ),
         ("missing system executable map", darwin_system_map, ""),
         ("missing private executable map", darwin_private_map, ""),
         (
@@ -1917,6 +1993,22 @@ done'''
             "both-target executable map",
             darwin_private_map,
             r'"(allow file-map-executable (subpath \"$sealed_toolchain\") (subpath \"$sealed_command_bin\") (subpath \"$proof_target\") (subpath \"$workspace_target\"))"',
+        ),
+        (
+            "missing sealed proof executable map",
+            darwin_private_map,
+            darwin_private_map.replace(
+                r' (literal \"$sealed_proof_binary\")', "", 1
+            ),
+        ),
+        (
+            "sealed proof subtree executable map",
+            darwin_private_map,
+            darwin_private_map.replace(
+                r'(literal \"$sealed_proof_binary\")',
+                r'(subpath \"$sealed_proof_binary\")',
+                1,
+            ),
         ),
     ):
         mutated = gate.replace(original, replacement, 1)

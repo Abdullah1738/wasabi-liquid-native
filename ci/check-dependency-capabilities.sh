@@ -142,7 +142,7 @@ Build version 15F31d'
     darwin_ranlib_sha256="$("$python_bin" -I ci/check-sealed-rust-command-bin.py --digest "$darwin_ranlib_bin")"
     darwin_strip_sha256="$("$python_bin" -I ci/check-sealed-rust-command-bin.py --digest "$darwin_strip_bin")"
     for darwin_system_exec in \
-        /usr/bin/env /bin/sh /bin/pwd /bin/sleep /bin/zsh /usr/bin/dirname /bin/realpath; do
+        /usr/bin/env /bin/sh /bin/bash /bin/pwd /bin/sleep /bin/zsh /usr/bin/dirname /bin/realpath; do
         darwin_require_host_authority_path "$darwin_system_exec" 'Regular File'
     done
 }
@@ -613,6 +613,7 @@ python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py --verify-tree \
 build_home="$scratch/build-home"
 proof_target="$scratch/ordinary-wallet-plan-public-proof-target"
 workspace_target="$scratch/workspace-target"
+sealed_proof_binary="$scratch/ordinary-wallet-plan-public-proof-verifier"
 build_tmp="$scratch/build-tmp"
 gate_output="$scratch/gate-output"
 /bin/mkdir "$build_home" "$proof_target" "$workspace_target" "$build_tmp" "$gate_output" "$scratch/hidden-home"
@@ -654,9 +655,9 @@ case "$host_system" in
                 '(deny default)' \
                 '(allow process-fork)' \
                 '(allow process-info* (target self))' \
-                '(allow process-exec* (literal "/usr/bin/env") (literal "/bin/sh") (literal "/bin/pwd") (literal "/bin/sleep") (literal "/bin/zsh") (literal "/usr/bin/dirname") (literal "/bin/realpath"))' \
+                '(allow process-exec* (literal "/usr/bin/env") (literal "/bin/sh") (literal "/bin/bash") (literal "/bin/pwd") (literal "/bin/sleep") (literal "/bin/zsh") (literal "/usr/bin/dirname") (literal "/bin/realpath"))' \
                 "(allow process-exec* (literal \"$darwin_cc_bin\") (literal \"$darwin_cxx_bin\") (literal \"$darwin_ar_bin\") (literal \"$darwin_as_bin\") (literal \"$darwin_ld_bin\") (literal \"$darwin_nm_bin\") (literal \"$darwin_ranlib_bin\") (literal \"$darwin_strip_bin\"))" \
-                "(allow process-exec* (subpath \"$sealed_toolchain\") (subpath \"$sealed_command_bin\") (subpath \"$profile_target\"))" \
+                "(allow process-exec* (subpath \"$sealed_toolchain\") (subpath \"$sealed_command_bin\") (subpath \"$profile_target\") (literal \"$sealed_proof_binary\"))" \
                 '(allow signal (target self))' \
                 '(allow sysctl-read)' \
                 '(allow mach-lookup)' \
@@ -666,7 +667,7 @@ case "$host_system" in
                 "(allow file-read* (subpath \"$scratch\"))" \
                 "(allow file-read-metadata (literal \"$var_tmp_target\"))" \
                 '(allow file-map-executable (subpath "/System") (subpath "/usr") (subpath "/bin") (subpath "/sbin") (subpath "/Applications") (subpath "/Library/Developer"))' \
-                "(allow file-map-executable (subpath \"$sealed_toolchain\") (subpath \"$sealed_command_bin\") (subpath \"$profile_target\"))" \
+                "(allow file-map-executable (subpath \"$sealed_toolchain\") (subpath \"$sealed_command_bin\") (subpath \"$profile_target\") (literal \"$sealed_proof_binary\"))" \
                 "(allow file-write* (subpath \"$build_home\") (subpath \"$build_tmp\") (subpath \"$profile_target\"))" \
                 '(allow file-read-data (literal "/dev/null"))' \
                 '(allow file-write-data (literal "/dev/null"))' \
@@ -1044,7 +1045,15 @@ python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py \
     "$proof_cache_authority" \
     "$proof_cache_authority_sha256" \
     "$build_uid"
-proof_binary="$proof_target/debug/ordinary-wallet-plan-public-proof-verifier"
+proof_binary="$sealed_proof_binary"
+python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py \
+    --seal-binary \
+    "$proof_target" \
+    "$proof_dep_info" \
+    "$proof_binary" \
+    "$build_uid"
+/usr/bin/sudo -n "$chown_bin" 0 "$proof_binary"
+/usr/bin/sudo -n /bin/chmod 0555 "$proof_binary"
 proof_binary_sha256="$(python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py --binary-digest "$proof_binary")"
 run_sealed "$proof_binary" "$proof_snapshot"
 if [ "$(python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py --binary-digest "$proof_binary")" != "$proof_binary_sha256" ]; then

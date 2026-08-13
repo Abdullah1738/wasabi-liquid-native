@@ -173,9 +173,150 @@ def stable_read(root: Path, path: Path, maximum: int = MAX_FILE_BYTES) -> bytes:
         after_path = os.lstat(path)
         if total != opened.st_size or identity(opened) != identity(after_handle) or identity(opened) != identity(after_path):
             reject("snapshot source changed during read")
-        return b"".join(chunks)
     finally:
         os.close(descriptor)
+    return b"".join(chunks)
+
+
+def binary_identity(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_nlink,
+        value.st_uid,
+        value.st_gid,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def open_cargo_binary(path: Path, expected_uid: int) -> tuple[int, os.stat_result]:
+    before = os.lstat(path)
+    if (
+        stat.S_ISLNK(before.st_mode)
+        or not stat.S_ISREG(before.st_mode)
+        or stat.S_IMODE(before.st_mode) != 0o755
+        or before.st_uid != expected_uid
+        or before.st_size <= 0
+        or before.st_size > MAX_PROOF_BINARY_BYTES
+    ):
+        reject("Cargo proof binary authority differs")
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    opened = os.fstat(descriptor)
+    if binary_identity(before) != binary_identity(opened):
+        os.close(descriptor)
+        reject("Cargo proof binary changed before open")
+    return descriptor, opened
+
+
+def read_binary_descriptor(descriptor: int, expected: os.stat_result) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = os.read(descriptor, min(1024 * 1024, MAX_PROOF_BINARY_BYTES + 1 - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > MAX_PROOF_BINARY_BYTES:
+            reject("Cargo proof binary exceeded its bound")
+    if total != expected.st_size:
+        reject("Cargo proof binary size changed while reading")
+    return b"".join(chunks)
+
+
+def seal_cargo_proof_binary(
+    target_root: Path,
+    dep_info: Path,
+    destination: Path,
+    expected_uid: int,
+) -> None:
+    for path in (target_root, dep_info, destination):
+        if not path.is_absolute():
+            reject("absolute Cargo proof binary paths are required")
+    if target_root.name != "ordinary-wallet-plan-public-proof-target":
+        reject("Cargo proof target root is noncanonical")
+    if destination != target_root.parent / "ordinary-wallet-plan-public-proof-verifier":
+        reject("sealed proof binary destination is noncanonical")
+    if os.path.lexists(destination):
+        reject("sealed proof binary destination already exists")
+    target_metadata = os.lstat(target_root)
+    if stat.S_ISLNK(target_metadata.st_mode) or not stat.S_ISDIR(target_metadata.st_mode):
+        reject("Cargo proof target root is linked or non-directory")
+    dependencies = target_root / "debug/deps"
+    if dep_info.parent != dependencies or not re.fullmatch(
+        r"ordinary_wallet_plan_public_proof_verifier-[0-9a-f]{16}\.d",
+        dep_info.name,
+    ):
+        reject("Cargo proof dep-info path is noncanonical")
+    reject_linked_ancestors(Path(target_root.anchor), target_root)
+    reject_linked_ancestors(target_root, dep_info)
+    dep_info_metadata = os.lstat(dep_info)
+    if (
+        stat.S_ISLNK(dep_info_metadata.st_mode)
+        or not stat.S_ISREG(dep_info_metadata.st_mode)
+        or stat.S_IMODE(dep_info_metadata.st_mode) != 0o644
+        or dep_info_metadata.st_nlink != 1
+        or dep_info_metadata.st_uid != expected_uid
+        or dep_info_metadata.st_size <= 0
+        or dep_info_metadata.st_size > MAX_FILE_BYTES
+    ):
+        reject("Cargo proof dep-info authority differs")
+    top_binary = target_root / "debug/ordinary-wallet-plan-public-proof-verifier"
+    dependency_binary = dep_info.with_suffix("")
+    descriptors: list[int] = []
+    try:
+        top_descriptor, top_metadata = open_cargo_binary(top_binary, expected_uid)
+        descriptors.append(top_descriptor)
+        dependency_descriptor, dependency_metadata = open_cargo_binary(
+            dependency_binary, expected_uid
+        )
+        descriptors.append(dependency_descriptor)
+        same_inode = (
+            top_metadata.st_dev == dependency_metadata.st_dev
+            and top_metadata.st_ino == dependency_metadata.st_ino
+        )
+        if same_inode:
+            if top_metadata.st_nlink != 2 or dependency_metadata.st_nlink != 2:
+                reject("hardlinked Cargo proof binary pair topology differs")
+        elif top_metadata.st_nlink != 1 or dependency_metadata.st_nlink != 1:
+            reject("copied Cargo proof binary pair topology differs")
+        top_data = read_binary_descriptor(top_descriptor, top_metadata)
+        dependency_data = read_binary_descriptor(dependency_descriptor, dependency_metadata)
+        if top_data != dependency_data:
+            reject("Cargo proof binary pair bytes differ")
+        if (
+            binary_identity(os.fstat(top_descriptor)) != binary_identity(top_metadata)
+            or binary_identity(os.fstat(dependency_descriptor))
+            != binary_identity(dependency_metadata)
+            or binary_identity(os.lstat(top_binary)) != binary_identity(top_metadata)
+            or binary_identity(os.lstat(dependency_binary))
+            != binary_identity(dependency_metadata)
+        ):
+            reject("Cargo proof binary pair changed while reading")
+    finally:
+        for descriptor in descriptors:
+            os.close(descriptor)
+    write_private(destination, top_data)
+    os.chmod(destination, 0o555)
+
+
+def sealed_binary_digest(path: Path, expected_uid: int = 0) -> str:
+    if not path.is_absolute():
+        reject("absolute private proof binary path is required")
+    reject_linked_ancestors(Path(path.anchor), path)
+    metadata = os.lstat(path)
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o555
+        or metadata.st_nlink != 1
+        or metadata.st_uid != expected_uid
+    ):
+        reject("sealed proof binary authority differs")
+    return hashlib.sha256(stable_read(Path(path.anchor), path, MAX_PROOF_BINARY_BYTES)).hexdigest()
 
 
 def write_private(path: Path, data: bytes) -> None:
@@ -1269,14 +1410,22 @@ def normalize_read_only(root: Path) -> None:
 
 def main() -> int:
     if len(sys.argv) not in (3, 4, 5, 6, 7, 9):
-        print("usage: prepare-ordinary-wallet-plan-proof-snapshot.py [--binary-digest ABSOLUTE_BINARY] | [--snapshot-only SOURCE_ROOT DESTINATION] | [--workspace-snapshot SOURCE_ROOT DESTINATION GIT_BIN HEAD] | [--copy-cache SOURCE_HOME DESTINATION LOCK_FILE LOCK_SHA256] | [--seal-tree ROOT EXTERNAL_AUTHORITY] | [--verify-tree ROOT EXTERNAL_AUTHORITY AUTHORITY_SHA256 BUILD_UID] | [--finalize-cache AUTHORITY_CARGO_HOME MATERIALIZED_CARGO_HOME FINAL_CARGO_HOME EXTERNAL_AUTHORITY LOCK_FILE GIT_BIN LOCK_SHA256] | [--verify-cache PRIVATE_CARGO_HOME EXTERNAL_AUTHORITY AUTHORITY_SHA256 BUILD_UID] | [--verify SNAPSHOT_ROOT PRIVATE_CARGO_HOME EXTERNAL_AUTHORITY AUTHORITY_SHA256 BUILD_UID] | [--workspace-cache SOURCE_ROOT SOURCE_CARGO_HOME PRIVATE_CARGO_HOME] | [SOURCE_ROOT SNAPSHOT_ROOT SOURCE_CARGO_HOME PRIVATE_CARGO_HOME]", file=sys.stderr)
+        print("usage: prepare-ordinary-wallet-plan-proof-snapshot.py [--binary-digest ABSOLUTE_BINARY] | [--seal-binary TARGET_ROOT DEP_INFO DESTINATION BUILD_UID] | [--snapshot-only SOURCE_ROOT DESTINATION] | [--workspace-snapshot SOURCE_ROOT DESTINATION GIT_BIN HEAD] | [--copy-cache SOURCE_HOME DESTINATION LOCK_FILE LOCK_SHA256] | [--seal-tree ROOT EXTERNAL_AUTHORITY] | [--verify-tree ROOT EXTERNAL_AUTHORITY AUTHORITY_SHA256 BUILD_UID] | [--finalize-cache AUTHORITY_CARGO_HOME MATERIALIZED_CARGO_HOME FINAL_CARGO_HOME EXTERNAL_AUTHORITY LOCK_FILE GIT_BIN LOCK_SHA256] | [--verify-cache PRIVATE_CARGO_HOME EXTERNAL_AUTHORITY AUTHORITY_SHA256 BUILD_UID] | [--verify SNAPSHOT_ROOT PRIVATE_CARGO_HOME EXTERNAL_AUTHORITY AUTHORITY_SHA256 BUILD_UID] | [--workspace-cache SOURCE_ROOT SOURCE_CARGO_HOME PRIVATE_CARGO_HOME] | [SOURCE_ROOT SNAPSHOT_ROOT SOURCE_CARGO_HOME PRIVATE_CARGO_HOME]", file=sys.stderr)
         return 2
     try:
         if len(sys.argv) == 3 and sys.argv[1] == "--binary-digest":
             binary = Path(sys.argv[2])
-            if not binary.is_absolute():
-                reject("absolute private proof binary path is required")
-            print(hashlib.sha256(stable_read(Path(binary.anchor), binary, MAX_PROOF_BINARY_BYTES)).hexdigest())
+            print(sealed_binary_digest(binary))
+            return 0
+        if len(sys.argv) == 6 and sys.argv[1] == "--seal-binary":
+            target_root, dep_info, destination = map(Path, sys.argv[2:5])
+            seal_cargo_proof_binary(
+                target_root,
+                dep_info,
+                destination,
+                int(sys.argv[5]),
+            )
+            print("sealed Cargo proof binary accepted")
             return 0
         if len(sys.argv) == 4 and sys.argv[1] == "--snapshot-only":
             source_root, destination = map(lambda value: Path(value).absolute(), sys.argv[2:])
