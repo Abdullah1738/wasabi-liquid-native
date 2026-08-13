@@ -57,6 +57,9 @@ set +e
     GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_TERMINAL_PROMPT=0 \
     "$@"
 status=$?
+if [ "$status" -gt 128 ]; then
+    echo "sealed Darwin command returned signal-style status $status (signal $((status - 128)))" >&2
+fi
 
 # This account is unique to this gate, so clearing its process ownership does
 # not affect another job. TERM is followed by KILL and an exact zero-process

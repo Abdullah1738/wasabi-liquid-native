@@ -1230,6 +1230,84 @@ done'''
         mutated = gate.replace(token, "", 1)
         if mutated == gate or darwin_cleanup_is_exact(mutated):
             raise AssertionError(f"Darwin cleanup {name} mutation was accepted")
+    darwin_profile_tokens = (
+        "'(deny default)'",
+        "'(allow process*)'",
+        "'(allow signal (target self))'",
+        "'(allow sysctl-read)'",
+        "'(allow mach-lookup)'",
+        "'(allow file-read* (literal \"/\"))'",
+        "'(allow file-read* (subpath \"/System\")",
+        r'"(allow file-read* (subpath \"$scratch\"))"',
+        r'"(allow file-read-metadata (literal \"$var_tmp_target\"))"',
+        r'"(allow file-write* (subpath \"$build_home\")',
+        "'(allow file-write-data (literal \"/dev/null\"))'",
+        "'(deny network*)'",
+    )
+
+    def darwin_profile_is_exact(candidate: str) -> bool:
+        if any(candidate.count(token) != 1 for token in darwin_profile_tokens):
+            return False
+        if '(subpath "/")' in candidate or "(allow file-read*)" in candidate:
+            return False
+        return [candidate.index(token) for token in darwin_profile_tokens] == sorted(
+            candidate.index(token) for token in darwin_profile_tokens
+        )
+
+    if not darwin_profile_is_exact(gate):
+        raise AssertionError("sealed Darwin profile ordering or root-directory grant is not exact")
+    root_read = "'(allow file-read* (literal \"/\"))'"
+    for name, replacement in (
+        ("missing root read", ""),
+        ("root subtree read", "'(allow file-read* (subpath \"/\"))'"),
+        ("unfiltered read", "'(allow file-read*)'"),
+    ):
+        mutated = gate.replace(root_read, replacement, 1)
+        if mutated == gate or darwin_profile_is_exact(mutated):
+            raise AssertionError(f"sealed Darwin {name} mutation was accepted")
+    additive_unfiltered = gate.replace(
+        root_read + " \\\n",
+        root_read + ' \\\n                "(allow file-read*)" \\\n',
+        1,
+    )
+    if additive_unfiltered == gate or darwin_profile_is_exact(additive_unfiltered):
+        raise AssertionError("sealed Darwin additive unfiltered read mutation was accepted")
+    reordered = gate.replace(root_read + " \\\n", "", 1).replace(
+        "                '(deny network*)'",
+        "                " + root_read + " \\\n                '(deny network*)'",
+        1,
+    )
+    if reordered == gate or darwin_profile_is_exact(reordered):
+        raise AssertionError("sealed Darwin root-directory grant reordering was accepted")
+    dependency_target_selection = (
+        'sealed_dependency_target="$(find "$workspace_cargo_home/registry/src" '
+        '-type f ! -name .cargo-ok -print -quit)"'
+    )
+    old_dependency_target_selection = dependency_target_selection.replace(
+        "-print -quit", "-print | head -1"
+    )
+
+    def dependency_target_selection_is_exact(candidate: str) -> bool:
+        return (
+            candidate.count(dependency_target_selection) == 1
+            and old_dependency_target_selection not in candidate
+        )
+
+    if not dependency_target_selection_is_exact(gate):
+        raise AssertionError("sealed dependency probe selection is not bounded and exact")
+    for name, mutated in (
+        ("missing", gate.replace(dependency_target_selection, "", 1)),
+        (
+            "broken-pipe pipeline",
+            gate.replace(
+                dependency_target_selection,
+                old_dependency_target_selection,
+                1,
+            ),
+        ),
+    ):
+        if mutated == gate or dependency_target_selection_is_exact(mutated):
+            raise AssertionError(f"sealed dependency probe {name} mutation was accepted")
     for token, expected in (
         ('(deny default)', 1),
         ('(allow file-write* (subpath', 1),
@@ -1294,6 +1372,38 @@ done'''
     ):
         if darwin_wrapper.count(token) != 1:
             raise AssertionError(f"sealed Darwin boundary token is not exact: {token}")
+    signal_diagnostic = '''status=$?
+if [ "$status" -gt 128 ]; then
+    echo "sealed Darwin command returned signal-style status $status (signal $((status - 128)))" >&2
+fi'''
+
+    def signal_diagnostic_is_exact(candidate: str) -> bool:
+        if (
+            candidate.count(signal_diagnostic) != 1
+            or candidate.count('    "$@"\n' + signal_diagnostic) != 1
+            or candidate.count('exit "$status"') != 1
+        ):
+            return False
+        return (
+            candidate.index(signal_diagnostic)
+            < candidate.index("# This account is unique to this gate")
+            < candidate.index('exit "$status"')
+        )
+
+    if not signal_diagnostic_is_exact(darwin_wrapper):
+        raise AssertionError("sealed Darwin signal diagnostic is not exact")
+    signal_mutations = {
+        "missing": darwin_wrapper.replace(signal_diagnostic, "status=$?", 1),
+        "broadened threshold": darwin_wrapper.replace(
+            'if [ "$status" -gt 128 ]; then', 'if [ "$status" -ge 128 ]; then', 1
+        ),
+        "relocated after exit": darwin_wrapper.replace(signal_diagnostic + "\n", "", 1).replace(
+            'exit "$status"', 'exit "$status"\n' + signal_diagnostic, 1
+        ),
+    }
+    for name, mutated_diagnostic in signal_mutations.items():
+        if mutated_diagnostic == darwin_wrapper or signal_diagnostic_is_exact(mutated_diagnostic):
+            raise AssertionError(f"sealed Darwin signal diagnostic {name} mutation was accepted")
     for name, wrapper, minimum in (
         ("Darwin", darwin_wrapper, 20),
         ("Linux", linux_wrapper, 20),

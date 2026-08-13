@@ -489,6 +489,7 @@ case "$host_system" in
                 '(allow signal (target self))' \
                 '(allow sysctl-read)' \
                 '(allow mach-lookup)' \
+                '(allow file-read* (literal "/"))' \
                 '(allow file-read* (subpath "/System") (subpath "/usr") (subpath "/bin") (subpath "/sbin") (subpath "/Applications") (subpath "/Library/Developer") (subpath "/private/etc") (subpath "/private/var/db") (subpath "/dev"))' \
                 "(allow file-read* (subpath \"$scratch\"))" \
                 "(allow file-read-metadata (literal \"$var_tmp_target\"))" \
@@ -531,7 +532,7 @@ esac
 CARGO_HOME="$workspace_cargo_home"
 CARGO_TARGET_DIR="$workspace_target"
 export CARGO_HOME CARGO_TARGET_DIR
-sealed_dependency_target="$(find "$workspace_cargo_home/registry/src" -type f ! -name .cargo-ok -print | head -1)"
+sealed_dependency_target="$(find "$workspace_cargo_home/registry/src" -type f ! -name .cargo-ok -print -quit)"
 if [ -z "$sealed_dependency_target" ]; then
     echo "sealed dependency mutation probe target is unavailable" >&2
     exit 1
