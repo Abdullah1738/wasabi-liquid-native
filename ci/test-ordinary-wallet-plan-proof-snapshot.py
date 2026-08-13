@@ -172,6 +172,33 @@ def test_archive_and_git_topology_rejections(preparer, scratch: Path) -> None:
         text=True,
         stdout=subprocess.PIPE,
     ).stdout.strip()
+    original_run_git = preparer.run_git
+    head_output_limits: list[int] = []
+
+    def record_git_output_limit(
+        git_bin: Path,
+        arguments: list[str],
+        *,
+        output_limit: int = preparer.MAX_SEALED_CACHE_TOTAL_BYTES,
+    ) -> bytes:
+        if arguments[-2:] == ["rev-parse", "HEAD"]:
+            head_output_limits.append(output_limit)
+        return original_run_git(git_bin, arguments, output_limit=output_limit)
+
+    preparer.run_git = record_git_output_limit
+    try:
+        snapshot = scratch / "regular-git-workspace-snapshot"
+        preparer.copy_git_workspace_snapshot(
+            repository,
+            snapshot,
+            Path("/usr/bin/git"),
+            initial,
+        )
+    finally:
+        preparer.run_git = original_run_git
+    if head_output_limits != [1024] or (snapshot / "regular").read_bytes() != b"regular":
+        raise AssertionError("Git workspace head query was not bounded or copied exactly")
+
     os.symlink("regular", repository / "linked")
     subprocess.run(["/usr/bin/git", "-C", str(repository), "add", "linked"], check=True)
     subprocess.run(

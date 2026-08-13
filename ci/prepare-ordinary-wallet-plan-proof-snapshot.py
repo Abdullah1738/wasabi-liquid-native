@@ -832,7 +832,11 @@ def copy_git_workspace_snapshot(
     if os.path.lexists(destination) or not re.fullmatch(r"[0-9a-f]{40}", expected_head):
         reject("workspace snapshot destination exists or head is noncanonical")
     git_directory = source_root / ".git"
-    head = run_git(git_bin, ["--git-dir", str(git_directory), "rev-parse", "HEAD"], 1024).decode("ascii").strip()
+    head = run_git(
+        git_bin,
+        ["--git-dir", str(git_directory), "rev-parse", "HEAD"],
+        output_limit=1024,
+    ).decode("ascii").strip()
     if head != expected_head:
         reject("workspace source head differs from exact CI authority")
     files = git_tree_files(git_bin, git_directory, expected_head)
