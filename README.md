@@ -40,7 +40,7 @@ exposes no C symbol or key-derivation path. Output opening alone does not prove
 transaction validity, chain inclusion, unspentness, commitment balance, or the
 transaction-level surjection proofs. Script ownership and blinding-key
 provenance also remain separate prerequisites before wallet credit.
-All five Liquid implementation crates pin exact
+All Liquid implementation crates pin exact
 `Abdullah1738/rust-elements` commit
 `5b8865f8061459f82dcb8a1cf476b7ba17b14193`, with default features and the
 ambient global secp context disabled;
@@ -80,6 +80,32 @@ export-free Rust `rlib`: it adds no ABI operation, C symbol, dynamic library,
 key provider, wallet-facts invocation, managed bridge, node authentication, or
 wallet-credit authority. Its exact nonlinkable wire reference is under
 `contracts/wallet-facts/v1/nonlinkable-reference/`.
+
+The internal `wasabi-liquid-native-ordinary-wallet-plan` crate defines the
+separate canonical `WLPQ` v1 source-only request for one already selected
+ordinary-wallet spend. It binds an opaque caller-retained source epoch, one of
+the closed Liquid mainnet or Liquid testnet manifest/pegged-asset contexts, and
+the retained descriptor-catalog network before reusing the existing selected
+output, confidential destination, explicit fee, and public funding validators.
+The caller must generate a fresh unpredictable epoch for each wallet session
+and never reuse it; reuse links otherwise separate requests. The request is
+plaintext and unauthenticated and supplies neither replay protection nor
+currentness. Parsing and validation have variable timing. Public preparation
+checks the candidate identifier and selected index, canonical transaction,
+complete previous-transaction set, amount proofs, descriptor ownership, and
+confidential public shape, but deliberately cannot observe the selected
+confidential output's committed asset or value before the later provider-bound
+opening transition. Its owned raw storage follows scoped overwrite paths, and
+its prepared result exposes only the source revision and counts. The crate is
+an export-free Rust `rlib`; it adds no ABI operation, managed runtime bridge,
+opening provider, node access, reservation, PSET construction, signing, or
+broadcast behavior.
+
+The WLPQ gate derives its production source closure from compiler dependency
+information and pins the exact reviewed source bytes plus narrow
+authority-critical dependency regions. These pins detect drift only: changing
+an expected hash requires fresh review of the exact new bytes and does not
+independently authorize the change.
 
 `ci/check-dependency-capabilities.sh` exact-diffs the locked, all-target
 normal/build graph for the whole default workspace against its reviewed

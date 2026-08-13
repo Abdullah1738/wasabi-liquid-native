@@ -645,6 +645,7 @@ fn observed_public_output_helper_source_has_only_the_frozen_nonallocating_calls(
 fn derives_only_the_expected_public_branches() {
     let catalog = test_catalog(2);
 
+    assert_eq!(catalog.network(), DescriptorNetwork::Test);
     assert_eq!(catalog.last_index(), 2);
     assert_eq!(catalog.script_count(), 6);
     assert_eq!(
@@ -1718,6 +1719,22 @@ fn selected_output_expectations_clear_on_batch_destruction_and_copy_unwind() {
         selected_output_payload_drop_count() - payload_drops_before,
         1
     );
+
+    let drops_before = selected_output_expectation_drop_count();
+    let payload_drops_before = selected_output_payload_drop_count();
+    let clones_before = candidate_payload_clone_count();
+    set_candidate_payload_clones_before_panic(Some(3));
+    let unwind = std::panic::catch_unwind(|| {
+        let _ = SelectedOutputBatch::new(&requests);
+    });
+    set_candidate_payload_clones_before_panic(None);
+    assert!(unwind.is_err());
+    assert_eq!(candidate_payload_clone_count() - clones_before, 4);
+    assert_eq!(selected_output_expectation_drop_count() - drops_before, 2);
+    assert_eq!(
+        selected_output_payload_drop_count() - payload_drops_before,
+        3
+    );
 }
 
 #[test]
@@ -1864,6 +1881,7 @@ fn observes_empty_spend_only_and_mixed_batches_without_assigning_chain_order() {
     let unowned_catalog =
         DescriptorCatalog::derive(MAINNET_PUBLIC_DESCRIPTOR, DescriptorNetwork::Mainnet, 1)
             .unwrap();
+    assert_eq!(unowned_catalog.network(), DescriptorNetwork::Mainnet);
     let slip77 = synthetic_material(b"wallet-facts spend-only observation material");
     let fixture = confidential_fixture(&catalog, &slip77);
     let empty_candidates = CandidateBatch::new(&[]).unwrap();

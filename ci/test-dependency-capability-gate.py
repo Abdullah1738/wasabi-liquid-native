@@ -522,6 +522,67 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
         raise AssertionError("conformance inventory root pin is not singular")
     if gate.count(parent_pin) != 1:
         raise AssertionError("conformance parent root pin is not singular")
+    plan_preflight_pin = "483952c5fa1f9aea89585f317551c728513241c8800aeaf1fca4d0e534d6ea28"
+    if gate.count(plan_preflight_pin) != 1:
+        raise AssertionError("ordinary-wallet plan preflight source pin is not singular")
+    shell_macro_fallback_tokens = {
+        "target disable rejection": (
+            "ordinary-wallet plan Cargo test or documentation target was disabled"
+        ),
+        "test toggle": "(test|doctest|doc)[[:space:]]*=[[:space:]]*false",
+        "harness toggle": "harness[[:space:]]*=",
+        "required features toggle": "required-features[[:space:]]*=",
+        "lexical source scan": 'plan_lexical_source="$(',
+        "comment stripping": ".strip_rust_comments",
+        "all-input dep-info": (
+            '--emit=dep-info=- >"$scratch/ordinary-wallet-plan.dep-info"'
+        ),
+        "ordinary pset import": (
+            "use wasabi_liquid_native_ordinary_pset::{ConfidentialOutput, ExplicitFee};"
+        ),
+        "ordinary pset API rejection": (
+            "ordinary-wallet plan ordinary-pset capability escaped its boundary"
+        ),
+        "crate attribute inventory": 'plan_crate_attributes="$(grep',
+        "exact forbid unsafe": "#![forbid(unsafe_code)]",
+        "exact deny docs": "#![deny(missing_docs)]",
+        "path and unsafe rejection": (
+            "ordinary-wallet plan path attribute or unsafe syntax escaped its boundary"
+        ),
+        "module inventory": 'plan_module_count="$(',
+        "module attribute hash": (
+            "9bf302755ec28c38c79a36f3f7945a47fe8d736d267b8373981852afa6949272"
+        ),
+        "outer attribute inventory": 'plan_outer_attribute_hash="$(',
+        "outer attribute hash": (
+            "51ebc7d7bb8f19ef7c51c0f6614e23c4f950a3caaf8a652588206492ea2c02df"
+        ),
+        "trait implementation inventory": 'plan_trait_impl_count="$(',
+        "compiled source closure": 'plan_compiled_sources="$(',
+        "compiled source closure root": (
+            "expected_plan_compiled_sources='crates/ordinary-wallet-plan/src/lib.rs"
+        ),
+        "function-like macro scan": "plan_function_macro_count=",
+        "function-like macro expression": (
+            "[[:alpha:]_][[:alnum:]_]*[[:space:]]*![[:space:]]*(\\(|\\{|\\[)"
+        ),
+        "test thread-local pin": "plan_test_thread_local_count=",
+        "test panic pin": "plan_test_panic_count=",
+        "exact test panic": 'panic!("test-only ordinary-wallet plan staging unwind");',
+        "function-like macro rejection": (
+            "ordinary-wallet plan function-like macro surface is not the exact test-only hook"
+        ),
+        "normalized target fallback": "m.validate_manifest_targets()",
+        "semantic authority fallback": (
+            "m.validate_dependency_authority_surface(m.production_text())"
+        ),
+    }
+    for name, token in shell_macro_fallback_tokens.items():
+        if gate.count(token) != 1:
+            raise AssertionError(f"ordinary-wallet plan shell {name} is not singular")
+        mutated_gate = gate.replace(token, "", 1)
+        if mutated_gate == gate or token in mutated_gate:
+            raise AssertionError(f"ordinary-wallet plan shell {name} mutation was accepted")
     if not focused_replay_is_exact(gate):
         raise AssertionError("focused conformance replay is not exact and singular")
     focused_stanza = """"$compiler_cargo_bin" test \\
@@ -531,6 +592,101 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
             conformance"""
     if gate.count(focused_stanza) != 1:
         raise AssertionError("focused conformance replay stanza is not singular")
+    plan_stanza = """"$compiler_cargo_bin" test \\
+            -p wasabi-liquid-native-ordinary-wallet-plan \\
+            --locked \\
+            --offline"""
+    if gate.count(plan_stanza) != 1:
+        raise AssertionError("ordinary-wallet plan replay stanza is not singular")
+    required_automatic_stanzas = {
+        "surface checker": "python3 ci/check-ordinary-wallet-plan-surface.py",
+        "surface negative mutations": "python3 ci/test-ordinary-wallet-plan-surface.py",
+        "workspace debug check": """"$compiler_cargo_bin" check \\
+            --workspace \\
+            --all-targets \\
+            --all-features \\
+            --locked \\
+            --offline""",
+        "workspace release check": """"$compiler_cargo_bin" check \\
+            --workspace \\
+            --all-targets \\
+            --all-features \\
+            --release \\
+            --locked \\
+            --offline""",
+        "workspace debug test": """"$compiler_cargo_bin" test \\
+            --workspace \\
+            --all-targets \\
+            --all-features \\
+            --locked \\
+            --offline""",
+        "workspace release test": """"$compiler_cargo_bin" test \\
+            --workspace \\
+            --all-targets \\
+            --all-features \\
+            --release \\
+            --locked \\
+            --offline""",
+        "release replay": """"$compiler_cargo_bin" test \\
+            -p wasabi-liquid-native-ordinary-wallet-plan \\
+            --release \\
+            --locked \\
+            --offline""",
+        "format": '"$compiler_cargo_bin" fmt --all -- --check',
+        "clippy": """"$compiler_cargo_bin" clippy \\
+            --workspace \\
+            --all-targets \\
+            --all-features \\
+            --locked \\
+            --offline \\
+            -- \\
+            -D warnings""",
+        "rustdoc": """RUSTDOCFLAGS='-D warnings' "$compiler_cargo_bin" doc \\
+            --workspace \\
+            --no-deps \\
+            --all-features \\
+            --locked \\
+            --offline""",
+    }
+    for name, stanza in required_automatic_stanzas.items():
+        if gate.count(stanza) != 1:
+            raise AssertionError(f"ordinary-wallet plan automatic {name} stanza is not singular")
+        mutated_gate = gate.replace(stanza, "", 1)
+        if mutated_gate.count(stanza) != 0:
+            raise AssertionError(f"ordinary-wallet plan automatic {name} removal was accepted")
+        required_flags = {
+            "workspace debug check": ["--workspace", "--all-targets", "--all-features", "--locked", "--offline"],
+            "workspace release check": ["--workspace", "--all-targets", "--all-features", "--release", "--locked", "--offline"],
+            "workspace debug test": ["--workspace", "--all-targets", "--all-features", "--locked", "--offline"],
+            "workspace release test": ["--workspace", "--all-targets", "--all-features", "--release", "--locked", "--offline"],
+            "release replay": ["--release", "--locked", "--offline"],
+            "clippy": ["--workspace", "--all-targets", "--all-features", "--locked", "--offline", "-D warnings"],
+            "rustdoc": ["--workspace", "--no-deps", "--all-features", "--locked", "--offline", "-D warnings"],
+        }.get(name, [])
+        for required_flag in required_flags:
+            if stanza.count(required_flag) != 1:
+                raise AssertionError(
+                    f"ordinary-wallet plan automatic {name} {required_flag} is not singular"
+                )
+            mutated_stanza = stanza.replace(required_flag, "", 1)
+            mutated_gate = gate.replace(stanza, mutated_stanza, 1)
+            if mutated_gate == gate or mutated_gate.count(stanza) != 0:
+                raise AssertionError(
+                    f"ordinary-wallet plan automatic {name} {required_flag} mutation was accepted"
+                )
+    for name, mutated_stanza in {
+        "verb": plan_stanza.replace(" test \\", " check \\", 1),
+        "package": plan_stanza.replace(
+            "wasabi-liquid-native-ordinary-wallet-plan",
+            "wasabi-liquid-native-wallet-facts",
+            1,
+        ),
+        "locked": plan_stanza.replace("            --locked \\\n", "", 1),
+        "offline": plan_stanza.replace("            --offline", "", 1),
+    }.items():
+        mutated_gate = gate.replace(plan_stanza, mutated_stanza, 1)
+        if mutated_gate == gate or mutated_gate.count(plan_stanza) != 0:
+            raise AssertionError(f"ordinary-wallet plan replay {name} mutation was accepted")
     replay_mutations = {
         "verb": focused_stanza.replace(" test \\", " check \\", 1),
         "package": focused_stanza.replace(
@@ -626,6 +782,12 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
         1,
     )
     expect_lock_snippet(changed_provider_pin, valid, success=False)
+    changed_plan_pin = snippet.replace(
+        "3287e329ab3d1b9868cb5eb3c39b1713a0d660b0dcd35100688bfb7c7a867178",
+        "0" * 64,
+        1,
+    )
+    expect_lock_snippet(changed_plan_pin, valid, success=False)
 
 
 def main() -> None:

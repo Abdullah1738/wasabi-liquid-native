@@ -258,6 +258,13 @@ impl fmt::Debug for ExplicitFee {
     }
 }
 
+impl Zeroize for ExplicitFee {
+    fn zeroize(&mut self) {
+        self.asset = AssetId::from_byte_array([0; 32]);
+        self.value.zeroize();
+    }
+}
+
 /// An unblinded ordinary-wallet PSET plus the private input capability needed
 /// by a later blinding transition.
 ///
@@ -702,6 +709,14 @@ mod amount_boundary_tests {
             totals.checked_add(asset, 1),
             Err(PsetConstructionError::AmountOverflow)
         ));
+    }
+
+    #[test]
+    fn explicit_fee_zeroization_clears_asset_and_value_in_place() {
+        let mut fee = ExplicitFee::new(AssetId::LIQUIDTESTNET_BTC, 17).unwrap();
+        fee.zeroize();
+        assert_eq!(fee.asset, AssetId::from_byte_array([0; 32]));
+        assert_eq!(fee.value, 0);
     }
 }
 

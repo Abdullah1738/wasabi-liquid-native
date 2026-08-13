@@ -59,6 +59,7 @@ BEGIN {
     elements = 0
     miniscript = 0
     rand_count = 0
+    plan = 0
     secp = 0
     sha2 = 0
     zkp = 0
@@ -159,9 +160,16 @@ $1 ~ /^wasabi-liquid-native-wallet-facts-wire v/ {
     }
 }
 
+$1 ~ /^wasabi-liquid-native-ordinary-wallet-plan v/ {
+    plan++
+    if ($1 != "wasabi-liquid-native-ordinary-wallet-plan v0.1.0 (workspace)" || $2 != "") {
+        reject("unexpected ordinary-wallet plan capability: " $0)
+    }
+}
+
 END {
     if (bitcoin != 1 || digest != 1 || elements != 1 || miniscript != 1 ||
-        rand_count != 1 || secp != 1 || sha2 != 1 || zkp != 1 || zkp_sys != 1 || wire != 1) {
+        plan != 1 || rand_count != 1 || secp != 1 || sha2 != 1 || zkp != 1 || zkp_sys != 1 || wire != 1) {
         reject("required dependency capability count mismatch")
     }
     exit failed
@@ -203,7 +211,8 @@ baseline_text = baseline_path.read_text()
 baseline_hash = "544ad20b54fe2e279a3074a5cfdeec49bd13752f358ffd0d67c0573546af326c"
 wire_post_hash = "f30d4a8bfc6b43f61fb7eefdd0d86f866ebef815d5aa57cc2b5b3319023fcf25"
 provider_post_hash = "5d105ea8138170cac5501f42d148855b9b9141d38b3c2b9532a246a4d5dc9ade"
-current_hash = "3287e329ab3d1b9868cb5eb3c39b1713a0d660b0dcd35100688bfb7c7a867178"
+plan_base_hash = "3287e329ab3d1b9868cb5eb3c39b1713a0d660b0dcd35100688bfb7c7a867178"
+current_hash = "f5e471c6a9664d29e8c30ea44b0c6934d3be98c00d87d5ea45cb5843b717adde"
 if baseline_text != baseline_hash + "\n":
     raise SystemExit("wallet-facts conformance lock baseline pin mismatch")
 if hashlib.sha256(lock_bytes).hexdigest() != current_hash:
@@ -211,6 +220,30 @@ if hashlib.sha256(lock_bytes).hexdigest() != current_hash:
 
 text = lock_bytes.decode("utf-8")
 blocks = text.split("[[package]]\n")
+plan_marker = 'name = "wasabi-liquid-native-ordinary-wallet-plan"\n'
+plan_indexes = [index for index, block in enumerate(blocks) if plan_marker in block]
+plan_block = """name = "wasabi-liquid-native-ordinary-wallet-plan"
+version = "0.1.0"
+dependencies = [
+ "elements",
+ "miniscript",
+ "rand",
+ "sha2",
+ "static_assertions",
+ "wasabi-liquid-native-address",
+ "wasabi-liquid-native-ordinary-pset",
+ "wasabi-liquid-native-wallet-facts",
+ "zeroize",
+]
+
+"""
+if len(plan_indexes) != 1 or blocks[plan_indexes[0]] != plan_block:
+    raise SystemExit("ordinary-wallet plan lock package mismatch")
+del blocks[plan_indexes[0]]
+plan_base_bytes = "[[package]]\n".join(blocks).encode("utf-8")
+if hashlib.sha256(plan_base_bytes).hexdigest() != plan_base_hash:
+    raise SystemExit("ordinary-wallet plan lock reverse transform mismatch")
+
 ordinary_marker = 'name = "wasabi-liquid-native-ordinary-pset"\n'
 composer_marker = 'name = "wasabi-liquid-native-ordinary-wallet-pset"\n'
 facts_marker = 'name = "wasabi-liquid-native-wallet-facts"\n'
@@ -301,6 +334,165 @@ fi
 if ! grep -Fq 'crate-type = ["rlib"]' crates/wallet-facts-wire/Cargo.toml ||
     grep -Fq 'cdylib' crates/wallet-facts-wire/Cargo.toml; then
     echo "wallet-facts wire crate type mismatch" >&2
+    exit 1
+fi
+
+python3 ci/check-ordinary-wallet-plan-surface.py
+python3 -c 'import importlib.util, pathlib; p = pathlib.Path("ci/check-ordinary-wallet-plan-surface.py"); s = importlib.util.spec_from_file_location("plan_surface", p); m = importlib.util.module_from_spec(s); s.loader.exec_module(m); m.validate_manifest_targets(); m.validate_dependency_authority_surface(m.production_text())'
+python3 ci/test-ordinary-wallet-plan-surface.py
+plan_sources="$(find crates/ordinary-wallet-plan/src -type f -name '*.rs' ! -name 'tests.rs' -print | sort)"
+plan_lexical_source="$(
+    python3 -c 'import importlib.util, pathlib; p = pathlib.Path("ci/check-ordinary-wallet-plan-surface.py"); s = importlib.util.spec_from_file_location("plan_surface", p); m = importlib.util.module_from_spec(s); s.loader.exec_module(m); print(m.strip_rust_comments(m.production_text()), end="")'
+)"
+if grep -En '^[[:space:]]*(test|doctest|doc)[[:space:]]*=[[:space:]]*false([[:space:]]|$)|^[[:space:]]*harness[[:space:]]*=|required-features[[:space:]]*=|\[\[test\]\]' crates/ordinary-wallet-plan/Cargo.toml; then
+    echo "ordinary-wallet plan Cargo test or documentation target was disabled" >&2
+    exit 1
+fi
+plan_crate_attributes="$(grep -h -E '^[[:space:]]*#!\[' $plan_sources)"
+expected_plan_crate_attributes='#![forbid(unsafe_code)]
+#![deny(missing_docs)]'
+if [ "$plan_crate_attributes" != "$expected_plan_crate_attributes" ]; then
+    echo "ordinary-wallet plan exact crate-level safety attributes changed" >&2
+    exit 1
+fi
+if printf '%s\n' "$plan_lexical_source" | grep -En '#[[:space:]]*\[[[:space:]]*path([[:space:]=\]])|(^|[^[:alnum:]_])unsafe([^[:alnum:]_]|$)'; then
+    echo "ordinary-wallet plan path attribute or unsafe syntax escaped its boundary" >&2
+    exit 1
+fi
+plan_module_count="$(
+    grep -h -E -c '^[[:space:]]*(pub([[:space:]]*\([^)]*\))?[[:space:]]+)?mod[[:space:]]+[[:alpha:]_][[:alnum:]_]*[[:space:]]*(;|\{)' $plan_sources |
+        awk '{ total += $1 } END { print total + 0 }'
+)"
+plan_module_hash="$(
+    sed -n '/^mod reader;/,/^mod tests;/p' crates/ordinary-wallet-plan/src/lib.rs |
+        python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'
+)"
+if [ "$plan_module_count" -ne 3 ] || [ "$plan_module_hash" != "9bf302755ec28c38c79a36f3f7945a47fe8d736d267b8373981852afa6949272" ]; then
+    echo "ordinary-wallet plan exact module declarations or attributes changed" >&2
+    exit 1
+fi
+plan_outer_attribute_hash="$(
+    grep -h -E '^[[:space:]]*#\[' $plan_sources |
+        python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'
+)"
+if [ "$plan_outer_attribute_hash" != "51ebc7d7bb8f19ef7c51c0f6614e23c4f950a3caaf8a652588206492ea2c02df" ]; then
+    echo "ordinary-wallet plan allowed outer attribute inventory changed" >&2
+    exit 1
+fi
+plan_trait_impl_count="$(
+    grep -h -E -c '^[[:space:]]*(unsafe[[:space:]]+)?impl.*[[:space:]]for[[:space:]]' $plan_sources |
+        awk '{ total += $1 } END { print total + 0 }'
+)"
+if [ "$plan_trait_impl_count" -ne 42 ] || grep -En '^[[:space:]]+impl[[:space:]<]' $plan_sources; then
+    echo "ordinary-wallet plan exact trait implementation syntax changed" >&2
+    exit 1
+fi
+if ! cargo rustc \
+        -p wasabi-liquid-native-ordinary-wallet-plan \
+        --lib \
+        --locked \
+        --offline \
+        -- \
+        --emit=dep-info=- >"$scratch/ordinary-wallet-plan.dep-info" 2>/dev/null
+then
+    echo "ordinary-wallet plan compiler source closure derivation failed" >&2
+    exit 1
+fi
+plan_compiled_sources="$(
+    python3 -c 'import pathlib, sys; root = pathlib.Path.cwd().resolve(); found = set(); lines = pathlib.Path(sys.argv[1]).read_text().splitlines();
+for line in lines:
+    if ":" not in line: continue
+    for token in line.split(":", 1)[1].split():
+        path = pathlib.Path(token); path = path if path.is_absolute() else root / path
+        if not path.exists(): continue
+        path = path.resolve()
+        try: found.add(path.relative_to(root).as_posix())
+        except ValueError: found.add(path.as_posix())
+print("\n".join(sorted(found)))' "$scratch/ordinary-wallet-plan.dep-info"
+)"
+expected_plan_compiled_sources='crates/ordinary-wallet-plan/src/lib.rs
+crates/ordinary-wallet-plan/src/reader.rs
+crates/ordinary-wallet-plan/src/writer.rs'
+if [ "$plan_compiled_sources" != "$expected_plan_compiled_sources" ]; then
+    echo "ordinary-wallet plan compiler source closure changed" >&2
+    exit 1
+fi
+if printf '%s\n' "$plan_lexical_source" | grep -En 'wasabi_liquid_native_output_opening|wasabi_liquid_native_ordinary_wallet_pset|open_prepared_selected_owned_inputs|SelectedOutputOpeningProvider|SecretKey|rand::|getrandom|std[[:space:]]*::[[:space:]]*(process|env|thread|fs|net|time)|no_mangle|export_name|extern[[:space:]]*"C"|include(_str|_bytes)?[[:space:]]*!|AddressParams::ELEMENTS|LiquidAddressProfile::ElementsDefault'; then
+    echo "ordinary-wallet plan source capability escaped its reviewed boundary" >&2
+    exit 1
+fi
+plan_function_macro_count="$(
+    printf '%s\n' "$plan_lexical_source" |
+        grep -Eo '(^|[^[:alnum:]_])[[:alpha:]_][[:alnum:]_]*[[:space:]]*![[:space:]]*(\(|\{|\[)' |
+        awk 'END { print NR + 0 }'
+)"
+plan_test_panic_count="$(
+    printf '%s\n' "$plan_lexical_source" |
+        grep -F -c 'panic!("test-only ordinary-wallet plan staging unwind");'
+)"
+plan_test_thread_local_count="$(
+    printf '%s\n' "$plan_lexical_source" |
+        grep -F -c 'thread_local! {'
+)"
+if [ "$plan_function_macro_count" -ne 9 ] || [ "$plan_test_thread_local_count" -ne 1 ] || [ "$plan_test_panic_count" -ne 1 ]; then
+    echo "ordinary-wallet plan function-like macro surface is not the exact test-only hook" >&2
+    exit 1
+fi
+if [ "$(printf '%s\n' "$plan_lexical_source" | grep -o 'wasabi_liquid_native_ordinary_pset' | awk 'END { print NR + 0 }')" -ne 1 ] ||
+    [ "$(printf '%s\n' "$plan_lexical_source" | grep -F -c 'use wasabi_liquid_native_ordinary_pset::{ConfidentialOutput, ExplicitFee};')" -ne 1 ] ||
+    [ "$(printf '%s\n' "$plan_lexical_source" | grep -o 'ConfidentialOutput' | awk 'END { print NR + 0 }')" -ne 6 ] ||
+    [ "$(printf '%s\n' "$plan_lexical_source" | grep -o 'ExplicitFee' | awk 'END { print NR + 0 }')" -ne 8 ] ||
+    [ "$(printf '%s\n' "$plan_lexical_source" | grep -F -c 'ConfidentialOutput::from_address')" -ne 2 ] ||
+    [ "$(printf '%s\n' "$plan_lexical_source" | grep -F -c 'ExplicitFee::new')" -ne 2 ]; then
+    echo "ordinary-wallet plan ordinary-pset exact API inventory changed" >&2
+    exit 1
+fi
+if printf '%s\n' "$plan_lexical_source" | grep -En '(^|[^[:alnum:]_])(prepare_ordinary_pset|SpendableInput|PreparedOrdinaryPset|BlindedOrdinaryPset|PsetConstructionError|OrdinaryPsetBlindingError|OrdinaryP2wpkhSigner|SignedOrdinaryPset|OrdinarySigningFailure|FinalizedOrdinaryTransaction|PartiallySignedTransaction|sign_and_finalize|serialize_for_broadcast|serialize_sensitive|as_pset|blind)([^[:alnum:]_]|$)'; then
+    echo "ordinary-wallet plan ordinary-pset capability escaped its boundary" >&2
+    exit 1
+fi
+for required_call in \
+    'prepare_selected_owned_inputs(' \
+    'SelectedOutputBatch::new(' \
+    'ConfidentialOutput::from_address(' \
+    'ExplicitFee::new(' \
+    'ConfidentialLiquidAddress::parse(' \
+    'preflight_frame(frame, expected_source_epoch)'
+do
+    expected_count=1
+    case "$required_call" in
+        'ConfidentialOutput::from_address('|\
+        'ExplicitFee::new('|\
+        'ConfidentialLiquidAddress::parse('|\
+        'preflight_frame(frame, expected_source_epoch)') expected_count=2 ;;
+    esac
+    if [ "$(grep -h -F -c "$required_call" $plan_sources | awk '{ total += $1 } END { print total + 0 }')" -ne "$expected_count" ]; then
+        echo "ordinary-wallet plan source call manifest mismatch" >&2
+        exit 1
+    fi
+done
+plan_preflight_source="$(
+    awk '
+        /^fn preflight_frame/ { capture = 1 }
+        /^fn parse_owned/ { capture = 0 }
+        capture { print }
+    ' crates/ordinary-wallet-plan/src/lib.rs
+)"
+if printf '%s\n' "$plan_preflight_source" | grep -En 'Vec|String|Address|AssetId|SelectedOutputBatch|prepare_selected_owned_inputs|deserialize|to_vec|with_capacity|\.reserve\(|\.reserve_exact\(|collect'; then
+    echo "ordinary-wallet plan structural preflight allocated or invoked semantics" >&2
+    exit 1
+fi
+plan_preflight_hash="$(
+    printf '%s\n' "$plan_preflight_source" |
+        python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'
+)"
+if [ "$plan_preflight_hash" != "483952c5fa1f9aea89585f317551c728513241c8800aeaf1fca4d0e534d6ea28" ]; then
+    echo "ordinary-wallet plan structural preflight source hash mismatch" >&2
+    exit 1
+fi
+if ! grep -Fq 'crate-type = ["rlib"]' crates/ordinary-wallet-plan/Cargo.toml ||
+    grep -Fq 'cdylib' crates/ordinary-wallet-plan/Cargo.toml; then
+    echo "ordinary-wallet plan crate type mismatch" >&2
     exit 1
 fi
 
@@ -518,13 +710,25 @@ $decoder_uniqueness_mir"
             --release \
             --locked \
             --offline
+        "$compiler_cargo_bin" build \
+            --quiet \
+            -p wasabi-liquid-native-ordinary-wallet-plan \
+            --lib \
+            --release \
+            --locked \
+            --offline
         target_directory="$(
             python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["target_directory"])' \
                 "$scratch/metadata.json"
         )"
         wire_archive="$target_directory/release/libwasabi_liquid_native_wallet_facts_wire.rlib"
+        plan_archive="$target_directory/release/libwasabi_liquid_native_ordinary_wallet_plan.rlib"
         if [ ! -f "$wire_archive" ]; then
             echo "wallet-facts wire release archive is missing" >&2
+            exit 1
+        fi
+        if [ ! -f "$plan_archive" ]; then
+            echo "ordinary-wallet plan release archive is missing" >&2
             exit 1
         fi
         if ! command -v ar >/dev/null 2>&1 || ! command -v nm >/dev/null 2>&1; then
@@ -559,11 +763,24 @@ $decoder_uniqueness_mir"
             echo "wallet-facts wire release archive exposes an unmangled global symbol" >&2
             exit 1
         fi
+        ar t "$plan_archive" >"$scratch/ordinary-wallet-plan.archive"
+        if ! grep -Eq '\.o$' "$scratch/ordinary-wallet-plan.archive"; then
+            echo "ordinary-wallet plan release archive has no object members" >&2
+            exit 1
+        fi
+        nm -g "$plan_archive" >"$scratch/ordinary-wallet-plan.symbols" 2>"$scratch/ordinary-wallet-plan.nm-stderr"
+        if ! "$symbol_checker" "$scratch/ordinary-wallet-plan.symbols"; then
+            echo "ordinary-wallet plan release archive exposes an unmangled global symbol" >&2
+            exit 1
+        fi
         if ! dynamic_artifacts="$(
             find "$target_directory/release" "$target_directory/debug" -type f \
                 \( -name 'libwasabi_liquid_native_wallet_facts_wire*.dylib' \
                 -o -name 'libwasabi_liquid_native_wallet_facts_wire*.so' \
-                -o -name 'wasabi_liquid_native_wallet_facts_wire*.dll' \) \
+                -o -name 'wasabi_liquid_native_wallet_facts_wire*.dll' \
+                -o -name 'libwasabi_liquid_native_ordinary_wallet_plan*.dylib' \
+                -o -name 'libwasabi_liquid_native_ordinary_wallet_plan*.so' \
+                -o -name 'wasabi_liquid_native_ordinary_wallet_plan*.dll' \) \
                 -print
         )"; then
             echo "wallet-facts wire dynamic-library artifact inspection failed" >&2
@@ -574,6 +791,56 @@ $decoder_uniqueness_mir"
             echo "wallet-facts wire dynamic-library artifact is forbidden" >&2
             exit 1
         fi
+        "$compiler_cargo_bin" check \
+            --workspace \
+            --all-targets \
+            --all-features \
+            --locked \
+            --offline
+        "$compiler_cargo_bin" check \
+            --workspace \
+            --all-targets \
+            --all-features \
+            --release \
+            --locked \
+            --offline
+        "$compiler_cargo_bin" test \
+            --workspace \
+            --all-targets \
+            --all-features \
+            --locked \
+            --offline
+        "$compiler_cargo_bin" test \
+            --workspace \
+            --all-targets \
+            --all-features \
+            --release \
+            --locked \
+            --offline
+        "$compiler_cargo_bin" test \
+            -p wasabi-liquid-native-ordinary-wallet-plan \
+            --locked \
+            --offline
+        "$compiler_cargo_bin" test \
+            -p wasabi-liquid-native-ordinary-wallet-plan \
+            --release \
+            --locked \
+            --offline
+        "$compiler_cargo_bin" fmt --all -- --check
+        "$compiler_cargo_bin" clippy \
+            --workspace \
+            --all-targets \
+            --all-features \
+            --locked \
+            --offline \
+            -- \
+            -D warnings
+        RUSTDOCFLAGS='-D warnings' "$compiler_cargo_bin" doc \
+            --workspace \
+            --no-deps \
+            --all-features \
+            --locked \
+            --offline
         "$compiler_cargo_bin" test \
             -p wasabi-liquid-native-wallet-facts-wire \
             --locked \

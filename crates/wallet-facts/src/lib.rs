@@ -173,11 +173,13 @@ impl Drop for CatalogScript {
 /// receives or retains blinding-key material.
 pub struct DescriptorCatalog {
     entries: BTreeMap<CatalogScript, CatalogEntry>,
+    network: DescriptorNetwork,
     last_index: u32,
 }
 
 impl Drop for DescriptorCatalog {
     fn drop(&mut self) {
+        self.network = DescriptorNetwork::Mainnet;
         self.last_index.zeroize();
     }
 }
@@ -268,8 +270,14 @@ impl DescriptorCatalog {
 
         Ok(Self {
             entries,
+            network: expected_network,
             last_index,
         })
+    }
+
+    /// Returns the extended-public-key network class retained by this catalog.
+    pub const fn network(&self) -> DescriptorNetwork {
+        self.network
     }
 
     /// Returns the inclusive maximum derivation index in this catalog.
