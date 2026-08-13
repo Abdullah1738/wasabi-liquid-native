@@ -1491,9 +1491,9 @@ done'''
         ('[ "$$" -ne 1 ]', 1),
         ('/usr/bin/readlink /proc/1/ns/pid', 1),
         ('/usr/bin/readlink /proc/self/ns/pid', 1),
-        ('/usr/bin/findmnt --noheadings --output FSTYPE --target /proc', 1),
+        ('/usr/bin/findmnt --first-only --noheadings --raw --output FSTYPE --target /proc', 1),
         ('NSpid:', 1),
-        ('/proc/1/status', 1),
+        ('/proc/1/status', 2),
         ('/usr/bin/mount --bind "$hidden_home" "$original_home"', 1),
         ('/usr/bin/mount --remount --bind --read-only "$mountpoint"', 1),
         ('/usr/bin/mount --remount --bind --rw "$writable"', 1),
@@ -1505,8 +1505,32 @@ done'''
     ):
         if linux_wrapper.count(token) != expected:
             raise AssertionError(f"sealed Linux boundary token is not exact: {token}")
+    linux_namespace_diagnostics = (
+        "sealed Linux PID-one namespace handle is unavailable",
+        "sealed Linux active PID namespace handle is unavailable",
+        "sealed Linux procfs PID namespace differs from the active namespace",
+        "sealed Linux proc filesystem type lookup failed",
+        "sealed Linux proc filesystem type is not proc",
+        "sealed Linux PID-one status is unavailable",
+        "sealed Linux PID-one namespace PID is not one",
+    )
+    if any(linux_wrapper.count(message) != 1 for message in linux_namespace_diagnostics):
+        raise AssertionError("sealed Linux namespace diagnostics are not exact")
+    for name, original, replacement in (
+        ("PID-one handle", "/usr/bin/readlink /proc/1/ns/pid", "/usr/bin/false"),
+        ("active handle", "/usr/bin/readlink /proc/self/ns/pid", "/usr/bin/false"),
+        ("namespace equality", '[ "$pid_one_namespace" != "$active_pid_namespace" ]', "false"),
+        ("first mount only", " --first-only", ""),
+        ("raw mount output", " --raw", ""),
+        ("proc type equality", '[ "$proc_filesystem_type" != proc ]', "false"),
+        ("PID-one readability", "[ ! -r /proc/1/status ]", "false"),
+        ("PID-one namespace PID", '$NF == "1"', '$NF == "2"'),
+    ):
+        mutated = linux_wrapper.replace(original, replacement, 1)
+        if mutated == linux_wrapper or original in mutated:
+            raise AssertionError(f"sealed Linux {name} mutation was accepted")
     linux_child_status = linux_wrapper.replace("/proc/1/status", "/proc/self/status", 1)
-    if linux_child_status == linux_wrapper or "/proc/1/status" in linux_child_status:
+    if linux_child_status == linux_wrapper or linux_child_status.count("/proc/1/status") != 1:
         raise AssertionError("sealed Linux PID-one status mutation was accepted")
     darwin_wrapper = (ROOT / "ci/run-sealed-darwin-command.sh").read_text(encoding="utf-8")
     for token in (

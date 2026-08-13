@@ -45,10 +45,32 @@ case "$build_uid" in *[!0-9]*|'') exit 1 ;; esac
 for path in "$original_home" "$hidden_home" "$build_home" "$build_tmp" "$cargo_home" "$target_dir" "$trusted_bin" "$original_cargo_home" "$host_write_target" "$var_tmp_target" "$delayed_write_target"; do
     case "$path" in /*) ;; *) exit 1 ;; esac
 done
-if [ "$(/usr/bin/readlink /proc/1/ns/pid)" != "$(/usr/bin/readlink /proc/self/ns/pid)" ] ||
-    [ "$(/usr/bin/findmnt --noheadings --output FSTYPE --target /proc | /usr/bin/tr -d ' ')" != proc ] ||
-    ! /usr/bin/awk '$1 == "NSpid:" && $NF == "1" { accepted = 1 } END { exit !accepted }' /proc/1/status; then
-    echo "sealed Linux command lacks a private PID namespace and procfs" >&2
+if ! pid_one_namespace="$(/usr/bin/readlink /proc/1/ns/pid)"; then
+    echo "sealed Linux PID-one namespace handle is unavailable" >&2
+    exit 1
+fi
+if ! active_pid_namespace="$(/usr/bin/readlink /proc/self/ns/pid)"; then
+    echo "sealed Linux active PID namespace handle is unavailable" >&2
+    exit 1
+fi
+if [ "$pid_one_namespace" != "$active_pid_namespace" ]; then
+    echo "sealed Linux procfs PID namespace differs from the active namespace" >&2
+    exit 1
+fi
+if ! proc_filesystem_type="$(/usr/bin/findmnt --first-only --noheadings --raw --output FSTYPE --target /proc)"; then
+    echo "sealed Linux proc filesystem type lookup failed" >&2
+    exit 1
+fi
+if [ "$proc_filesystem_type" != proc ]; then
+    echo "sealed Linux proc filesystem type is not proc" >&2
+    exit 1
+fi
+if [ ! -r /proc/1/status ]; then
+    echo "sealed Linux PID-one status is unavailable" >&2
+    exit 1
+fi
+if ! /usr/bin/awk '$1 == "NSpid:" && $NF == "1" { accepted = 1 } END { exit !accepted }' /proc/1/status; then
+    echo "sealed Linux PID-one namespace PID is not one" >&2
     exit 1
 fi
 /usr/bin/mount --bind "$hidden_home" "$original_home"
