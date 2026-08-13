@@ -78,7 +78,7 @@ fi
 # Make the complete inherited VFS mount tree read-only without resolving stale
 # or covered nested mountpoint names. Kernel mountinfo is then the authority
 # that recursive semantics were applied to every record.
-/usr/bin/mount -o remount,ro=recursive /
+/usr/bin/mount -o remount,bind,ro=recursive /
 if ! /usr/bin/awk '
 function has_option(options, wanted, count, index, fields) {
     count = split(options, fields, ",")

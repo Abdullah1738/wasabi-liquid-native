@@ -1588,7 +1588,7 @@ done'''
         ('NSpid:', 1),
         ('/proc/1/status', 2),
         ('/usr/bin/mount --bind "$hidden_home" "$original_home"', 1),
-        ('/usr/bin/mount -o remount,ro=recursive /', 1),
+        ('/usr/bin/mount -o remount,bind,ro=recursive /', 1),
         ('/proc/self/mountinfo', 2),
         ('sealed Linux recursive read-only mount transition is incomplete', 1),
         ('sealed Linux writable mount inventory differs from the exact build roots', 1),
@@ -1601,7 +1601,7 @@ done'''
     ):
         if linux_wrapper.count(token) != expected:
             raise AssertionError(f"sealed Linux boundary token is not exact: {token}")
-    linux_recursive_read_only = '/usr/bin/mount -o remount,ro=recursive /'
+    linux_recursive_read_only = '/usr/bin/mount -o remount,bind,ro=recursive /'
     linux_all_read_only_audit = '''if ! /usr/bin/awk '
 function has_option(options, wanted, count, index, fields) {
     count = split(options, fields, ",")
@@ -1670,8 +1670,9 @@ fi'''
             'for mountpoint in $mountpoints',
             'remount,bind,ro "$mountpoint"',
             'remount,rw=recursive',
-            'remount,ro /',
-            'remount,ro=recursive / || :',
+            'remount,bind,ro /',
+            'remount,ro=recursive /',
+            'remount,bind,ro=recursive / || :',
         )
         if any(token in candidate for token in forbidden):
             return False
@@ -1690,6 +1691,7 @@ fi'''
         "missing recursive transition": linux_wrapper.replace(linux_recursive_read_only, "", 1),
         "writable recursive transition": linux_wrapper.replace("ro=recursive", "rw=recursive", 1),
         "nonrecursive transition": linux_wrapper.replace("ro=recursive", "ro", 1),
+        "filesystem-remount transition": linux_wrapper.replace("remount,bind", "remount", 1),
         "non-root transition": linux_wrapper.replace("ro=recursive /", 'ro=recursive "$original_home"', 1),
         "ignored recursive failure": linux_wrapper.replace(
             linux_recursive_read_only, linux_recursive_read_only + " || :", 1
