@@ -106,6 +106,18 @@ def expect_snapshot_error(preparer, operation, message: str) -> None:
     raise AssertionError(message)
 
 
+def expect_snapshot_error_message(preparer, operation, expected: str) -> None:
+    try:
+        operation()
+    except preparer.SnapshotError as error:
+        if str(error) != expected:
+            raise AssertionError(
+                f"snapshot rejection differed: {str(error)!r} != {expected!r}"
+            ) from error
+        return
+    raise AssertionError(f"snapshot operation unexpectedly succeeded: {expected}")
+
+
 def archive_with_member(member: tarfile.TarInfo, data: bytes = b"") -> bytes:
     output = io.BytesIO()
     with tarfile.open(fileobj=output, mode="w:gz") as archive:
@@ -445,6 +457,50 @@ def main() -> int:
             ),
             "Git checkout configuration mutation before sealing was accepted",
         )
+
+        checkout_git = next(
+            materialized_cargo_home.glob("git/checkouts/*/*/.git")
+        )
+        checkout = checkout_git.parent
+        database_name = checkout.parent.name
+        database = materialized_cargo_home / "git/db" / database_name
+        commit = next(
+            pinned_commit
+            for pinned_database, pinned_commit in preparer.GIT_DATABASES.values()
+            if pinned_database == database_name
+        )
+        checkout_description = checkout_git / "description"
+        os.chmod(checkout_description, 0o600)
+        try:
+            expect_snapshot_error_message(
+                preparer,
+                lambda: preparer.validate_checkout_git_metadata(
+                    checkout, database, commit
+                ),
+                "Git checkout private metadata mode differs from exact authority: "
+                "path_utf8_hex=6465736372697074696f6e is 0o600, expected 0o644",
+            )
+        finally:
+            os.chmod(checkout_description, 0o644)
+
+        unsafe_hook_relative = Path(
+            "hooks/line\n::error title=spoofed::message\x1b.sample"
+        )
+        unsafe_hook = checkout_git / unsafe_hook_relative
+        unsafe_hook.write_bytes(b"untrusted diagnostic path")
+        os.chmod(unsafe_hook, 0o600)
+        try:
+            expect_snapshot_error_message(
+                preparer,
+                lambda: preparer.validate_checkout_git_metadata(
+                    checkout, database, commit
+                ),
+                "Git checkout private metadata mode differs from exact authority: "
+                f"path_utf8_hex={unsafe_hook_relative.as_posix().encode('utf-8').hex()} "
+                "is 0o600, expected 0o755",
+            )
+        finally:
+            unsafe_hook.unlink()
 
         for name, source_path in (
             ("registry", materialized_registry_file),

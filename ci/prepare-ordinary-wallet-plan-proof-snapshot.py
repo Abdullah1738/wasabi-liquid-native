@@ -831,7 +831,12 @@ def validate_checkout_git_metadata(
         else:
             reject("Git checkout contains unreviewed private metadata")
         if mode != expected_mode:
-            reject("Git checkout private metadata mode differs from exact authority")
+            path_utf8_hex = relative.as_posix().encode("utf-8").hex()
+            reject(
+                "Git checkout private metadata mode differs from exact authority: "
+                f"path_utf8_hex={path_utf8_hex} is {mode:#05o}, "
+                f"expected {expected_mode:#05o}"
+            )
 
 
 def copy_git_workspace_snapshot(
