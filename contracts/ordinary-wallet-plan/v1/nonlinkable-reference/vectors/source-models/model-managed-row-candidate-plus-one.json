@@ -1,0 +1,1 @@
+{"operations":[{"op":"set-bytes","path":"row.candidate","value":{"byte_hex":"00","kind":"repeat","length":4194305}}],"root":{"frame_id":"frame-test-public-valid","kind":"funding-row-from-frame","selected_index":0},"schema":"wlpq-source-object-v1"}

@@ -25,6 +25,7 @@ members = [
     "crates/wallet-facts",
     "crates/wallet-facts-wire",
 ]
+exclude = ["tools/ordinary-wallet-plan-public-proof-verifier"]
 default-members = [
     ".",
     "crates/address",

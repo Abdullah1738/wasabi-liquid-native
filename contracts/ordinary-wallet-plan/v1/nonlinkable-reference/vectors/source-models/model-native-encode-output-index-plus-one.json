@@ -1,0 +1,1 @@
+{"operations":[{"op":"set-u64","path":"request.selected[0].vout","value":1073741824}],"root":{"frame_id":"frame-test-public-valid","kind":"request-from-frame"},"schema":"wlpq-source-object-v1"}

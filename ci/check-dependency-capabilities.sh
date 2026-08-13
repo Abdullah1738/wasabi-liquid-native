@@ -1,15 +1,610 @@
 #!/bin/sh
 set -eu
 
-cargo_bin="${CARGO:-cargo}"
-repository_root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)"
-if [ "$(pwd -P)" != "$repository_root" ]; then
+# The CI workflow supplies loader isolation by launching this gate through a
+# minimal environment. Direct local invocation is not loader-isolated; its
+# already-loaded shell remains part of the ambient trust base. The gate still
+# rejects common loader overrides before launching further child tools.
+PATH=/usr/bin:/bin
+export PATH
+
+repository_root="$(/bin/pwd -P)"
+if [ ! -f ci/check-dependency-capabilities.sh ]; then
     echo "dependency capability gate must run from the repository root" >&2
     exit 1
 fi
+if env | grep -Eiq '^(CARGO(=|_)|RUSTC(=|_)|RUSTDOC(=|_)|RUSTFMT(=|_)|RUSTFLAGS=|RUSTDOCFLAGS=|RUSTUP_(HOME|TOOLCHAIN)=|PYTHON(=|_)|VIRTUAL_ENV=|PERL5(OPT|LIB)=|BASH_ENV=|ENV=|CDPATH=|SHELLOPTS=|BASHOPTS=|MAKEFLAGS=|MFLAGS=|MAKELEVEL=|GIT_(CONFIG|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|WORK_TREE|DIR|CEILING_DIRECTORIES)(=|_)|GIT_ASKPASS=|SSH_(ASKPASS|AUTH_SOCK|AGENT_PID)=|(HTTP|HTTPS|ALL|NO)_PROXY=|[A-Z0-9_]*(TOKEN|SECRET|PASSWORD|PASSPHRASE|PRIVATE_KEY|API_KEY)[A-Z0-9_]*=|AWS_[A-Z0-9_]+=|HOST=|TARGET=|((HOST|TARGET)_)?(CC|CXX|AR|ARFLAGS|RANLIB|RANLIBFLAGS|CFLAGS|CXXFLAGS|CPPFLAGS|LDFLAGS)(=|_)|[A-Z0-9_]+_(CC|CXX|AR|ARFLAGS|RANLIB|RANLIBFLAGS|LINKER|RUSTFLAGS|CFLAGS|CXXFLAGS|CPPFLAGS|LDFLAGS)=|COMPILER_PATH=|GCC_EXEC_PREFIX=|CPATH=|C_INCLUDE_PATH=|CPLUS_INCLUDE_PATH=|OBJC_INCLUDE_PATH=|LIBRARY_PATH=|LD_RUN_PATH=|LD_(LIBRARY_PATH|PRELOAD|AUDIT|DEBUG|PROFILE|USE_LOAD_BIAS|BIND_NOW|ORIGIN_PATH)=|DYLD_[A-Z0-9_]+=|DEPENDENCIES_OUTPUT=|SUNPRO_DEPENDENCIES=|CCC_OVERRIDE_OPTIONS=|CCC_PRINT_OPTIONS=|CCC_PRINT_BINDINGS=|CLANG_CONFIG_FILE_(SYSTEM|USER)_DIR=|CLANG_NO_DEFAULT_CONFIG=|MACOSX_DEPLOYMENT_TARGET=|DEVELOPER_DIR=|SDKROOT=|CRATE_CC_NO_DEFAULTS=|CC_SHELL_ESCAPED_FLAGS=)'; then
+    echo "compiler or Cargo execution environment contains an unreviewed override" >&2
+    exit 1
+fi
+host_system="$(/usr/bin/uname -s)"
+case "$host_system" in
+    Darwin) python_bin=/opt/homebrew/bin/python3; chown_bin=/usr/sbin/chown ;;
+    Linux) python_bin=/usr/bin/python3; chown_bin=/usr/bin/chown ;;
+    *) echo "unsupported compiler host" >&2; exit 1 ;;
+esac
+if [ ! -x "$python_bin" ]; then
+    echo "reviewed Python interpreter path is unavailable" >&2
+    exit 1
+fi
+"$python_bin" -I ci/check-ordinary-wallet-plan-public-proof-surface.py "$repository_root"
+"$python_bin" -I ci/check-cargo-fetch-preflight.py "$repository_root"
+if ! compiler_toolchain_root="$("$python_bin" -I ci/check-pinned-rust-toolchain.py "${HOME:?}")"; then
+    echo "dependency compiler and artifact gates require Cargo 1.96.0" >&2
+    exit 1
+fi
+compiler_cargo_bin="$compiler_toolchain_root/bin/cargo"
+compiler_rustc_bin="$compiler_toolchain_root/bin/rustc"
+compiler_rustdoc_bin="$compiler_toolchain_root/bin/rustdoc"
+compiler_rustfmt_bin="$compiler_toolchain_root/bin/rustfmt"
+cargo_bin="$compiler_cargo_bin"
+original_home="${HOME:?}"
+scratch="$(/usr/bin/mktemp -d "/tmp/wasabi-liquid-dependency-gate.XXXXXX")"
+scratch="$(cd "$scratch" && pwd -P)"
+proof_snapshot="$scratch/ordinary-wallet-plan-public-proof-snapshot"
+build_user=
+build_uid=
+var_tmp_target=
+darwin_account_lock=/var/tmp/wasabi-liquid-wlpq-account.lock
+darwin_account_marker=
+darwin_account_marker_value=
+TMPDIR=/tmp
+export TMPDIR
+darwin_account_matches() {
+    [ -n "$build_user" ] && [ -n "$build_uid" ] &&
+        [ "$(/usr/bin/sudo -n /usr/bin/dscl . -read "/Users/$build_user" RecordName 2>/dev/null)" = "RecordName: $build_user" ] &&
+        [ "$(/usr/bin/sudo -n /usr/bin/dscl . -read "/Users/$build_user" UniqueID 2>/dev/null)" = "UniqueID: $build_uid" ] &&
+        [ "$(/usr/bin/sudo -n /usr/bin/dscl . -read "/Users/$build_user" PrimaryGroupID 2>/dev/null)" = "PrimaryGroupID: 20" ] &&
+        [ "$(/usr/bin/sudo -n /usr/bin/dscl . -read "/Users/$build_user" NFSHomeDirectory 2>/dev/null)" = "NFSHomeDirectory: $scratch/build-home" ] &&
+        [ "$(/usr/bin/sudo -n /usr/bin/dscl . -read "/Users/$build_user" UserShell 2>/dev/null)" = "UserShell: /usr/bin/false" ]
+}
+darwin_marker_matches() {
+    [ -n "$darwin_account_marker" ] &&
+        [ -n "$darwin_account_marker_value" ] &&
+        [ "$(/usr/bin/sudo -n /usr/bin/stat -f '%u:%Lp' "$darwin_account_marker" 2>/dev/null)" = "0:400" ] &&
+        [ "$(/usr/bin/sudo -n /bin/cat "$darwin_account_marker" 2>/dev/null)" = "$darwin_account_marker_value" ]
+}
+cleanup() {
+    if [ "$host_system" = Darwin ] && [ -n "$darwin_account_marker" ]; then
+        if darwin_marker_matches; then
+            if /usr/bin/sudo -n /usr/bin/dscl . -read "/Users/$build_user" >/dev/null 2>&1; then
+                if darwin_account_matches; then
+                    /usr/bin/sudo -n /usr/bin/pkill -TERM -u "$build_uid" 2>/dev/null || :
+                    /bin/sleep 1
+                    /usr/bin/sudo -n /usr/bin/pkill -KILL -u "$build_uid" 2>/dev/null || :
+                    if /usr/bin/sudo -n /usr/bin/pgrep -u "$build_uid" >/dev/null 2>&1; then
+                        echo "refusing Darwin account cleanup while exact UID still owns a process" >&2
+                    else
+                        /usr/bin/sudo -n /usr/bin/dscl . -delete "/Users/$build_user"
+                    fi
+                else
+                    echo "refusing Darwin account cleanup after account attributes changed" >&2
+                fi
+            fi
+            if ! /usr/bin/sudo -n /usr/bin/dscl . -read "/Users/$build_user" >/dev/null 2>&1; then
+                /usr/bin/sudo -n /bin/rm "$darwin_account_marker"
+                /usr/bin/sudo -n /bin/rmdir "$darwin_account_lock"
+            fi
+        else
+            echo "refusing Darwin account cleanup after lock marker changed" >&2
+        fi
+    fi
+    if [ -n "$var_tmp_target" ]; then
+        /usr/bin/sudo -n /bin/rm -f "$var_tmp_target" 2>/dev/null || :
+    fi
+    if [ -d "$scratch" ]; then
+        /usr/bin/sudo -n "$chown_bin" -R "$(/usr/bin/id -u)" "$scratch" 2>/dev/null || :
+        chmod -R u+w "$scratch" 2>/dev/null || :
+    fi
+    rm -rf "$scratch"
+}
+trap cleanup EXIT HUP INT TERM
+if ! /usr/bin/sudo -n true; then
+    echo "distinct-owner build boundary requires noninteractive sudo" >&2
+    exit 1
+fi
+trusted_bin="$scratch/trusted-bin"
+/bin/mkdir "$trusted_bin"
+link_trusted_tool() {
+    trusted_name=$1
+    trusted_target=$2
+    if [ ! -x "$trusted_target" ]; then
+        echo "required trusted tool is unavailable: $trusted_target" >&2
+        exit 1
+    fi
+    /bin/ln -s "$trusted_target" "$trusted_bin/$trusted_name"
+}
+link_system_tool() {
+    system_name=$1
+    if [ -x "/usr/bin/$system_name" ]; then
+        link_trusted_tool "$system_name" "/usr/bin/$system_name"
+    elif [ -x "/bin/$system_name" ]; then
+        link_trusted_tool "$system_name" "/bin/$system_name"
+    else
+        echo "required system tool is unavailable: $system_name" >&2
+        exit 1
+    fi
+}
+link_trusted_tool python3 "$python_bin"
+link_trusted_tool cargo "$compiler_cargo_bin"
+link_trusted_tool rustc "$compiler_rustc_bin"
+link_trusted_tool rustdoc "$compiler_rustdoc_bin"
+link_trusted_tool rustfmt "$compiler_rustfmt_bin"
+link_trusted_tool cargo-fmt "$compiler_toolchain_root/bin/cargo-fmt"
+link_trusted_tool cargo-clippy "$compiler_toolchain_root/bin/cargo-clippy"
+link_trusted_tool clippy-driver "$compiler_toolchain_root/bin/clippy-driver"
+for system_name in ar as awk bash cat cc c++ chmod diff env find git grep head id ld make mkdir mktemp nm perl ranlib rm sed sh sort strip tr uname wc; do
+    link_system_tool "$system_name"
+done
+if [ "$host_system" = Darwin ]; then
+    link_system_tool xcrun
+fi
+PATH="$trusted_bin"
+export PATH
+python3 -I ci/test-ordinary-wallet-plan-public-proof-surface.py
+python3 -I ci/test-ordinary-wallet-plan-proof-snapshot.py
+python3 -I ci/test-pinned-rust-toolchain.py
+python3 -I ci/test-cargo-fetch-preflight.py
+python3 -I ci/test-sealed-rust-command-bin.py
+python3 -I ci/test-sealed-tree-readable.py
+python3 -I ci/test-cargo-credential-provider.py
+source_cargo_home="$scratch/source-cargo-home"
+proof_authority_cargo_home="$scratch/proof-authority-cargo-home"
+workspace_authority_cargo_home="$scratch/workspace-authority-cargo-home"
+proof_materialized_cargo_home="$scratch/proof-materialized-cargo-home"
+workspace_materialized_cargo_home="$scratch/workspace-materialized-cargo-home"
+proof_cargo_home="$scratch/proof-final-cargo-home"
+workspace_cargo_home="$scratch/workspace-final-cargo-home"
+proof_cache_authority="$scratch/proof-cache-authority.jsonl"
+workspace_cache_authority="$scratch/workspace-cache-authority.jsonl"
+proof_lock_sha256=4ca45ca0dd27b2a545b0d93174e02487cc756b26a34d946de5dcb349ceea7aab
+workspace_lock_sha256=f5e471c6a9664d29e8c30ea44b0c6934d3be98c00d87d5ea45cb5843b717adde
+python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py \
+    --snapshot-only \
+    "$repository_root" \
+    "$proof_snapshot"
+proof_snapshot_authority="$scratch/proof-snapshot-authority.jsonl"
+proof_snapshot_authority_sha256="$(
+    python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py \
+        --seal-tree \
+        "$proof_snapshot" \
+        "$proof_snapshot_authority"
+)"
+repository_head="$(/usr/bin/git rev-parse HEAD)"
+sealed_workspace="$scratch/sealed-workspace"
+sealed_workspace_authority="$scratch/sealed-workspace-authority.jsonl"
+python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py \
+    --workspace-snapshot \
+    "$repository_root" \
+    "$sealed_workspace" \
+    /usr/bin/git \
+    "$repository_head"
+sealed_workspace_authority_sha256="$(
+    python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py \
+        --seal-tree \
+        "$sealed_workspace" \
+        "$sealed_workspace_authority"
+)"
+
+# Fetch only after all tracked, proof-surface, and toolchain preflights have
+# passed. Both closures use an empty Cargo home, a non-checkout HOME, null Git
+# configuration, and absolute snapshot manifests from the filesystem root.
+for root_cargo_config in /.cargo/config /.cargo/config.toml; do
+    if [ -e "$root_cargo_config" ] || [ -L "$root_cargo_config" ]; then
+        echo "Cargo configuration exists above snapshot fetch manifest: $root_cargo_config" >&2
+        exit 1
+    fi
+done
+fetch_home="$scratch/fetch-home"
+fetch_tmp="$scratch/fetch-tmp"
+credential_sentinel="$scratch/external-credential-provider-ran"
+credential_provider="$scratch/external-credential-provider"
+credential_home="$scratch/credential-positive-home"
+credential_cargo_home="$scratch/credential-positive-cargo-home"
+credential_registry="$scratch/credential-positive-registry"
+/bin/mkdir "$source_cargo_home" "$fetch_home" "$fetch_tmp" "$credential_home" "$credential_cargo_home" "$credential_registry"
+python3 -I ci/prepare-cargo-credential-provider.py "$credential_provider" "$credential_sentinel"
+printf '%s\n' '{"dl":"https://example.invalid/{crate}/{version}/download","api":"https://example.invalid"}' >"$credential_registry/config.json"
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+    /usr/bin/git -C "$credential_registry" init --quiet
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+    /usr/bin/git -C "$credential_registry" -c user.name=wlpq -c user.email=wlpq@invalid add config.json
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+    /usr/bin/git -C "$credential_registry" -c user.name=wlpq -c user.email=wlpq@invalid commit --quiet -m initial
+printf '%s\n' \
+    '[credential-alias]' \
+    "external = [\"$credential_provider\"]" \
+    '[registries.wlpq-positive]' \
+    "index = \"file://$credential_registry\"" \
+    'credential-provider = ["external"]' >"$credential_cargo_home/config.toml"
+printf %s wlpq-positive-control | /usr/bin/env -i \
+    HOME="$credential_home" TMPDIR="$fetch_tmp" PATH="$trusted_bin" \
+    CARGO_HOME="$credential_cargo_home" \
+    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+    "$compiler_cargo_bin" login --registry wlpq-positive
+if [ "$(cat "$credential_sentinel")" != provider-ran ]; then
+    echo "external credential provider positive control did not activate" >&2
+    exit 1
+fi
+/bin/rm "$credential_sentinel"
+(
+    cd /
+    /usr/bin/env -i HOME="$fetch_home" TMPDIR="$fetch_tmp" PATH="$trusted_bin" \
+            CARGO_HOME="$source_cargo_home" CARGO_NET_GIT_FETCH_WITH_CLI=true \
+            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+            GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false SSH_ASKPASS=/usr/bin/false \
+            "$compiler_cargo_bin" fetch \
+                --manifest-path "$sealed_workspace/Cargo.toml" \
+                --locked
+    /usr/bin/env -i HOME="$fetch_home" TMPDIR="$fetch_tmp" PATH="$trusted_bin" \
+            CARGO_HOME="$source_cargo_home" CARGO_NET_GIT_FETCH_WITH_CLI=true \
+            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+            GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false SSH_ASKPASS=/usr/bin/false \
+            "$compiler_cargo_bin" fetch \
+                --manifest-path "$proof_snapshot/Cargo.toml" \
+                --locked
+)
+if [ -e "$credential_sentinel" ]; then
+    echo "external credential provider escaped isolated Cargo fetch" >&2
+    exit 1
+fi
+python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py \
+    --copy-cache \
+    "$source_cargo_home" \
+    "$proof_authority_cargo_home" \
+    "$proof_snapshot/Cargo.lock" \
+    "$proof_lock_sha256"
+python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py \
+    --workspace-cache \
+    "$sealed_workspace" \
+    "$source_cargo_home" \
+    "$workspace_authority_cargo_home"
+python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py \
+    --copy-cache \
+    "$proof_authority_cargo_home" \
+    "$proof_materialized_cargo_home" \
+    "$proof_snapshot/Cargo.lock" \
+    "$proof_lock_sha256"
+python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py \
+    --copy-cache \
+    "$workspace_authority_cargo_home" \
+    "$workspace_materialized_cargo_home" \
+    "$sealed_workspace/Cargo.lock" \
+    "$workspace_lock_sha256"
+CARGO_HOME="$proof_materialized_cargo_home" CARGO_TARGET_DIR="$scratch/proof-materialize-target" \
+    "$compiler_cargo_bin" metadata \
+        --manifest-path "$proof_snapshot/Cargo.toml" \
+        --locked \
+        --offline \
+        --format-version 1 >/dev/null
+CARGO_HOME="$workspace_materialized_cargo_home" CARGO_TARGET_DIR="$scratch/workspace-materialize-target" \
+    "$compiler_cargo_bin" metadata \
+        --manifest-path "$sealed_workspace/Cargo.toml" \
+        --locked \
+        --offline \
+        --format-version 1 >/dev/null
+proof_cache_authority_sha256="$(
+    python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py \
+        --finalize-cache \
+        "$proof_authority_cargo_home" \
+        "$proof_materialized_cargo_home" \
+        "$proof_cargo_home" \
+        "$proof_cache_authority" \
+        "$proof_snapshot/Cargo.lock" \
+        /usr/bin/git \
+        "$proof_lock_sha256"
+)"
+workspace_cache_authority_sha256="$(
+    python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py \
+        --finalize-cache \
+        "$workspace_authority_cargo_home" \
+        "$workspace_materialized_cargo_home" \
+        "$workspace_cargo_home" \
+        "$workspace_cache_authority" \
+        "$sealed_workspace/Cargo.lock" \
+        /usr/bin/git \
+        "$workspace_lock_sha256"
+)"
+sealed_toolchain="$scratch/sealed-toolchain"
+python3 -I ci/check-pinned-rust-toolchain.py \
+    --construct-toolchain \
+    "$compiler_toolchain_root" \
+    "$sealed_toolchain" >/dev/null
+python3 -I ci/check-pinned-rust-toolchain.py --toolchain-root "$sealed_toolchain" >/dev/null
+case "$("$sealed_toolchain/bin/cargo" --version --verbose)" in
+    cargo\ 1.96.0\ *30a34c6821b57de0aaec83a901aca39f88f6778c*) ;;
+    *) echo "copied Cargo version or commit mismatch" >&2; exit 1 ;;
+esac
+case "$("$sealed_toolchain/bin/rustc" --version --verbose)" in
+    *commit-hash:\ ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96*release:\ 1.96.0*) ;;
+    *) echo "copied Rust compiler version or commit mismatch" >&2; exit 1 ;;
+esac
+case "$("$sealed_toolchain/bin/rustdoc" --version)" in rustdoc\ 1.96.0\ *) ;; *) exit 1 ;; esac
+case "$("$sealed_toolchain/bin/rustfmt" --version)" in rustfmt\ 1.9.0-stable\ *) ;; *) exit 1 ;; esac
+sealed_command_bin="$scratch/sealed-rust-command-bin"
+/bin/mkdir "$sealed_command_bin"
+for command in cargo-fmt cargo-clippy clippy-driver; do
+    /bin/ln -s "$sealed_toolchain/bin/$command" "$sealed_command_bin/$command"
+done
+/bin/chmod 0555 "$sealed_command_bin"
+sealed_toolchain_authority="$scratch/sealed-toolchain-authority.jsonl"
+sealed_toolchain_authority_sha256="$(
+    python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py \
+        --seal-tree \
+        "$sealed_toolchain" \
+        "$sealed_toolchain_authority"
+)"
+sealed_probe="$scratch/sealed-build-boundary-probe"
+sealed_probe_authority="$scratch/sealed-build-boundary-probe-authority.jsonl"
+python3 -I ci/prepare-sealed-build-boundary-probe.py "$sealed_probe"
+sealed_probe_authority_sha256="$(
+    python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py \
+        --seal-tree \
+        "$sealed_probe" \
+        "$sealed_probe_authority"
+)"
+case "$host_system" in
+    Darwin)
+        if ! /usr/bin/sudo -n /bin/mkdir "$darwin_account_lock"; then
+            echo "Darwin account lifecycle lock already exists; stale and concurrent locks fail closed" >&2
+            exit 1
+        fi
+        /usr/bin/sudo -n "$chown_bin" 0 "$darwin_account_lock"
+        /usr/bin/sudo -n /bin/chmod 0700 "$darwin_account_lock"
+        if [ "$(/usr/bin/sudo -n /usr/bin/stat -f '%u:%Lp' "$darwin_account_lock")" != "0:700" ]; then
+            echo "Darwin account lifecycle lock attributes differ" >&2
+            exit 1
+        fi
+        build_nonce="$(printf '%s' "$scratch:$$" | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:20])')"
+        build_user="wlpq$build_nonce"
+        case "$build_user" in *[!a-z0-9]*|'') echo "Darwin build account name is noncanonical" >&2; exit 1 ;; esac
+        if /usr/bin/sudo -n /usr/bin/dscl . -read "/Users/$build_user" >/dev/null 2>&1; then
+            echo "collision-resistant Darwin build account name already exists" >&2
+            exit 1
+        fi
+        build_uid=550
+        while /usr/bin/sudo -n /usr/bin/dscl . -search /Users UniqueID "$build_uid" 2>/dev/null | /usr/bin/grep -q . ||
+            /usr/bin/sudo -n /usr/bin/pgrep -u "$build_uid" >/dev/null 2>&1; do
+            build_uid=$((build_uid + 1))
+            [ "$build_uid" -le 649 ] || { echo "ephemeral build UID range is exhausted" >&2; exit 1; }
+        done
+        if /usr/bin/sudo -n /usr/bin/dscl . -search /Users UniqueID "$build_uid" 2>/dev/null | /usr/bin/grep -q . ||
+            /usr/bin/sudo -n /usr/bin/pgrep -u "$build_uid" >/dev/null 2>&1; then
+            echo "Darwin build UID is not exactly absent and process-free" >&2
+            exit 1
+        fi
+        darwin_account_marker="$darwin_account_lock/owner"
+        darwin_account_marker_value="$build_user:$build_uid:$scratch/build-home:/usr/bin/false:20:$build_nonce"
+        printf '%s\n' "$darwin_account_marker_value" | /usr/bin/sudo -n /usr/bin/tee "$darwin_account_marker" >/dev/null
+        /usr/bin/sudo -n "$chown_bin" 0 "$darwin_account_marker"
+        /usr/bin/sudo -n /bin/chmod 0400 "$darwin_account_marker"
+        darwin_marker_matches || { echo "Darwin account lifecycle marker differs" >&2; exit 1; }
+        /usr/bin/sudo -n /usr/bin/dscl . -create "/Users/$build_user"
+        /usr/bin/sudo -n /usr/bin/dscl . -create "/Users/$build_user" UniqueID "$build_uid"
+        /usr/bin/sudo -n /usr/bin/dscl . -create "/Users/$build_user" PrimaryGroupID 20
+        /usr/bin/sudo -n /usr/bin/dscl . -create "/Users/$build_user" NFSHomeDirectory "$scratch/build-home"
+        /usr/bin/sudo -n /usr/bin/dscl . -create "/Users/$build_user" UserShell /usr/bin/false
+        /usr/bin/sudo -n /usr/bin/dscl . -create "/Users/$build_user" Password '*'
+        darwin_account_matches || { echo "Darwin build account attributes differ after creation" >&2; exit 1; }
+        if /usr/bin/sudo -n /usr/bin/pgrep -u "$build_uid" >/dev/null 2>&1; then
+            echo "Darwin build UID gained a process before command execution" >&2
+            exit 1
+        fi
+        ;;
+    Linux)
+        build_user=nobody
+        build_uid="$(/usr/bin/id -u "$build_user")"
+        ;;
+esac
+case "$build_uid" in *[!0-9]*|'') echo "dedicated unprivileged build UID is unavailable" >&2; exit 1 ;; esac
+if /usr/bin/sudo -n -u "$build_user" /usr/bin/sudo -n true >/dev/null 2>&1; then
+    echo "unprivileged build identity unexpectedly has sudo authority" >&2
+    exit 1
+fi
+for sealed in \
+    "$proof_snapshot" "$proof_snapshot_authority" \
+    "$proof_cargo_home" "$proof_cache_authority" \
+    "$workspace_cargo_home" "$workspace_cache_authority" \
+    "$sealed_workspace" "$sealed_workspace_authority" \
+    "$sealed_toolchain" "$sealed_toolchain_authority" \
+    "$sealed_command_bin" \
+    "$sealed_probe" "$sealed_probe_authority"; do
+    /usr/bin/sudo -n "$chown_bin" -R 0 "$sealed"
+done
+python3 -I ci/check-pinned-rust-toolchain.py --root-owned-toolchain "$sealed_toolchain" >/dev/null
+python3 -I ci/check-sealed-rust-command-bin.py "$sealed_command_bin" "$sealed_toolchain" >/dev/null
+for authority in "$proof_snapshot_authority" "$proof_cache_authority" "$workspace_cache_authority" "$sealed_workspace_authority" "$sealed_toolchain_authority" "$sealed_probe_authority"; do
+    /usr/bin/sudo -n /bin/chmod 0444 "$authority"
+done
+python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py \
+    --verify \
+    "$proof_snapshot" \
+    "$proof_cargo_home" \
+    "$proof_cache_authority" \
+    "$proof_cache_authority_sha256" \
+    "$build_uid"
+python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py --verify-tree \
+    "$proof_snapshot" "$proof_snapshot_authority" "$proof_snapshot_authority_sha256" "$build_uid"
+python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py \
+    --verify-cache \
+    "$workspace_cargo_home" \
+    "$workspace_cache_authority" \
+    "$workspace_cache_authority_sha256" \
+    "$build_uid"
+python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py --verify-tree \
+    "$sealed_workspace" "$sealed_workspace_authority" "$sealed_workspace_authority_sha256" "$build_uid"
+python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py --verify-tree \
+    "$sealed_toolchain" "$sealed_toolchain_authority" "$sealed_toolchain_authority_sha256" "$build_uid"
+python3 -I ci/check-pinned-rust-toolchain.py --root-owned-toolchain "$sealed_toolchain" >/dev/null
+python3 -I ci/check-sealed-rust-command-bin.py "$sealed_command_bin" "$sealed_toolchain" >/dev/null
+python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py --verify-tree \
+    "$sealed_probe" "$sealed_probe_authority" "$sealed_probe_authority_sha256" "$build_uid"
+build_home="$scratch/build-home"
+proof_target="$scratch/ordinary-wallet-plan-public-proof-target"
+workspace_target="$scratch/workspace-target"
+build_tmp="$scratch/build-tmp"
+gate_output="$scratch/gate-output"
+/bin/mkdir "$build_home" "$proof_target" "$workspace_target" "$build_tmp" "$gate_output" "$scratch/hidden-home"
+/bin/chmod 0755 "$gate_output"
+for writable in "$build_home" "$proof_target" "$workspace_target" "$build_tmp"; do
+    /usr/bin/sudo -n "$chown_bin" "$build_uid" "$writable"
+    /bin/chmod 0700 "$writable"
+done
+/bin/chmod 0755 "$proof_target" "$workspace_target"
+host_write_target="$scratch/host-write-probe"
+var_tmp_target="/var/tmp/wasabi-liquid-build-write-probe.$$"
+delayed_write_target="$build_home/delayed-descendant-write"
+/usr/bin/touch "$host_write_target"
+/usr/bin/sudo -n /usr/bin/touch "$var_tmp_target"
+for denied_write in "$host_write_target" "$var_tmp_target"; do
+    /usr/bin/sudo -n "$chown_bin" "$build_uid" "$denied_write"
+    /bin/chmod 0600 "$denied_write"
+done
+/bin/chmod 0711 "$scratch"
+compiler_toolchain_root="$sealed_toolchain"
+compiler_cargo_bin="$sealed_toolchain/bin/cargo"
+compiler_rustc_bin="$sealed_toolchain/bin/rustc"
+compiler_rustdoc_bin="$sealed_toolchain/bin/rustdoc"
+compiler_rustfmt_bin="$sealed_toolchain/bin/rustfmt"
+cargo_bin="$compiler_cargo_bin"
+repository_root="$sealed_workspace"
+case "$host_system" in
+    Darwin)
+        proof_sandbox_profile="$scratch/build-proof.sb"
+        workspace_sandbox_profile="$scratch/build-workspace.sb"
+        for profile_target in "$proof_target" "$workspace_target"; do
+            case "$profile_target" in
+                "$proof_target") sandbox_profile="$proof_sandbox_profile" ;;
+                "$workspace_target") sandbox_profile="$workspace_sandbox_profile" ;;
+                *) exit 1 ;;
+            esac
+            printf '%s\n' \
+                '(version 1)' \
+                '(deny default)' \
+                '(allow process*)' \
+                '(allow signal (target self))' \
+                '(allow sysctl-read)' \
+                '(allow mach-lookup)' \
+                '(allow file-read* (subpath "/System") (subpath "/usr") (subpath "/bin") (subpath "/sbin") (subpath "/Applications") (subpath "/Library/Developer") (subpath "/private/etc") (subpath "/private/var/db") (subpath "/dev"))' \
+                "(allow file-read* (subpath \"$scratch\"))" \
+                "(allow file-read-metadata (literal \"$var_tmp_target\"))" \
+                "(allow file-write* (subpath \"$build_home\") (subpath \"$build_tmp\") (subpath \"$profile_target\"))" \
+                '(allow file-write-data (literal "/dev/null"))' \
+                '(deny network*)' >"$sandbox_profile"
+            /usr/bin/sudo -n "$chown_bin" 0 "$sandbox_profile"
+            /bin/chmod 0444 "$sandbox_profile"
+        done
+        run_sealed() {
+            case "$CARGO_TARGET_DIR" in
+                "$proof_target") sandbox_profile="$proof_sandbox_profile" ;;
+                "$workspace_target") sandbox_profile="$workspace_sandbox_profile" ;;
+                *) echo "sealed Darwin command target has no exact sandbox profile" >&2; return 1 ;;
+            esac
+            /usr/bin/sudo -n "$sealed_workspace/ci/run-sealed-darwin-command.sh" \
+                "$build_user" "$build_uid" "$sandbox_profile" "$build_home" "$build_tmp" \
+                "$CARGO_HOME" "$CARGO_TARGET_DIR" "$sealed_command_bin" \
+                "$compiler_rustc_bin" "$compiler_rustdoc_bin" "$compiler_rustfmt_bin" \
+                "${RUSTDOCFLAGS-}" "${RUSTC_BOOTSTRAP-}" \
+                "${SEALED_DEPENDENCY_TARGET-}" "${SEALED_WORKSPACE_TARGET-}" \
+                "$original_home/.cargo" "$host_write_target" "$var_tmp_target" "$delayed_write_target" \
+                "${@}"
+        }
+        ;;
+    Linux)
+        run_sealed() {
+            /usr/bin/sudo -n /usr/bin/unshare --net --mount --pid --fork --kill-child --mount-proc --propagation private -- \
+                "$sealed_workspace/ci/run-sealed-linux-command.sh" \
+                "$build_uid" "$original_home" "$scratch/hidden-home" "$build_home" "$build_tmp" \
+                "$CARGO_HOME" "$CARGO_TARGET_DIR" "$sealed_command_bin" \
+                "$compiler_rustc_bin" "$compiler_rustdoc_bin" "$compiler_rustfmt_bin" \
+                "${RUSTDOCFLAGS-}" "${RUSTC_BOOTSTRAP-}" \
+                "${SEALED_DEPENDENCY_TARGET-}" "${SEALED_WORKSPACE_TARGET-}" \
+                "$original_home/.cargo" "$host_write_target" "$var_tmp_target" "$delayed_write_target" \
+                "${@}"
+        }
+        ;;
+esac
+CARGO_HOME="$workspace_cargo_home"
+CARGO_TARGET_DIR="$workspace_target"
+export CARGO_HOME CARGO_TARGET_DIR
+sealed_dependency_target="$(find "$workspace_cargo_home/registry/src" -type f ! -name .cargo-ok -print | head -1)"
+if [ -z "$sealed_dependency_target" ]; then
+    echo "sealed dependency mutation probe target is unavailable" >&2
+    exit 1
+fi
+SEALED_DEPENDENCY_TARGET="$sealed_dependency_target"
+SEALED_WORKSPACE_TARGET="$sealed_workspace/Cargo.toml"
+export SEALED_DEPENDENCY_TARGET SEALED_WORKSPACE_TARGET
+/usr/bin/sudo -n -u "$build_user" /usr/bin/env -i PATH=/usr/bin:/bin \
+    "$python_bin" -I "$sealed_workspace/ci/check-sealed-tree-readable.py" \
+        "$proof_snapshot" "$proof_cargo_home" "$workspace_cargo_home" \
+        "$sealed_workspace" "$sealed_toolchain" "$sealed_probe"
+case "$(run_sealed "$compiler_cargo_bin" --version --verbose)" in
+    cargo\ 1.96.0\ *30a34c6821b57de0aaec83a901aca39f88f6778c*) ;;
+    *) echo "isolated Cargo version or commit mismatch" >&2; exit 1 ;;
+esac
+case "$(run_sealed "$compiler_rustc_bin" --version --verbose)" in
+    *commit-hash:\ ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96*release:\ 1.96.0*) ;;
+    *) echo "isolated Rust compiler version or commit mismatch" >&2; exit 1 ;;
+esac
+case "$(run_sealed "$compiler_rustdoc_bin" --version)" in rustdoc\ 1.96.0\ *) ;; *) exit 1 ;; esac
+case "$(run_sealed "$compiler_rustfmt_bin" --version)" in rustfmt\ 1.9.0-stable\ *) ;; *) exit 1 ;; esac
+case "$(run_sealed "$sealed_command_bin/cargo-fmt" --version)" in rustfmt\ 1.9.0-stable\ *) ;; *) exit 1 ;; esac
+case "$(run_sealed "$sealed_command_bin/cargo-clippy" --version)" in clippy\ 0.1.96\ *) ;; *) exit 1 ;; esac
+case "$(run_sealed "$sealed_command_bin/clippy-driver" --version)" in clippy\ 0.1.96\ *) ;; *) exit 1 ;; esac
+for boundary_target in "$proof_target" "$workspace_target"; do
+    case "$boundary_target" in
+        "$proof_target") boundary_cargo_home="$proof_cargo_home" ;;
+        "$workspace_target") boundary_cargo_home="$workspace_cargo_home" ;;
+        *) exit 1 ;;
+    esac
+    CARGO_HOME="$boundary_cargo_home" CARGO_TARGET_DIR="$boundary_target" \
+        run_sealed "$compiler_cargo_bin" build \
+            --manifest-path "$sealed_probe/Cargo.toml" \
+            --target-dir "$boundary_target/sealed-boundary-probe" \
+            --locked \
+            --offline
+    /bin/sleep 6
+    if [ -e "$delayed_write_target" ]; then
+        echo "daemonized build descendant survived sealed command supervision" >&2
+        exit 1
+    fi
+done
+python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py \
+    --verify \
+    "$proof_snapshot" \
+    "$proof_cargo_home" \
+    "$proof_cache_authority" \
+    "$proof_cache_authority_sha256" \
+    "$build_uid"
+python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py --verify-tree \
+    "$proof_snapshot" "$proof_snapshot_authority" "$proof_snapshot_authority_sha256" "$build_uid"
+python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py \
+    --verify-cache \
+    "$workspace_cargo_home" \
+    "$workspace_cache_authority" \
+    "$workspace_cache_authority_sha256" \
+    "$build_uid"
+python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py --verify-tree \
+    "$sealed_workspace" "$sealed_workspace_authority" "$sealed_workspace_authority_sha256" "$build_uid"
+python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py --verify-tree \
+    "$sealed_toolchain" "$sealed_toolchain_authority" "$sealed_toolchain_authority_sha256" "$build_uid"
+python3 -I ci/check-pinned-rust-toolchain.py --root-owned-toolchain "$sealed_toolchain" >/dev/null
+python3 -I ci/check-sealed-rust-command-bin.py "$sealed_command_bin" "$sealed_toolchain" >/dev/null
+python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py --verify-tree \
+    "$sealed_probe" "$sealed_probe_authority" "$sealed_probe_authority_sha256" "$build_uid"
+cd "$sealed_workspace"
+export CARGO_HOME="$workspace_cargo_home"
+export CARGO_TARGET_DIR="$workspace_target"
+export RUSTC="$compiler_rustc_bin"
+export RUSTDOC="$compiler_rustdoc_bin"
+export RUSTFMT="$compiler_rustfmt_bin"
+export GIT_CONFIG_GLOBAL=/dev/null
+export GIT_CONFIG_SYSTEM=/dev/null
+export GIT_TERMINAL_PROMPT=0
 
 tree_raw="$(
-    "$cargo_bin" tree \
+    run_sealed "$cargo_bin" tree \
     --workspace \
     --locked \
     --target all \
@@ -25,15 +620,13 @@ tree="$(
         sort -u
 )"
 
-metadata_raw="$("$cargo_bin" metadata --locked --format-version 1)"
-scratch="$(mktemp -d "${TMPDIR:-/tmp}/wasabi-liquid-dependency-gate.XXXXXX")"
-trap 'rm -rf "$scratch"' EXIT HUP INT TERM
-printf '%s\n' "$tree_raw" >"$scratch/tree.txt"
-printf '%s' "$metadata_raw" >"$scratch/metadata.json"
+metadata_raw="$(run_sealed "$cargo_bin" metadata --locked --format-version 1)"
+printf '%s\n' "$tree_raw" >"$gate_output/tree.txt"
+printf '%s' "$metadata_raw" >"$gate_output/metadata.json"
 edges="$(
-    python3 ci/canonicalize-dependency-edges.py \
-        "$scratch/tree.txt" \
-        "$scratch/metadata.json"
+    python3 -I ci/canonicalize-dependency-edges.py \
+        "$gate_output/tree.txt" \
+        "$gate_output/metadata.json"
 )"
 
 printf '%s\n' "$tree" | awk -F '|' '
@@ -60,6 +653,7 @@ BEGIN {
     miniscript = 0
     rand_count = 0
     plan = 0
+    plan_proof = 0
     secp = 0
     sha2 = 0
     zkp = 0
@@ -178,27 +772,91 @@ END {
 printf '%s\n' "$tree" | diff -u ci/expected-dependency-capabilities.txt -
 printf '%s\n' "$edges" | diff -u ci/expected-dependency-edges.txt -
 
-python3 ci/check-wallet-facts-conformance.py "$repository_root"
+python3 -I ci/check-wallet-facts-conformance.py "$repository_root"
 conformance_inventory_hash="$(
-    python3 -c 'import hashlib, pathlib; print(hashlib.sha256(pathlib.Path("contracts/wallet-facts/v1/nonlinkable-reference/vectors/SHA256SUMS").read_bytes()).hexdigest())'
+    python3 -I -c 'import hashlib, pathlib; print(hashlib.sha256(pathlib.Path("contracts/wallet-facts/v1/nonlinkable-reference/vectors/SHA256SUMS").read_bytes()).hexdigest())'
 )"
 if [ "$conformance_inventory_hash" != "9bcdcf31ffe90e7a23ada162c61c71cfc84343ba1c190865e0ed34af8c7da933" ]; then
     echo "wallet-facts conformance inventory root mismatch" >&2
     exit 1
 fi
 conformance_parent_hash="$(
-    python3 -c 'import hashlib, pathlib; print(hashlib.sha256(pathlib.Path("contracts/wallet-facts/v1/nonlinkable-reference/SHA256SUMS").read_bytes()).hexdigest())'
+    python3 -I -c 'import hashlib, pathlib; print(hashlib.sha256(pathlib.Path("contracts/wallet-facts/v1/nonlinkable-reference/SHA256SUMS").read_bytes()).hexdigest())'
 )"
 if [ "$conformance_parent_hash" != "9a3d11662670d13e23ed248f2ae145c87a52739e2e3bb03f7628e4d12e147c63" ]; then
     echo "wallet-facts conformance parent root mismatch" >&2
     exit 1
 fi
 
+python3 -I ci/check-ordinary-wallet-plan-conformance.py "$repository_root"
+plan_conformance_inventory_hash="$(
+    python3 -I -c 'import hashlib, pathlib; print(hashlib.sha256(pathlib.Path("contracts/ordinary-wallet-plan/v1/nonlinkable-reference/vectors/SHA256SUMS").read_bytes()).hexdigest())'
+)"
+if [ "$plan_conformance_inventory_hash" != "c0cdf0e1353b32a941fb7fa34ceb5ab682c76c1f5d01e892578ea8a800a25014" ]; then
+    echo "ordinary-wallet plan conformance inventory root mismatch" >&2
+    exit 1
+fi
+plan_conformance_parent_hash="$(
+    python3 -I -c 'import hashlib, pathlib; print(hashlib.sha256(pathlib.Path("contracts/ordinary-wallet-plan/v1/nonlinkable-reference/SHA256SUMS").read_bytes()).hexdigest())'
+)"
+if [ "$plan_conformance_parent_hash" != "45265732edffe658cb7925ad536c4c8372219cc415d4b185d67f8230dde113c7" ]; then
+    echo "ordinary-wallet plan conformance parent root mismatch" >&2
+    exit 1
+fi
+if [ "$(cat contracts/ordinary-wallet-plan/v1/nonlinkable-reference/CORPUS_ROOT_SHA256)" != "$plan_conformance_parent_hash" ]; then
+    echo "ordinary-wallet plan declared conformance root mismatch" >&2
+    exit 1
+fi
+python3 -I ci/test-ordinary-wallet-plan-conformance.py
+(
+    cd /
+    CARGO_HOME="$proof_cargo_home" CARGO_TARGET_DIR="$proof_target" \
+        run_sealed "$compiler_cargo_bin" build \
+            --manifest-path "$proof_snapshot/Cargo.toml" \
+            --quiet \
+            --locked \
+            --offline \
+            -p wasabi-liquid-native-ordinary-wallet-plan-public-proof-verifier \
+            --bin ordinary-wallet-plan-public-proof-verifier
+)
+proof_dep_info="$(find "$proof_target/debug/deps" -maxdepth 1 -type f -name 'ordinary_wallet_plan_public_proof_verifier-*.d' -print)"
+if [ -z "$proof_dep_info" ] || [ "$(printf '%s\n' "$proof_dep_info" | wc -l | tr -d ' ')" -ne 1 ]; then
+    echo "ordinary-wallet plan public proof compiler source closure is not singular" >&2
+    exit 1
+fi
+python3 -I ci/check-ordinary-wallet-plan-public-proof-surface.py \
+    --snapshot "$proof_snapshot" \
+    "$proof_dep_info"
+python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py \
+    --verify \
+    "$proof_snapshot" \
+    "$proof_cargo_home" \
+    "$proof_cache_authority" \
+    "$proof_cache_authority_sha256" \
+    "$build_uid"
+proof_binary="$proof_target/debug/ordinary-wallet-plan-public-proof-verifier"
+proof_binary_sha256="$(python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py --binary-digest "$proof_binary")"
+run_sealed "$proof_binary" "$proof_snapshot"
+if [ "$(python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py --binary-digest "$proof_binary")" != "$proof_binary_sha256" ]; then
+    echo "ordinary-wallet plan public proof binary changed during execution" >&2
+    exit 1
+fi
+python3 -I ci/check-ordinary-wallet-plan-public-proof-surface.py \
+    --snapshot "$proof_snapshot" \
+    "$proof_dep_info"
+python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py \
+    --verify \
+    "$proof_snapshot" \
+    "$proof_cargo_home" \
+    "$proof_cache_authority" \
+    "$proof_cache_authority_sha256" \
+    "$build_uid"
+
 if [ "$(grep -Fxc 'sha2 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }' crates/wallet-facts-wire/Cargo.toml)" -ne 1 ]; then
     echo "wallet-facts conformance test dependency mismatch" >&2
     exit 1
 fi
-python3 - "$repository_root" <<'PY'
+python3 -I - "$repository_root" <<'PY'
 import hashlib
 import sys
 from pathlib import Path
@@ -337,12 +995,12 @@ if ! grep -Fq 'crate-type = ["rlib"]' crates/wallet-facts-wire/Cargo.toml ||
     exit 1
 fi
 
-python3 ci/check-ordinary-wallet-plan-surface.py
-python3 -c 'import importlib.util, pathlib; p = pathlib.Path("ci/check-ordinary-wallet-plan-surface.py"); s = importlib.util.spec_from_file_location("plan_surface", p); m = importlib.util.module_from_spec(s); s.loader.exec_module(m); m.validate_manifest_targets(); m.validate_dependency_authority_surface(m.production_text())'
-python3 ci/test-ordinary-wallet-plan-surface.py
+python3 -I ci/check-ordinary-wallet-plan-surface.py
+python3 -I -c 'import importlib.util, pathlib; p = pathlib.Path("ci/check-ordinary-wallet-plan-surface.py"); s = importlib.util.spec_from_file_location("plan_surface", p); m = importlib.util.module_from_spec(s); s.loader.exec_module(m); m.validate_manifest_targets(); m.validate_dependency_authority_surface(m.production_text())'
+python3 -I ci/test-ordinary-wallet-plan-surface.py
 plan_sources="$(find crates/ordinary-wallet-plan/src -type f -name '*.rs' ! -name 'tests.rs' -print | sort)"
 plan_lexical_source="$(
-    python3 -c 'import importlib.util, pathlib; p = pathlib.Path("ci/check-ordinary-wallet-plan-surface.py"); s = importlib.util.spec_from_file_location("plan_surface", p); m = importlib.util.module_from_spec(s); s.loader.exec_module(m); print(m.strip_rust_comments(m.production_text()), end="")'
+    python3 -I -c 'import importlib.util, pathlib; p = pathlib.Path("ci/check-ordinary-wallet-plan-surface.py"); s = importlib.util.spec_from_file_location("plan_surface", p); m = importlib.util.module_from_spec(s); s.loader.exec_module(m); print(m.strip_rust_comments(m.production_text()), end="")'
 )"
 if grep -En '^[[:space:]]*(test|doctest|doc)[[:space:]]*=[[:space:]]*false([[:space:]]|$)|^[[:space:]]*harness[[:space:]]*=|required-features[[:space:]]*=|\[\[test\]\]' crates/ordinary-wallet-plan/Cargo.toml; then
     echo "ordinary-wallet plan Cargo test or documentation target was disabled" >&2
@@ -365,7 +1023,7 @@ plan_module_count="$(
 )"
 plan_module_hash="$(
     sed -n '/^mod reader;/,/^mod tests;/p' crates/ordinary-wallet-plan/src/lib.rs |
-        python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'
+        python3 -I -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'
 )"
 if [ "$plan_module_count" -ne 3 ] || [ "$plan_module_hash" != "9bf302755ec28c38c79a36f3f7945a47fe8d736d267b8373981852afa6949272" ]; then
     echo "ordinary-wallet plan exact module declarations or attributes changed" >&2
@@ -373,7 +1031,7 @@ if [ "$plan_module_count" -ne 3 ] || [ "$plan_module_hash" != "9bf302755ec28c38c
 fi
 plan_outer_attribute_hash="$(
     grep -h -E '^[[:space:]]*#\[' $plan_sources |
-        python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'
+        python3 -I -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'
 )"
 if [ "$plan_outer_attribute_hash" != "51ebc7d7bb8f19ef7c51c0f6614e23c4f950a3caaf8a652588206492ea2c02df" ]; then
     echo "ordinary-wallet plan allowed outer attribute inventory changed" >&2
@@ -387,19 +1045,19 @@ if [ "$plan_trait_impl_count" -ne 42 ] || grep -En '^[[:space:]]+impl[[:space:]<
     echo "ordinary-wallet plan exact trait implementation syntax changed" >&2
     exit 1
 fi
-if ! cargo rustc \
+if ! run_sealed "$compiler_cargo_bin" rustc \
         -p wasabi-liquid-native-ordinary-wallet-plan \
         --lib \
         --locked \
         --offline \
         -- \
-        --emit=dep-info=- >"$scratch/ordinary-wallet-plan.dep-info" 2>/dev/null
+        --emit=dep-info=- >"$gate_output/ordinary-wallet-plan.dep-info" 2>/dev/null
 then
     echo "ordinary-wallet plan compiler source closure derivation failed" >&2
     exit 1
 fi
 plan_compiled_sources="$(
-    python3 -c 'import pathlib, sys; root = pathlib.Path.cwd().resolve(); found = set(); lines = pathlib.Path(sys.argv[1]).read_text().splitlines();
+    python3 -I -c 'import pathlib, sys; root = pathlib.Path.cwd().resolve(); found = set(); lines = pathlib.Path(sys.argv[1]).read_text().splitlines();
 for line in lines:
     if ":" not in line: continue
     for token in line.split(":", 1)[1].split():
@@ -408,7 +1066,7 @@ for line in lines:
         path = path.resolve()
         try: found.add(path.relative_to(root).as_posix())
         except ValueError: found.add(path.as_posix())
-print("\n".join(sorted(found)))' "$scratch/ordinary-wallet-plan.dep-info"
+print("\n".join(sorted(found)))' "$gate_output/ordinary-wallet-plan.dep-info"
 )"
 expected_plan_compiled_sources='crates/ordinary-wallet-plan/src/lib.rs
 crates/ordinary-wallet-plan/src/reader.rs
@@ -484,7 +1142,7 @@ if printf '%s\n' "$plan_preflight_source" | grep -En 'Vec|String|Address|AssetId
 fi
 plan_preflight_hash="$(
     printf '%s\n' "$plan_preflight_source" |
-        python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'
+        python3 -I -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'
 )"
 if [ "$plan_preflight_hash" != "483952c5fa1f9aea89585f317551c728513241c8800aeaf1fca4d0e534d6ea28" ]; then
     echo "ordinary-wallet plan structural preflight source hash mismatch" >&2
@@ -509,7 +1167,7 @@ if printf '%s\n' "$helper_source" | grep -En 'Vec|Box|format!|SecretKey|Transact
 fi
 helper_source_hash="$(
     printf '%s\n' "$helper_source" |
-        python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'
+        python3 -I -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'
 )"
 if [ "$helper_source_hash" != "c9154cfc0437b6563964de67e68ed5157f33570e3ea3c6b8618bd253ceba0ed9" ]; then
     echo "wallet-facts public-output helper source hash mismatch" >&2
@@ -552,7 +1210,7 @@ do
 done
 uniqueness_source_hash="$(
     printf '%s\n' "$uniqueness_source" |
-        python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'
+        python3 -I -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'
 )"
 if [ "$uniqueness_source_hash" != "953e88c1fa78a5b83b85874b9c1e6a1706324595ec05a0167987ca69fe47f2ff" ]; then
     echo "wallet-facts wire uniqueness source hash mismatch" >&2
@@ -563,11 +1221,7 @@ if printf '%s\n' "$uniqueness_source" | grep -En 'HashMap|HashSet|Vec::new|vec!|
     exit 1
 fi
 
-if ! compiler_cargo_bin="$(command -v cargo)"; then
-    echo "wallet-facts compiler and artifact gates require Cargo 1.96.0" >&2
-    exit 1
-fi
-cargo_version="$("$compiler_cargo_bin" --version 2>/dev/null)"
+cargo_version="$(run_sealed "$compiler_cargo_bin" --version 2>/dev/null)"
 case "$cargo_version" in
     cargo\ *)
         case "$cargo_version" in
@@ -578,7 +1232,7 @@ case "$cargo_version" in
                 ;;
         esac
         rustc_version="$(
-            "$compiler_cargo_bin" rustc \
+            run_sealed "$compiler_cargo_bin" rustc \
                 --quiet \
                 -p wasabi-liquid-native-wallet-facts-wire \
                 --lib \
@@ -594,7 +1248,7 @@ case "$cargo_version" in
                 exit 1
                 ;;
         esac
-        "$compiler_cargo_bin" rustc \
+        run_sealed "$compiler_cargo_bin" rustc \
             --quiet \
             -p wasabi-liquid-native-wallet-facts \
             --lib \
@@ -603,8 +1257,8 @@ case "$cargo_version" in
             --offline \
             -- \
             --emit=mir \
-            -o "$scratch/wallet-facts.mir"
-        helper_mir_file="$(find "$scratch" -maxdepth 1 -name 'wallet-facts-*.mir' -print | head -1)"
+            -o "$workspace_target/wallet-facts.mir"
+        helper_mir_file="$(find "$workspace_target" -maxdepth 1 -name 'wallet-facts-*.mir' -print | head -1)"
         if [ -z "$helper_mir_file" ]; then
             echo "wallet-facts helper MIR was not produced" >&2
             exit 1
@@ -628,7 +1282,7 @@ case "$cargo_version" in
             exit 1
         fi
 
-        "$compiler_cargo_bin" rustc \
+        run_sealed "$compiler_cargo_bin" rustc \
             --quiet \
             -p wasabi-liquid-native-wallet-facts-wire \
             --lib \
@@ -636,8 +1290,8 @@ case "$cargo_version" in
             --offline \
             -- \
             -C opt-level=0 \
-            --emit=mir="$scratch/wallet-facts-wire.mir"
-        if [ ! -f "$scratch/wallet-facts-wire.mir" ]; then
+            --emit=mir="$workspace_target/wallet-facts-wire.mir"
+        if [ ! -f "$workspace_target/wallet-facts-wire.mir" ]; then
             echo "wallet-facts wire MIR was not produced" >&2
             exit 1
         fi
@@ -646,21 +1300,21 @@ case "$cargo_version" in
                 /^fn validate_inputs_unique/ { capture = 1 }
                 capture { print }
                 capture && /^}/ { exit }
-            ' "$scratch/wallet-facts-wire.mir"
+            ' "$workspace_target/wallet-facts-wire.mir"
         )"
         scratch_uniqueness_mir="$(
             awk '
                 /^fn scratch_is_unique/ { capture = 1 }
                 capture { print }
                 capture && /^}/ { exit }
-            ' "$scratch/wallet-facts-wire.mir"
+            ' "$workspace_target/wallet-facts-wire.mir"
         )"
         decoder_uniqueness_mir="$(
             awk '
                 /^fn validate_response_uniqueness/ { capture = 1 }
                 capture { print }
                 capture && /^}/ { exit }
-            ' "$scratch/wallet-facts-wire.mir"
+            ' "$workspace_target/wallet-facts-wire.mir"
         )"
         for required_call in \
             'Vec::<ScopedWireOutPoint>::with_capacity' \
@@ -703,14 +1357,14 @@ $decoder_uniqueness_mir"
             exit 1
         fi
 
-        "$compiler_cargo_bin" build \
+        run_sealed "$compiler_cargo_bin" build \
             --quiet \
             -p wasabi-liquid-native-wallet-facts-wire \
             --lib \
             --release \
             --locked \
             --offline
-        "$compiler_cargo_bin" build \
+        run_sealed "$compiler_cargo_bin" build \
             --quiet \
             -p wasabi-liquid-native-ordinary-wallet-plan \
             --lib \
@@ -718,8 +1372,8 @@ $decoder_uniqueness_mir"
             --locked \
             --offline
         target_directory="$(
-            python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["target_directory"])' \
-                "$scratch/metadata.json"
+            python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["target_directory"])' \
+                "$gate_output/metadata.json"
         )"
         wire_archive="$target_directory/release/libwasabi_liquid_native_wallet_facts_wire.rlib"
         plan_archive="$target_directory/release/libwasabi_liquid_native_ordinary_wallet_plan.rlib"
@@ -735,10 +1389,7 @@ $decoder_uniqueness_mir"
             echo "archive or symbol inspection tool is unavailable" >&2
             exit 1
         fi
-        if ! rustc_bin="$(command -v rustc)"; then
-            echo "wallet-facts symbol inspection requires Rust 1.96.0" >&2
-            exit 1
-        fi
+        rustc_bin="$compiler_rustc_bin"
         case "$("$rustc_bin" --version 2>/dev/null)" in
             rustc\ 1.96.0\ *) ;;
             *)
@@ -746,30 +1397,30 @@ $decoder_uniqueness_mir"
                 exit 1
                 ;;
         esac
-        symbol_checker="$scratch/check-rust-rlib-symbols"
-        RUSTC_BOOTSTRAP=wasabi_liquid_symbol_gate "$rustc_bin" \
+        symbol_checker="$workspace_target/check-rust-rlib-symbols"
+        RUSTC_BOOTSTRAP=wasabi_liquid_symbol_gate run_sealed "$rustc_bin" \
             --crate-name wasabi_liquid_symbol_gate \
             --edition=2024 \
             ci/check-rust-rlib-symbols.rs \
             -o "$symbol_checker"
-        "$symbol_checker" --self-test
-        ar t "$wire_archive" >"$scratch/wallet-facts-wire.archive"
-        if ! grep -Eq '\.o$' "$scratch/wallet-facts-wire.archive"; then
+        run_sealed "$symbol_checker" --self-test
+        ar t "$wire_archive" >"$gate_output/wallet-facts-wire.archive"
+        if ! grep -Eq '\.o$' "$gate_output/wallet-facts-wire.archive"; then
             echo "wallet-facts wire release archive has no object members" >&2
             exit 1
         fi
-        nm -g "$wire_archive" >"$scratch/wallet-facts-wire.symbols" 2>"$scratch/wallet-facts-wire.nm-stderr"
-        if ! "$symbol_checker" "$scratch/wallet-facts-wire.symbols"; then
+        nm -g "$wire_archive" >"$gate_output/wallet-facts-wire.symbols" 2>"$gate_output/wallet-facts-wire.nm-stderr"
+        if ! run_sealed "$symbol_checker" "$gate_output/wallet-facts-wire.symbols"; then
             echo "wallet-facts wire release archive exposes an unmangled global symbol" >&2
             exit 1
         fi
-        ar t "$plan_archive" >"$scratch/ordinary-wallet-plan.archive"
-        if ! grep -Eq '\.o$' "$scratch/ordinary-wallet-plan.archive"; then
+        ar t "$plan_archive" >"$gate_output/ordinary-wallet-plan.archive"
+        if ! grep -Eq '\.o$' "$gate_output/ordinary-wallet-plan.archive"; then
             echo "ordinary-wallet plan release archive has no object members" >&2
             exit 1
         fi
-        nm -g "$plan_archive" >"$scratch/ordinary-wallet-plan.symbols" 2>"$scratch/ordinary-wallet-plan.nm-stderr"
-        if ! "$symbol_checker" "$scratch/ordinary-wallet-plan.symbols"; then
+        nm -g "$plan_archive" >"$gate_output/ordinary-wallet-plan.symbols" 2>"$gate_output/ordinary-wallet-plan.nm-stderr"
+        if ! run_sealed "$symbol_checker" "$gate_output/ordinary-wallet-plan.symbols"; then
             echo "ordinary-wallet plan release archive exposes an unmangled global symbol" >&2
             exit 1
         fi
@@ -791,43 +1442,43 @@ $decoder_uniqueness_mir"
             echo "wallet-facts wire dynamic-library artifact is forbidden" >&2
             exit 1
         fi
-        "$compiler_cargo_bin" check \
+        run_sealed "$compiler_cargo_bin" check \
             --workspace \
             --all-targets \
             --all-features \
             --locked \
             --offline
-        "$compiler_cargo_bin" check \
-            --workspace \
-            --all-targets \
-            --all-features \
-            --release \
-            --locked \
-            --offline
-        "$compiler_cargo_bin" test \
-            --workspace \
-            --all-targets \
-            --all-features \
-            --locked \
-            --offline
-        "$compiler_cargo_bin" test \
+        run_sealed "$compiler_cargo_bin" check \
             --workspace \
             --all-targets \
             --all-features \
             --release \
             --locked \
             --offline
-        "$compiler_cargo_bin" test \
+        run_sealed "$compiler_cargo_bin" test \
+            --workspace \
+            --all-targets \
+            --all-features \
+            --locked \
+            --offline
+        run_sealed "$compiler_cargo_bin" test \
+            --workspace \
+            --all-targets \
+            --all-features \
+            --release \
+            --locked \
+            --offline
+        run_sealed "$compiler_cargo_bin" test \
             -p wasabi-liquid-native-ordinary-wallet-plan \
             --locked \
             --offline
-        "$compiler_cargo_bin" test \
+        run_sealed "$compiler_cargo_bin" test \
             -p wasabi-liquid-native-ordinary-wallet-plan \
             --release \
             --locked \
             --offline
-        "$compiler_cargo_bin" fmt --all -- --check
-        "$compiler_cargo_bin" clippy \
+        run_sealed "$compiler_cargo_bin" fmt --all -- --check
+        run_sealed "$compiler_cargo_bin" clippy \
             --workspace \
             --all-targets \
             --all-features \
@@ -835,17 +1486,31 @@ $decoder_uniqueness_mir"
             --offline \
             -- \
             -D warnings
-        RUSTDOCFLAGS='-D warnings' "$compiler_cargo_bin" doc \
+        RUSTDOCFLAGS='-D warnings' run_sealed "$compiler_cargo_bin" doc \
             --workspace \
             --no-deps \
             --all-features \
             --locked \
             --offline
-        "$compiler_cargo_bin" test \
+        run_sealed "$compiler_cargo_bin" test \
             -p wasabi-liquid-native-wallet-facts-wire \
             --locked \
             --offline \
             conformance
+        python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py \
+            --verify-cache \
+            "$workspace_cargo_home" \
+            "$workspace_cache_authority" \
+            "$workspace_cache_authority_sha256" \
+            "$build_uid"
+        python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py --verify-tree \
+            "$sealed_workspace" "$sealed_workspace_authority" "$sealed_workspace_authority_sha256" "$build_uid"
+        python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py --verify-tree \
+            "$sealed_toolchain" "$sealed_toolchain_authority" "$sealed_toolchain_authority_sha256" "$build_uid"
+        python3 -I ci/check-pinned-rust-toolchain.py --root-owned-toolchain "$sealed_toolchain" >/dev/null
+        python3 -I ci/check-sealed-rust-command-bin.py "$sealed_command_bin" "$sealed_toolchain" >/dev/null
+        python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py --verify-tree \
+            "$sealed_probe" "$sealed_probe_authority" "$sealed_probe_authority_sha256" "$build_uid"
         ;;
     *)
         echo "wallet-facts compiler and artifact gates require Cargo 1.96.0" >&2

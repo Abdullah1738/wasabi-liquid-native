@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+"""Reject workspace authority that could influence the isolated Cargo fetch."""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import stat
+import sys
+import tomllib
+from pathlib import Path
+
+
+WORKSPACE_LOCK_SHA256 = "f5e471c6a9664d29e8c30ea44b0c6934d3be98c00d87d5ea45cb5843b717adde"
+PROOF_LOCK_SHA256 = "4ca45ca0dd27b2a545b0d93174e02487cc756b26a34d946de5dcb349ceea7aab"
+PROOF_TOOL = "tools/ordinary-wallet-plan-public-proof-verifier"
+DENIED_NAMES = {".gitconfig", ".netrc", "credentials", "credentials.toml"}
+
+
+def read_regular(root: Path, relative: Path, maximum: int = 1024 * 1024) -> bytes:
+    path = root / relative
+    metadata = os.lstat(path)
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or metadata.st_size > maximum
+    ):
+        raise ValueError(f"fetch preflight input is linked, hardlinked, nonregular, or oversized: {relative}")
+    data = path.read_bytes()
+    if len(data) != metadata.st_size or os.lstat(path) != metadata:
+        raise ValueError(f"fetch preflight input changed during read: {relative}")
+    return data
+
+
+def validate(root: Path) -> None:
+    if not root.is_absolute() or stat.S_ISLNK(os.lstat(root).st_mode) or not root.is_dir():
+        raise ValueError("absolute regular workspace root is required")
+    workspace_manifest = tomllib.loads(read_regular(root, Path("Cargo.toml")).decode("utf-8"))
+    workspace = workspace_manifest.get("workspace")
+    if not isinstance(workspace, dict) or workspace.get("exclude") != [PROOF_TOOL]:
+        raise ValueError("workspace public-proof exclusion differs from exact authority")
+    locks = {
+        Path("Cargo.lock"): WORKSPACE_LOCK_SHA256,
+        Path("ci/ordinary-wallet-plan-public-proof.Cargo.lock"): PROOF_LOCK_SHA256,
+    }
+    for relative, expected in locks.items():
+        if hashlib.sha256(read_regular(root, relative)).hexdigest() != expected:
+            raise ValueError(f"fetch lock differs from exact authority: {relative}")
+    for directory, directories, files in os.walk(root, topdown=True, followlinks=False):
+        current = Path(directory)
+        if current == root / ".git" or current == root / "tmp":
+            directories[:] = []
+            continue
+        for name in [*directories, *files]:
+            path = current / name
+            relative = path.relative_to(root)
+            metadata = os.lstat(path)
+            if stat.S_ISLNK(metadata.st_mode):
+                raise ValueError(f"workspace fetch surface contains a symlink: {relative}")
+            if name in DENIED_NAMES or ".cargo" in relative.parts:
+                raise ValueError(f"workspace fetch surface contains Cargo or credential configuration: {relative}")
+
+
+def validate_configuration_root(root: Path) -> None:
+    if not root.is_absolute():
+        raise ValueError("absolute Cargo configuration root is required")
+    for relative in (Path(".cargo/config"), Path(".cargo/config.toml")):
+        if os.path.lexists(root / relative):
+            raise ValueError(f"Cargo configuration exists above fetch manifest: /{relative}")
+
+
+def main() -> int:
+    if len(sys.argv) != 2:
+        print("usage: check-cargo-fetch-preflight.py ABSOLUTE_WORKSPACE", file=sys.stderr)
+        return 2
+    try:
+        validate(Path(sys.argv[1]))
+        validate_configuration_root(Path("/"))
+    except (OSError, UnicodeError, ValueError, tomllib.TOMLDecodeError) as error:
+        print(f"Cargo fetch preflight failed: {error}", file=sys.stderr)
+        return 1
+    print("Cargo fetch authority accepted")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

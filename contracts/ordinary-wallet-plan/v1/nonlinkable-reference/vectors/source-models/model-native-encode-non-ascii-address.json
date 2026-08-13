@@ -1,0 +1,1 @@
+{"operations":[{"op":"set-bytes","path":"request.destinations[0].address","value":{"byte_hex":"80","kind":"repeat","length":62}}],"root":{"frame_id":"frame-test-public-valid","kind":"request-from-frame"},"schema":"wlpq-source-object-v1"}

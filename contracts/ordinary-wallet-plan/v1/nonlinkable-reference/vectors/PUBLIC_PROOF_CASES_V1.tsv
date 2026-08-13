@@ -1,0 +1,7 @@
+proof_case_id	candidate_fixture_id	previous_fixture_id	expected_result
+main-valid	main-candidate-valid	main-previous-valid	ok
+test-damaged-range-proof	test-candidate-damaged-proof	test-previous-valid	range-proof-missing-0
+test-explicit-selected-amount-proof-valid	test-candidate-explicit	test-previous-valid	ok
+test-shared-previous-valid	test-candidate-shared-previous-valid	test-previous-shared-valid	ok
+test-unowned-selected-amount-proof-valid	test-candidate-unowned	test-previous-valid	ok
+test-valid	test-candidate-valid	test-previous-valid	ok

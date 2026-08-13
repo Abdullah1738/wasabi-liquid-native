@@ -9,15 +9,19 @@ permissions:
 
 jobs:
   default-workspace:
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Check out sources
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.96.0 --profile minimal
+        run: rustup toolchain install 1.96.0 --profile minimal --component clippy,rustfmt
       - name: Select pinned Rust toolchain
         run: rustup override set 1.96.0
       - name: Check dependency capabilities
-        run: ./ci/check-dependency-capabilities.sh
+        run: /usr/bin/env -i HOME="$HOME" TMPDIR="$RUNNER_TEMP" PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" ./ci/check-dependency-capabilities.sh
       - name: Test dependency capability gate
-        run: python3 ci/test-dependency-capability-gate.py
+        run: /usr/bin/env -i HOME="$HOME" TMPDIR="$RUNNER_TEMP" PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" python3 ci/test-dependency-capability-gate.py

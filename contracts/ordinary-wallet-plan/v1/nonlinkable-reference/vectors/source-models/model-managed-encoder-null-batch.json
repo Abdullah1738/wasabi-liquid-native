@@ -1,0 +1,1 @@
+{"operations":[{"op":"set-null","path":"call.batch"}],"root":{"frame_id":"frame-test-public-valid","kind":"encoder-call-from-frame"},"schema":"wlpq-source-object-v1"}

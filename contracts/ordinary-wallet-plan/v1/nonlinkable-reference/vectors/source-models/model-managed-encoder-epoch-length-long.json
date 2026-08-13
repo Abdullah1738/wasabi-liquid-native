@@ -1,0 +1,1 @@
+{"operations":[{"op":"set-bytes","path":"call.source_epoch","value":{"byte_hex":"41","kind":"repeat","length":33}}],"root":{"frame_id":"frame-test-public-valid","kind":"encoder-call-from-frame"},"schema":"wlpq-source-object-v1"}

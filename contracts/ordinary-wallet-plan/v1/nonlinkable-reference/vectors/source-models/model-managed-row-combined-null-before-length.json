@@ -1,0 +1,1 @@
+{"operations":[{"op":"set-null","path":"row.candidate"},{"fill":{"fixture_id":"test-previous-valid","kind":"fixture"},"length":16385,"op":"resize-list","path":"row.previous"}],"root":{"frame_id":"frame-test-public-valid","kind":"funding-row-from-frame","selected_index":0},"schema":"wlpq-source-object-v1"}

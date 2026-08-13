@@ -1,0 +1,1 @@
+{"operations":[{"op":"set-null","path":"batch.rows"}],"root":{"frame_id":"frame-test-public-valid","kind":"funding-batch-from-frame"},"schema":"wlpq-source-object-v1"}

@@ -1,0 +1,3 @@
+catalog_fixture_id	context_id	descriptor_network	inclusive_last_derivation_index	checksummed_public_descriptor
+catalog-main-0	liquid-mainnet	mainnet	0	elwpkh([73c5da0a/84'/1776'/0']xpub6CRFzUgHFDaiDAQFNX7VeV9JNPDRabq6NYSpzVZ8zW8ANUCiDdenkb1gBoEZuXNZb3wPc1SVcDXgD2ww5UBtTb8s8ArAbTkoRQ8qn34KgcY/<0;1>/*)#csxkmyvv
+catalog-test-0	liquid-testnet	test	0	elwpkh([28b3f14e/84'/1'/0']tpubDC2Q4xK4XH72GM7MowNuajyWVbigRLBWKswyP5T88hpPwu5nGqJWnda8zhJEFt71av73Hm8mUMMFSz9acNVzz8b1UbdSHCDXKTbSv5eEytu/<0;1>/*)#u0khc0kg

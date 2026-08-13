@@ -1,0 +1,9 @@
+code	name	text
+1	InvalidArgument	ordinary wallet plan wire argument is invalid
+2	VersionMismatch	ordinary wallet plan wire version is unsupported
+3	InvalidEncoding	ordinary wallet plan wire encoding is invalid
+4	LimitExceeded	ordinary wallet plan wire limit exceeded
+5	SourceBindingMismatch	ordinary wallet plan wire source binding does not match
+6	ContextRejected	ordinary wallet plan wire context was rejected
+7	PlanRejected	ordinary wallet plan wire plan was rejected
+8	FundingRejected	ordinary wallet plan wire funding was rejected

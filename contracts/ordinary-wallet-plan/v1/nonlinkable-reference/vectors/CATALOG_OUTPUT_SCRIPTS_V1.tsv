@@ -1,0 +1,5 @@
+catalog_fixture_id	branch	derivation_index	script_sha256
+catalog-main-0	0	0	b29260f831b9fb678f1d429471d4fa37bdae7498a8ab04dc26fb0e6d116cc99a
+catalog-main-0	1	0	3c6a2528e8f02f7fb8e761327ea6322223ba656b16c3075fcbf097ce78c39061
+catalog-test-0	0	0	e0ad850821f9c4a6c60e064323c656b1323a2d3e79dec545da63fe64fb1afafe
+catalog-test-0	1	0	3708b4a2b4d9947a01f84c6b51bcc638bef5d1b825d978f2c826a32ac7c4de2e

@@ -1,0 +1,1 @@
+{"operations":[],"root":{"domain":"u64","kind":"checked-expression","left":{"left":100,"operator":"literal","right":null},"operator":"add","right":{"left":1,"operator":"literal","right":null}},"schema":"wlpq-source-object-v1"}
