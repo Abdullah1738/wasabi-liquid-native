@@ -499,6 +499,7 @@ case "$host_system" in
                 '(allow file-map-executable (subpath "/System") (subpath "/usr") (subpath "/bin") (subpath "/sbin") (subpath "/Applications") (subpath "/Library/Developer"))' \
                 "(allow file-map-executable (subpath \"$sealed_toolchain\") (subpath \"$sealed_command_bin\") (subpath \"$profile_target\"))" \
                 "(allow file-write* (subpath \"$build_home\") (subpath \"$build_tmp\") (subpath \"$profile_target\"))" \
+                '(allow file-read-data (literal "/dev/null"))' \
                 '(allow file-write-data (literal "/dev/null"))' \
                 '(deny network*)' >"$sandbox_profile"
             /usr/bin/sudo -n "$chown_bin" 0 "$sandbox_profile"
@@ -561,8 +562,8 @@ commit-date: 2026-05-25
 host: aarch64-apple-darwin
 release: 1.96.0
 LLVM version: 22.1.2'
-    if [ "$(run_sealed /usr/bin/env "$compiler_rustc_bin" -vV)" != "$expected_darwin_rustc_version" ]; then
-        echo "isolated Darwin child-exec Rust compiler identity mismatch" >&2
+    if [ "$(run_sealed /bin/sh -c 'exec "$1" -vV </dev/null' wlpq-rustc "$compiler_rustc_bin")" != "$expected_darwin_rustc_version" ]; then
+        echo "isolated Darwin null-stdin child-exec Rust compiler identity mismatch" >&2
         exit 1
     fi
 fi

@@ -1263,6 +1263,7 @@ done'''
         r'"(allow file-write* (subpath \"$build_home\") '
         r'(subpath \"$build_tmp\") (subpath \"$profile_target\"))"'
     )
+    darwin_null_read = "'(allow file-read-data (literal \"/dev/null\"))'"
     darwin_allow_tokens = (
         "'(allow process*)'",
         darwin_system_exec,
@@ -1278,6 +1279,7 @@ done'''
         darwin_system_map,
         darwin_private_map,
         darwin_private_write,
+        darwin_null_read,
         "'(allow file-write-data (literal \"/dev/null\"))'",
     )
     darwin_profile_tokens = (
@@ -1292,7 +1294,7 @@ done'''
         if (
             len(re.findall(r"\(\s*allow(?:\s|\))", candidate)) != len(darwin_allow_tokens)
             or len(re.findall(r"\(\s*deny(?:\s|\))", candidate)) != 2
-            or candidate.count("(allow file-read") != 5
+            or candidate.count("(allow file-read") != 6
             or candidate.count("(allow file-map-executable") != 2
             or candidate.count("(allow process-exec") != 2
             or '(subpath "/")' in candidate
@@ -1489,7 +1491,7 @@ done'''
         mutated = gate.replace(original, replacement, 1)
         if mutated == gate or darwin_profile_is_exact(mutated):
             raise AssertionError(f"sealed Darwin {name} mutation was accepted")
-    for device in ("null", "random", "urandom", "tty", "stdin", "stdout", "stderr"):
+    for device in ("random", "urandom", "tty", "stdin", "stdout", "stderr"):
         additive_device_read = gate.replace(
             darwin_xcode_select_read + " \\\n",
             darwin_xcode_select_read
@@ -1500,6 +1502,19 @@ done'''
             raise AssertionError(
                 f"sealed Darwin additive /dev/{device} read mutation was accepted"
             )
+    for name, replacement in (
+        ("missing null-data read", ""),
+        ("umbrella null read", "'(allow file-read* (literal \"/dev/null\"))'"),
+        ("device subtree read", "'(allow file-read-data (subpath \"/dev\"))'"),
+        ("wrong device read", "'(allow file-read-data (literal \"/dev/random\"))'"),
+        (
+            "additional device read",
+            "'(allow file-read-data (literal \"/dev/null\") (literal \"/dev/random\"))'",
+        ),
+    ):
+        mutated = gate.replace(darwin_null_read, replacement, 1)
+        if mutated == gate or darwin_profile_is_exact(mutated):
+            raise AssertionError(f"sealed Darwin {name} mutation was accepted")
     dependency_target_selection = (
         'sealed_dependency_target="$(find "$workspace_cargo_home/registry/src" '
         '-type f ! -name .cargo-ok -print -quit)"'
@@ -1832,8 +1847,8 @@ commit-date: 2026-05-25
 host: aarch64-apple-darwin
 release: 1.96.0
 LLVM version: 22.1.2'
-    if [ "$(run_sealed /usr/bin/env "$compiler_rustc_bin" -vV)" != "$expected_darwin_rustc_version" ]; then
-        echo "isolated Darwin child-exec Rust compiler identity mismatch" >&2
+    if [ "$(run_sealed /bin/sh -c 'exec "$1" -vV </dev/null' wlpq-rustc "$compiler_rustc_bin")" != "$expected_darwin_rustc_version" ]; then
+        echo "isolated Darwin null-stdin child-exec Rust compiler identity mismatch" >&2
         exit 1
     fi
 fi'''
@@ -1850,15 +1865,15 @@ fi'''
         (
             "direct compiler launch",
             darwin_child_exec_probe.replace(
-                'run_sealed /usr/bin/env "$compiler_rustc_bin" -vV',
+                'run_sealed /bin/sh -c \'exec "$1" -vV </dev/null\' wlpq-rustc "$compiler_rustc_bin"',
                 'run_sealed "$compiler_rustc_bin" -vV',
             ),
         ),
         (
             "unchecked compiler launch",
             darwin_child_exec_probe.replace(
-                'if [ "$(run_sealed /usr/bin/env "$compiler_rustc_bin" -vV)" != "$expected_darwin_rustc_version" ]; then',
-                'if ! run_sealed /usr/bin/env "$compiler_rustc_bin" -vV >/dev/null; then',
+                'if [ "$(run_sealed /bin/sh -c \'exec "$1" -vV </dev/null\' wlpq-rustc "$compiler_rustc_bin")" != "$expected_darwin_rustc_version" ]; then',
+                'if ! run_sealed /bin/sh -c \'exec "$1" -vV </dev/null\' wlpq-rustc "$compiler_rustc_bin" >/dev/null; then',
             ),
         ),
     ):
