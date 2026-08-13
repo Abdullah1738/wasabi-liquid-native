@@ -1707,7 +1707,7 @@ done'''
         "(subpath \"/private/var/db\"))'"
     )
     darwin_xcode_select_read = (
-        "'(allow file-read-metadata (literal \"/var\") "
+        "'(allow file-read-metadata (literal \"/var\") (literal \"/var/tmp\") "
         "(literal \"/private/var/select/developer_dir\") "
         "(literal \"/private/var/select/sh\"))'"
     )
@@ -2107,6 +2107,18 @@ done'''
         ),
         ("missing system read", darwin_system_read, ""),
         ("missing Xcode selector read", darwin_xcode_select_read, ""),
+        (
+            "missing var tmp alias metadata",
+            darwin_xcode_select_read,
+            darwin_xcode_select_read.replace(' (literal \"/var/tmp\")', ""),
+        ),
+        (
+            "broadened var tmp alias metadata",
+            darwin_xcode_select_read,
+            darwin_xcode_select_read.replace(
+                '(literal \"/var/tmp\")', '(subpath \"/var/tmp\")'
+            ),
+        ),
         (
             "broadened Xcode selector read",
             darwin_xcode_select_read,
@@ -2757,6 +2769,7 @@ fi'''
         ('require_denied_write("SEALED_VAR_TMP_TARGET")', 1),
         ('require_denied_write("SEALED_INACTIVE_BUILD_TARGET")', 1),
         ('std::path::Path::new(&path).join("sealed-denied-write-probe")', 1),
+        ('panic!("sealed target metadata {name}: {error}")', 1),
         ('let wrote = fs::write(&write_path, b"boundary escape").is_ok();', 1),
         ('require_allowed_write("SEALED_BUILD_', 3),
         ('require_linux_mount_boundary();', 1),
@@ -3014,7 +3027,12 @@ if [ "$plan_compile_status" -ne 0 ]; then
         echo "ordinary-wallet plan bounded compiler diagnostic emission failed" >&2
         exit 1
     fi
-    echo "ordinary-wallet plan compiler source closure derivation failed" >&2
+    if [ -e "$plan_dep_info" ] || [ -L "$plan_dep_info" ]; then
+        plan_dep_info_state=present
+    else
+        plan_dep_info_state=absent
+    fi
+    echo "ordinary-wallet plan compiler source closure derivation failed: status=$plan_compile_status dep-info=$plan_dep_info_state" >&2
     exit 1
 fi'''
     if (
@@ -3023,6 +3041,7 @@ fi'''
         or len(re.findall(r"(?m)^plan_diagnostic_status=", gate)) != 1
         or len(re.findall(r"(?m)^plan_compile_status=", gate)) != 1
         or len(re.findall(r"(?m)^plan_dep_info=", gate)) != 1
+        or len(re.findall(r"(?m)^\s*plan_dep_info_state=", gate)) != 2
         or len(re.findall(r"(?m)^\s*plan_pipeline_status=", gate)) != 2
         or gate.count('--emit "$plan_diagnostic_output"') != 1
         or "ordinary-wallet-plan.stderr.fifo" in gate
@@ -3042,6 +3061,11 @@ fi'''
         ("fresh dep-info", 'if [ -e "$plan_dep_info" ] || [ -L "$plan_dep_info" ]; then\n'),
         ("writable dep-info", '            --emit=dep-info="$plan_dep_info"\n'),
         ("dep-info mode", "    umask 022\n"),
+        ("failure artifact state", '        plan_dep_info_state=present\n'),
+        (
+            "failure status report",
+            '    echo "ordinary-wallet plan compiler source closure derivation failed: status=$plan_compile_status dep-info=$plan_dep_info_state" >&2\n',
+        ),
     ):
         mutated = gate.replace(token, "", 1)
         if mutated == gate or mutated.count(diagnostic_lifecycle_stanza) != 0:

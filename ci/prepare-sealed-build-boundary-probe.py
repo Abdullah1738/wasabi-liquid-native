@@ -24,7 +24,8 @@ BUILD = r'''use std::{
 
 fn require_denied_write(name: &str) {
     let path = env::var_os(name).expect("sealed target path");
-    let metadata = fs::metadata(&path).expect("sealed target metadata");
+    let metadata = fs::metadata(&path)
+        .unwrap_or_else(|error| panic!("sealed target metadata {name}: {error}"));
     let mut permissions = metadata.permissions();
     permissions.set_readonly(false);
     let permission_changed = fs::set_permissions(&path, permissions).is_ok();

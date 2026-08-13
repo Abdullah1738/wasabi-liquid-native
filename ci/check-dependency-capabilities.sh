@@ -665,7 +665,7 @@ case "$host_system" in
                 '(allow mach-lookup)' \
                 '(allow file-read* (literal "/"))' \
                 '(allow file-read* (subpath "/System") (subpath "/usr") (subpath "/bin") (subpath "/sbin") (subpath "/Applications") (subpath "/Library/Developer") (subpath "/private/etc") (subpath "/private/var/db"))' \
-                '(allow file-read-metadata (literal "/var") (literal "/private/var/select/developer_dir") (literal "/private/var/select/sh"))' \
+                '(allow file-read-metadata (literal "/var") (literal "/var/tmp") (literal "/private/var/select/developer_dir") (literal "/private/var/select/sh"))' \
                 '(allow file-read-metadata (literal "/private") (literal "/private/tmp") (literal "/private/var") (literal "/private/var/tmp"))' \
                 "(allow file-read* (subpath \"$scratch\"))" \
                 "(allow file-read-metadata (literal \"$var_tmp_target\"))" \
@@ -1311,7 +1311,12 @@ if [ "$plan_compile_status" -ne 0 ]; then
         echo "ordinary-wallet plan bounded compiler diagnostic emission failed" >&2
         exit 1
     fi
-    echo "ordinary-wallet plan compiler source closure derivation failed" >&2
+    if [ -e "$plan_dep_info" ] || [ -L "$plan_dep_info" ]; then
+        plan_dep_info_state=present
+    else
+        plan_dep_info_state=absent
+    fi
+    echo "ordinary-wallet plan compiler source closure derivation failed: status=$plan_compile_status dep-info=$plan_dep_info_state" >&2
     exit 1
 fi
 plan_compiled_sources="$(
