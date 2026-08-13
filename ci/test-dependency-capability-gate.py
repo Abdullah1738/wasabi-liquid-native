@@ -1571,6 +1571,17 @@ done
     /usr/bin/sudo -n "$chown_bin" "$build_uid" "$denied_write"
     /usr/bin/sudo -n /bin/chmod 0600 "$denied_write"
 done'''
+    darwin_var_tmp_physical_stanza = '''if [ "$host_system" = Darwin ]; then
+    var_tmp_physical_target="$(/bin/realpath "$var_tmp_target")"
+    if [ "$var_tmp_physical_target" != "/private$var_tmp_target" ]; then
+        echo "Darwin var-tmp probe physical path differs from its exact alias" >&2
+        exit 1
+    fi
+fi'''
+    darwin_var_tmp_target_metadata = (
+        r'"(allow file-read-metadata (literal \"$var_tmp_target\") '
+        r'(literal \"$var_tmp_physical_target\"))"'
+    )
     sandbox_profile_handoff = '''            /usr/bin/sudo -n "$chown_bin" 0 "$sandbox_profile"
             /usr/bin/sudo -n /bin/chmod 0444 "$sandbox_profile"'''
 
@@ -1593,6 +1604,31 @@ done'''
 
     if not handoff_is_exact(gate):
         raise AssertionError("sealed writable ownership handoff is not exact")
+    if (
+        gate.count(darwin_var_tmp_physical_stanza) != 1
+        or gate.count("var_tmp_physical_target=") != 2
+        or not (
+            gate.index('/usr/bin/sudo -n /usr/bin/touch "$var_tmp_target"')
+            < gate.index(darwin_var_tmp_physical_stanza)
+            < gate.index(denied_write_handoff)
+            < gate.index(darwin_var_tmp_target_metadata)
+        )
+    ):
+        raise AssertionError("Darwin physical var-tmp target derivation is not exact")
+    for name, token in (
+        ("physical resolution", '    var_tmp_physical_target="$(/bin/realpath "$var_tmp_target")"\n'),
+        (
+            "physical alias equality",
+            '    if [ "$var_tmp_physical_target" != "/private$var_tmp_target" ]; then\n',
+        ),
+        (
+            "physical alias rejection",
+            '        echo "Darwin var-tmp probe physical path differs from its exact alias" >&2\n',
+        ),
+    ):
+        mutated = gate.replace(token, "", 1)
+        if mutated == gate or mutated.count(darwin_var_tmp_physical_stanza) != 0:
+            raise AssertionError(f"Darwin var-tmp {name} mutation was accepted")
     handoff_mutations = {
         "writable mode privilege": gate.replace(
             '/usr/bin/sudo -n /bin/chmod 0700 "$writable"',
@@ -1760,7 +1796,7 @@ done'''
         darwin_xcode_select_read,
         darwin_tmp_parent_metadata,
         r'"(allow file-read* (subpath \"$scratch\"))"',
-        r'"(allow file-read-metadata (literal \"$var_tmp_target\"))"',
+        darwin_var_tmp_target_metadata,
         darwin_system_map,
         darwin_private_map,
         darwin_private_write,
@@ -2133,6 +2169,19 @@ done'''
             "Xcode selector subtree read",
             darwin_xcode_select_read,
             "'(allow file-read-metadata (literal \"/var\") (subpath \"/private/var/select\"))'",
+        ),
+        (
+            "missing physical var tmp target metadata",
+            darwin_var_tmp_target_metadata,
+            r'"(allow file-read-metadata (literal \"$var_tmp_target\"))"',
+        ),
+        (
+            "physical var tmp target subtree metadata",
+            darwin_var_tmp_target_metadata,
+            darwin_var_tmp_target_metadata.replace(
+                r'(literal \"$var_tmp_physical_target\")',
+                r'(subpath \"$var_tmp_physical_target\")',
+            ),
         ),
     ):
         mutated = gate.replace(original, replacement, 1)
@@ -3081,6 +3130,98 @@ fi'''
         or '"$gate_output/ordinary-wallet-plan.dep-info"' in gate
     ):
         raise AssertionError("compiler source-closure reader wiring is not exact")
+    surface_checker = (
+        ROOT / "ci/check-ordinary-wallet-plan-surface.py"
+    ).read_text(encoding="utf-8")
+    internal_surface_call = (
+        'python3 -I -c \'import importlib.util, pathlib, sys; '
+        'p = pathlib.Path("ci/check-ordinary-wallet-plan-surface.py"); '
+        's = importlib.util.spec_from_file_location("plan_surface", p); '
+        'm = importlib.util.module_from_spec(s); s.loader.exec_module(m); '
+        'm.validate_with_compiled_source_files(tuple(path.removeprefix('
+        '"crates/ordinary-wallet-plan/") for path in sys.argv[1].splitlines()))\' '
+        '"$plan_compiled_sources"'
+    )
+    exact_source_rejection = '''if [ "$plan_compiled_sources" != "$expected_plan_compiled_sources" ]; then
+    echo "ordinary-wallet plan compiler source closure changed" >&2
+    exit 1
+fi'''
+    compiled_boundary = '''def validate_compiled_source_closure_and_pins(
+    source: str, compiled_files: tuple[str, ...]
+) -> str:
+    if compiled_files != EXPECTED_COMPILED_SOURCE_FILES:
+        reject("ordinary-wallet plan compiler source closure changed")'''
+    direct_checker_entry = '''def main() -> None:
+    validate_with_compiled_source_files(compiled_source_files())
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 1:
+        reject("usage: check-ordinary-wallet-plan-surface.py")
+    main()'''
+
+    def surface_composition_is_exact(candidate_gate: str, candidate_checker: str) -> bool:
+        return (
+            candidate_gate.count("python3 -I ci/check-ordinary-wallet-plan-surface.py")
+            == 0
+            and candidate_gate.count(internal_surface_call) == 1
+            and candidate_gate.count(exact_source_rejection) == 1
+            and candidate_gate.count(diagnostic_lifecycle_stanza) == 1
+            and candidate_gate.count(source_closure_reader) == 1
+            and candidate_gate.index(diagnostic_lifecycle_stanza)
+            < candidate_gate.index(source_closure_reader)
+            < candidate_gate.index(exact_source_rejection)
+            < candidate_gate.index(internal_surface_call)
+            and candidate_checker.count("def compiled_source_files() -> tuple[str, ...]:")
+            == 1
+            and candidate_checker.count(compiled_boundary) == 1
+            and candidate_checker.count(
+                "def validate_with_compiled_source_files(compiled_files: tuple[str, ...]) -> None:"
+            )
+            == 1
+            and candidate_checker.count(
+                "validate_with_compiled_source_files(compiled_source_files())"
+            )
+            == 1
+            and candidate_checker.count(direct_checker_entry) == 1
+            and candidate_checker.count('"rustc",') == 1
+            and "compiled_files: tuple[str, ...] | None" not in candidate_checker
+            and "compiled_files = compiled_source_files()" not in candidate_checker
+        )
+
+    if not surface_composition_is_exact(gate, surface_checker):
+        raise AssertionError("sealed compiler closure to surface-checker composition is not exact")
+    for name, candidate_gate, candidate_checker in (
+        (
+            "internal surface call",
+            gate.replace(internal_surface_call, "", 1),
+            surface_checker,
+        ),
+        (
+            "exact source comparison",
+            gate.replace(exact_source_rejection, "", 1),
+            surface_checker,
+        ),
+        (
+            "direct CLI compiler binding",
+            gate,
+            surface_checker.replace(
+                "validate_with_compiled_source_files(compiled_source_files())", "", 1
+            ),
+        ),
+        (
+            "zero-argument direct CLI",
+            gate,
+            surface_checker.replace(direct_checker_entry, "", 1),
+        ),
+        (
+            "explicit compiled-file boundary",
+            gate,
+            surface_checker.replace(compiled_boundary, "", 1),
+        ),
+    ):
+        if surface_composition_is_exact(candidate_gate, candidate_checker):
+            raise AssertionError(f"surface checker {name} mutation was accepted")
     source_closure_helper = (
         ROOT / "ci/read-compiler-source-closure.py"
     ).read_text(encoding="utf-8")
@@ -3197,7 +3338,10 @@ fi'''
     if gate.count(plan_stanza) != 1:
         raise AssertionError("ordinary-wallet plan replay stanza is not singular")
     required_automatic_stanzas = {
-        "surface checker": "python3 -I ci/check-ordinary-wallet-plan-surface.py",
+        "surface checker": (
+            'm.validate_with_compiled_source_files(tuple(path.removeprefix('
+            '"crates/ordinary-wallet-plan/") for path in sys.argv[1].splitlines()))'
+        ),
         "surface negative mutations": "python3 -I ci/test-ordinary-wallet-plan-surface.py",
         "workspace debug check": """run_sealed "$compiler_cargo_bin" check \\
             --workspace \\

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import shutil
 import subprocess
@@ -11,6 +12,39 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def test_precomputed_compiled_source_boundary() -> None:
+    checker_path = ROOT / "ci/check-ordinary-wallet-plan-surface.py"
+    spec = importlib.util.spec_from_file_location("plan_surface_boundary", checker_path)
+    if spec is None or spec.loader is None:
+        raise AssertionError("surface checker import specification is unavailable")
+    checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checker)
+    expected = ("src/lib.rs", "src/reader.rs", "src/writer.rs")
+    source = checker.production_text()
+    if checker.validate_compiled_source_closure_and_pins(source, expected) != source:
+        raise AssertionError("valid precomputed compiled-source boundary changed")
+    invalid = (
+        expected[:-1],
+        (expected[1], expected[0], expected[2]),
+        (*expected, expected[0]),
+        (*expected, "src/extra.rs"),
+        tuple(f"crates/ordinary-wallet-plan/{path}" for path in expected),
+        tuple(str((ROOT / "crates/ordinary-wallet-plan" / path).resolve()) for path in expected),
+    )
+    for compiled_files in invalid:
+        try:
+            checker.validate_compiled_source_closure_and_pins(source, compiled_files)
+        except SystemExit as error:
+            if str(error) != "ordinary-wallet plan compiler source closure changed":
+                raise AssertionError(
+                    f"unexpected precomputed boundary rejection: {error}"
+                ) from error
+        else:
+            raise AssertionError(
+                f"invalid precomputed compiled-source boundary was accepted: {compiled_files}"
+            )
 
 
 def append_lib(root: Path, text: str) -> None:
@@ -292,6 +326,7 @@ def add_local_stateful_encoder(root: Path, declaration: str, expression: str) ->
 
 
 def main() -> None:
+    test_precomputed_compiled_source_boundary()
     with tempfile.TemporaryDirectory(prefix="ordinary-wallet-plan-surface-") as directory:
         scratch = Path(directory)
         valid = copy_root(scratch, "valid")

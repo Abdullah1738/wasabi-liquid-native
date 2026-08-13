@@ -1140,8 +1140,9 @@ def compiled_source_files() -> tuple[str, ...]:
     return tuple(sorted(sources))
 
 
-def validate_compiled_source_closure_and_pins(source: str) -> str:
-    compiled_files = compiled_source_files()
+def validate_compiled_source_closure_and_pins(
+    source: str, compiled_files: tuple[str, ...]
+) -> str:
     if compiled_files != EXPECTED_COMPILED_SOURCE_FILES:
         reject("ordinary-wallet plan compiler source closure changed")
     compiled_source = "\n".join(
@@ -1328,7 +1329,7 @@ def validate_authority_regions() -> None:
         reject("ordinary-wallet plan authority-critical inherent method inventory changed")
 
 
-def main() -> None:
+def validate_with_compiled_source_files(compiled_files: tuple[str, ...]) -> None:
     actual_files = {
         path.relative_to(CRATE).as_posix()
         for path in CRATE.rglob("*")
@@ -1395,7 +1396,7 @@ def main() -> None:
         reject("ordinary-wallet plan Cargo metadata target inventory mismatch")
 
     source = production_text()
-    compiled_source = validate_compiled_source_closure_and_pins(source)
+    compiled_source = validate_compiled_source_closure_and_pins(source, compiled_files)
     validate_authority_regions()
     validate_runtime_authority_sources_and_edges()
     lexical_source = strip_rust_comments(source)
@@ -1540,6 +1541,10 @@ def main() -> None:
         or FORBIDDEN_WALLET_FACTS_API.search(compiled_lexical_source)
     ):
         reject("ordinary-wallet plan compiled source closure escaped its boundary")
+
+
+def main() -> None:
+    validate_with_compiled_source_files(compiled_source_files())
 
 
 if __name__ == "__main__":

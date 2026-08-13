@@ -173,6 +173,7 @@ proof_snapshot="$scratch/ordinary-wallet-plan-public-proof-snapshot"
 build_user=
 build_uid=
 var_tmp_target=
+var_tmp_physical_target=
 darwin_account_lock=/var/tmp/wasabi-liquid-wlpq-account.lock
 darwin_account_marker=
 darwin_account_marker_value=
@@ -630,6 +631,13 @@ var_tmp_target="/var/tmp/wasabi-liquid-build-write-probe.$$"
 delayed_write_target="$build_home/delayed-descendant-write"
 /usr/bin/touch "$host_write_target"
 /usr/bin/sudo -n /usr/bin/touch "$var_tmp_target"
+if [ "$host_system" = Darwin ]; then
+    var_tmp_physical_target="$(/bin/realpath "$var_tmp_target")"
+    if [ "$var_tmp_physical_target" != "/private$var_tmp_target" ]; then
+        echo "Darwin var-tmp probe physical path differs from its exact alias" >&2
+        exit 1
+    fi
+fi
 for denied_write in "$host_write_target" "$var_tmp_target"; do
     /usr/bin/sudo -n "$chown_bin" "$build_uid" "$denied_write"
     /usr/bin/sudo -n /bin/chmod 0600 "$denied_write"
@@ -668,7 +676,7 @@ case "$host_system" in
                 '(allow file-read-metadata (literal "/var") (literal "/var/tmp") (literal "/private/var/select/developer_dir") (literal "/private/var/select/sh"))' \
                 '(allow file-read-metadata (literal "/private") (literal "/private/tmp") (literal "/private/var") (literal "/private/var/tmp"))' \
                 "(allow file-read* (subpath \"$scratch\"))" \
-                "(allow file-read-metadata (literal \"$var_tmp_target\"))" \
+                "(allow file-read-metadata (literal \"$var_tmp_target\") (literal \"$var_tmp_physical_target\"))" \
                 '(allow file-map-executable (subpath "/System") (subpath "/usr") (subpath "/bin") (subpath "/sbin") (subpath "/Applications") (subpath "/Library/Developer"))' \
                 "(allow file-map-executable (subpath \"$sealed_toolchain\") (subpath \"$sealed_command_bin\") (subpath \"$profile_target\") (literal \"$sealed_proof_binary\"))" \
                 "(allow file-write* (subpath \"$build_home\") (subpath \"$build_tmp\") (subpath \"$profile_target\"))" \
@@ -1217,7 +1225,6 @@ if ! grep -Fq 'crate-type = ["rlib"]' crates/wallet-facts-wire/Cargo.toml ||
     exit 1
 fi
 
-python3 -I ci/check-ordinary-wallet-plan-surface.py
 python3 -I -c 'import importlib.util, pathlib; p = pathlib.Path("ci/check-ordinary-wallet-plan-surface.py"); s = importlib.util.spec_from_file_location("plan_surface", p); m = importlib.util.module_from_spec(s); s.loader.exec_module(m); m.validate_manifest_targets(); m.validate_dependency_authority_surface(m.production_text())'
 python3 -I ci/test-ordinary-wallet-plan-surface.py
 plan_sources="$(find crates/ordinary-wallet-plan/src -type f -name '*.rs' ! -name 'tests.rs' -print | sort)"
@@ -1330,6 +1337,7 @@ if [ "$plan_compiled_sources" != "$expected_plan_compiled_sources" ]; then
     echo "ordinary-wallet plan compiler source closure changed" >&2
     exit 1
 fi
+python3 -I -c 'import importlib.util, pathlib, sys; p = pathlib.Path("ci/check-ordinary-wallet-plan-surface.py"); s = importlib.util.spec_from_file_location("plan_surface", p); m = importlib.util.module_from_spec(s); s.loader.exec_module(m); m.validate_with_compiled_source_files(tuple(path.removeprefix("crates/ordinary-wallet-plan/") for path in sys.argv[1].splitlines()))' "$plan_compiled_sources"
 if printf '%s\n' "$plan_lexical_source" | grep -En 'wasabi_liquid_native_output_opening|wasabi_liquid_native_ordinary_wallet_pset|open_prepared_selected_owned_inputs|SelectedOutputOpeningProvider|SecretKey|rand::|getrandom|std[[:space:]]*::[[:space:]]*(process|env|thread|fs|net|time)|no_mangle|export_name|extern[[:space:]]*"C"|include(_str|_bytes)?[[:space:]]*!|AddressParams::ELEMENTS|LiquidAddressProfile::ElementsDefault'; then
     echo "ordinary-wallet plan source capability escaped its reviewed boundary" >&2
     exit 1
