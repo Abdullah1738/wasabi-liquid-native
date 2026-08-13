@@ -470,83 +470,12 @@ def main() -> int:
             if pinned_database == database_name
         )
         checkout_description = checkout_git / "description"
-        description_bytes = checkout_description.read_bytes()
-        os.chmod(checkout_description, 0o755)
-        preparer.remove_constructed_checkout_description(materialized_cargo_home, checkout)
-        if os.path.lexists(checkout_description):
-            raise AssertionError("constructed Git description metadata was retained")
-        preparer.remove_constructed_checkout_description(materialized_cargo_home, checkout)
-
-        cleanup_root = scratch / "description-cleanup-root"
-        external_parent = scratch / "external-checkout-parent"
-        external_description = external_parent / "checkout/.git/description"
-        external_description.parent.mkdir(parents=True)
-        external_description.write_bytes(b"external description")
-        cleanup_root.mkdir()
-        (cleanup_root / "linked-parent").symlink_to(external_parent)
-        expect_snapshot_error(
-            preparer,
-            lambda: preparer.remove_constructed_checkout_description(
-                cleanup_root, cleanup_root / "linked-parent/checkout"
-            ),
-            "linked constructed Git cleanup ancestry was traversed",
-        )
-        if external_description.read_bytes() != b"external description":
-            raise AssertionError("linked cleanup ancestry changed its external target")
-
-        linked_description_target = scratch / "linked-description-target"
-        linked_description_target.write_bytes(description_bytes)
-        checkout_description.symlink_to(linked_description_target)
-        preparer.remove_constructed_checkout_description(materialized_cargo_home, checkout)
-        if (
-            os.path.lexists(checkout_description)
-            or linked_description_target.read_bytes() != description_bytes
-        ):
-            raise AssertionError("linked description cleanup changed its external target")
-
-        os.link(linked_description_target, checkout_description)
-        preparer.remove_constructed_checkout_description(materialized_cargo_home, checkout)
-        if (
-            os.path.lexists(checkout_description)
-            or linked_description_target.read_bytes() != description_bytes
-        ):
-            raise AssertionError("hardlinked description cleanup changed its external target")
-
-        swapped_description_target = scratch / "swapped-description-target"
-        swapped_description_target.write_bytes(b"external target")
-        os.chmod(swapped_description_target, 0o600)
-        checkout_description.write_bytes(description_bytes)
-        original_unlink = preparer.os.unlink
-        swapped = False
-
-        def swap_description_before_unlink(path, *, dir_fd=None):
-            nonlocal swapped
-            if path == "description" and dir_fd is not None and not swapped:
-                swapped = True
-                checkout_description.unlink()
-                checkout_description.symlink_to(swapped_description_target)
-            return original_unlink(path, dir_fd=dir_fd)
-
-        preparer.os.unlink = swap_description_before_unlink
-        try:
-            preparer.remove_constructed_checkout_description(materialized_cargo_home, checkout)
-        finally:
-            preparer.os.unlink = original_unlink
-        if (
-            not swapped
-            or os.path.lexists(checkout_description)
-            or stat.S_IMODE(os.lstat(swapped_description_target).st_mode) != 0o600
-            or swapped_description_target.read_bytes() != b"external target"
-        ):
-            raise AssertionError("description race did not run or changed its external target")
-        checkout_description.write_bytes(description_bytes)
-        os.chmod(checkout_description, 0o644)
         expect_snapshot_error(
             preparer,
             lambda: preparer.validate_checkout_git_metadata(
-                checkout, database, commit, allow_description=False
+                checkout, database, commit, allow_templates=False
             ),
-            "constructed checkout retained optional description metadata",
+            "constructed checkout retained optional template metadata",
         )
 
         os.chmod(checkout_description, 0o600)
@@ -617,8 +546,18 @@ def main() -> int:
             lock_bytes,
             Path("/usr/bin/git"),
         )
-        if list(private_cargo_home.glob("git/checkouts/*/*/.git/description")):
-            raise AssertionError("final Cargo checkout retained optional description metadata")
+        retained_templates = [
+            path
+            for checkout_git in private_cargo_home.glob("git/checkouts/*/*/.git")
+            for path in (
+                checkout_git / "description",
+                checkout_git / "info/exclude",
+                *checkout_git.glob("hooks/**/*"),
+            )
+            if path.is_file() or path.is_symlink()
+        ]
+        if retained_templates:
+            raise AssertionError("final Cargo checkout retained optional template metadata")
         preparer.normalize_read_only(snapshot)
         preparer.verify_private_state(snapshot, private_cargo_home, authority, authority_digest)
         materialize_sources(

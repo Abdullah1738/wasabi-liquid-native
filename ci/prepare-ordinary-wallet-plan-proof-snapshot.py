@@ -791,7 +791,7 @@ def validate_checkout_git_metadata(
     database: Path,
     commit: str,
     *,
-    allow_description: bool = True,
+    allow_templates: bool = True,
 ) -> None:
     git_directory = checkout / ".git"
     # Cargo may hardlink its disposable checkout object store to git/db. Those
@@ -814,8 +814,13 @@ def validate_checkout_git_metadata(
         master is None or master[0] != f"{commit}\n".encode("ascii")
     ):
         reject("Git checkout branch reference differs from its pinned commit")
-    if not allow_description and Path("description") in files:
-        reject("constructed Git checkout retained optional description metadata")
+    if not allow_templates and any(
+        relative == Path("description")
+        or relative == Path("info/exclude")
+        or relative.is_relative_to("hooks")
+        for relative in files
+    ):
+        reject("constructed Git checkout retained optional template metadata")
     allowed_fixed = {
         Path("HEAD"),
         Path("config"),
@@ -841,61 +846,6 @@ def validate_checkout_git_metadata(
                 f"path_utf8_hex={path_utf8_hex} is {mode:#05o}, "
                 f"expected {expected_mode:#05o}"
             )
-
-
-def remove_constructed_checkout_description(root: Path, checkout: Path) -> None:
-    no_follow = getattr(os, "O_NOFOLLOW", None)
-    directory_only = getattr(os, "O_DIRECTORY", None)
-    if no_follow is None or directory_only is None:
-        reject("descriptor-bound Git checkout cleanup is unavailable")
-    if not root.is_absolute() or not checkout.is_absolute() or not checkout.is_relative_to(root):
-        reject("absolute contained Git checkout cleanup paths are required")
-    relative_checkout = checkout.relative_to(root)
-    if relative_checkout == Path("."):
-        reject("Git checkout cleanup requires a descendant of its root")
-    descriptors: list[int] = []
-    try:
-        root_before = os.lstat(root)
-        root_descriptor = os.open(root, os.O_RDONLY | directory_only | no_follow)
-        descriptors.append(root_descriptor)
-        if (
-            not stat.S_ISDIR(root_before.st_mode)
-            or identity(root_before) != identity(os.fstat(root_descriptor))
-        ):
-            reject("constructed Git cleanup root changed before open")
-        parent_descriptor = root_descriptor
-        for component in (*relative_checkout.parts, ".git"):
-            before = os.stat(
-                component, dir_fd=parent_descriptor, follow_symlinks=False
-            )
-            descriptor = os.open(
-                component,
-                os.O_RDONLY | directory_only | no_follow,
-                dir_fd=parent_descriptor,
-            )
-            descriptors.append(descriptor)
-            if (
-                not stat.S_ISDIR(before.st_mode)
-                or identity(before) != identity(os.fstat(descriptor))
-            ):
-                reject("constructed Git cleanup ancestry changed before open")
-            parent_descriptor = descriptor
-        git_descriptor = descriptors[-1]
-        try:
-            os.unlink("description", dir_fd=git_descriptor)
-        except FileNotFoundError:
-            pass
-        try:
-            os.stat("description", dir_fd=git_descriptor, follow_symlinks=False)
-        except FileNotFoundError:
-            pass
-        else:
-            reject("constructed Git checkout retained optional description metadata")
-    except OSError:
-        reject("constructed Git checkout description cleanup failed closed")
-    finally:
-        for descriptor in reversed(descriptors):
-            os.close(descriptor)
 
 
 def copy_git_workspace_snapshot(
@@ -979,7 +929,7 @@ def validate_git_materialization(
             checkout,
             materialized / "git/db" / database_name,
             commit,
-            allow_description=not constructed,
+            allow_templates=not constructed,
         )
 
 
@@ -1011,15 +961,29 @@ def construct_final_sources(final: Path, lock_bytes: bytes, git_bin: Path) -> No
             os.chmod(path, mode)
         write_private(package_root / ".cargo-ok", b'{"v":1}')
         os.chmod(package_root / ".cargo-ok", 0o644)
+    empty_template = final / ".empty-git-template"
+    empty_template.mkdir(mode=0o700)
     for source in sorted(git_sources):
         database_name, commit = GIT_DATABASES[source]
         checkout = final / "git/checkouts" / database_name / commit[:7]
         checkout.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        run_git(git_bin, ["clone", "--no-hardlinks", "--no-checkout", str(final / "git/db" / database_name), str(checkout)])
+        run_git(
+            git_bin,
+            [
+                "clone",
+                f"--template={empty_template}",
+                "--no-hardlinks",
+                "--no-checkout",
+                str(final / "git/db" / database_name),
+                str(checkout),
+            ],
+        )
         run_git(git_bin, ["--git-dir", str(checkout / ".git"), "--work-tree", str(checkout), "checkout", "--detach", commit])
-        remove_constructed_checkout_description(final, checkout)
         write_private(checkout / ".cargo-ok", b"")
         os.chmod(checkout / ".cargo-ok", 0o644)
+    if list(os.scandir(empty_template)):
+        reject("empty Git template gained an entry during reconstruction")
+    empty_template.rmdir()
 
 
 def finalize_cache_state(
