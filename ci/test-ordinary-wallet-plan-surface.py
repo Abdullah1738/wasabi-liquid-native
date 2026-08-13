@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import shutil
+import stat
 import subprocess
 import tempfile
 from pathlib import Path
@@ -257,6 +258,31 @@ def run_checker(root: Path, *, success: bool, contains: str | None = None) -> No
         raise AssertionError(f"surface result did not contain {contains!r}:\n{output}")
 
 
+def make_owner_mutable(root: Path) -> None:
+    paths = (root, *root.rglob("*"))
+    for path in paths:
+        metadata = os.lstat(path)
+        if stat.S_ISLNK(metadata.st_mode):
+            continue
+        os.chmod(path, stat.S_IMODE(metadata.st_mode) | stat.S_IWUSR)
+
+
+def test_make_owner_mutable() -> None:
+    with tempfile.TemporaryDirectory(prefix="ordinary-wallet-plan-mutable-") as directory:
+        root = Path(directory) / "sealed-copy"
+        nested = root / "nested"
+        nested.mkdir(parents=True)
+        source = nested / "source.rs"
+        source.write_text("pub fn checked() {}\n")
+        source.chmod(0o444)
+        nested.chmod(0o555)
+        root.chmod(0o555)
+        make_owner_mutable(root)
+        for path in (root, nested, source):
+            if not stat.S_IMODE(os.lstat(path).st_mode) & stat.S_IWUSR:
+                raise AssertionError(f"private mutation copy remained read-only: {path}")
+
+
 def copy_root(parent: Path, name: str) -> Path:
     destination = parent / name
     shutil.copytree(
@@ -264,6 +290,7 @@ def copy_root(parent: Path, name: str) -> Path:
         destination,
         ignore=shutil.ignore_patterns(".git", "target", "tmp", "__pycache__", "*.pyc"),
     )
+    make_owner_mutable(destination)
     return destination
 
 
@@ -327,6 +354,7 @@ def add_local_stateful_encoder(root: Path, declaration: str, expression: str) ->
 
 def main() -> None:
     test_precomputed_compiled_source_boundary()
+    test_make_owner_mutable()
     with tempfile.TemporaryDirectory(prefix="ordinary-wallet-plan-surface-") as directory:
         scratch = Path(directory)
         valid = copy_root(scratch, "valid")

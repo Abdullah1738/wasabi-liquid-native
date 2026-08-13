@@ -3133,6 +3133,36 @@ fi'''
     surface_checker = (
         ROOT / "ci/check-ordinary-wallet-plan-surface.py"
     ).read_text(encoding="utf-8")
+    surface_mutations = (
+        ROOT / "ci/test-ordinary-wallet-plan-surface.py"
+    ).read_text(encoding="utf-8")
+    owner_mutable_helper = '''def make_owner_mutable(root: Path) -> None:
+    paths = (root, *root.rglob("*"))
+    for path in paths:
+        metadata = os.lstat(path)
+        if stat.S_ISLNK(metadata.st_mode):
+            continue
+        os.chmod(path, stat.S_IMODE(metadata.st_mode) | stat.S_IWUSR)'''
+
+    def owner_mutation_copy_is_exact(candidate: str) -> bool:
+        return (
+            candidate.count(owner_mutable_helper) == 1
+            and candidate.count("    make_owner_mutable(destination)\n") == 1
+            and candidate.count("def test_make_owner_mutable() -> None:") == 1
+            and candidate.count("    test_make_owner_mutable()\n") == 1
+        )
+
+    if not owner_mutation_copy_is_exact(surface_mutations):
+        raise AssertionError("private surface-mutation copy mutability is not exact")
+    for name, token in (
+        ("owner mode repair", "        os.chmod(path, stat.S_IMODE(metadata.st_mode) | stat.S_IWUSR)\n"),
+        ("symlink exclusion", "        if stat.S_ISLNK(metadata.st_mode):\n"),
+        ("copy integration", "    make_owner_mutable(destination)\n"),
+        ("focused behavior test", "    test_make_owner_mutable()\n"),
+    ):
+        mutated = surface_mutations.replace(token, "", 1)
+        if mutated == surface_mutations or owner_mutation_copy_is_exact(mutated):
+            raise AssertionError(f"private mutation-copy {name} mutation was accepted")
     internal_surface_call = (
         'python3 -I -c \'import importlib.util, pathlib, sys; '
         'p = pathlib.Path("ci/check-ordinary-wallet-plan-surface.py"); '
