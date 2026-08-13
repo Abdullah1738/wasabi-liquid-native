@@ -80,10 +80,10 @@ fi
 # that recursive semantics were applied to every record.
 /usr/bin/mount -o remount,bind,ro=recursive /
 if ! /usr/bin/awk '
-function has_option(options, wanted, count, index, fields) {
+function has_option(options, wanted, count, position, fields) {
     count = split(options, fields, ",")
-    for (index = 1; index <= count; index++) {
-        if (fields[index] == wanted) return 1
+    for (position = 1; position <= count; position++) {
+        if (fields[position] == wanted) return 1
     }
     return 0
 }
@@ -106,10 +106,10 @@ for writable in "$build_home" "$build_tmp" "$target_dir"; do
     /usr/bin/mount -o remount,bind,rw "$writable"
 done
 if ! /usr/bin/awk -v build_home="$build_home" -v build_tmp="$build_tmp" -v target_dir="$target_dir" '
-function has_option(options, wanted, count, index, fields) {
+function has_option(options, wanted, count, position, fields) {
     count = split(options, fields, ",")
-    for (index = 1; index <= count; index++) {
-        if (fields[index] == wanted) return 1
+    for (position = 1; position <= count; position++) {
+        if (fields[position] == wanted) return 1
     }
     return 0
 }

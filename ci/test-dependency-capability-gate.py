@@ -1098,6 +1098,114 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
     for token in privilege_tokens:
         if gate.count(token) != 1:
             raise AssertionError(f"sealed compiler boundary token is not exact: {token}")
+
+    darwin_toolchain_authority_tokens = (
+        'prepare_darwin_toolchain() {',
+        'expected_darwin_developer_dir=/Applications/Xcode_15.4.app/Contents/Developer',
+        'expected_darwin_sdkroot="$expected_darwin_developer_dir/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"',
+        "expected_darwin_xcode_version='Xcode 15.4\nBuild version 15F31d'",
+        'darwin_require_root_immutable_path() {',
+        'immutable_state="$(/usr/bin/sudo -n /usr/bin/stat -f \'%u:%OLp:%HT\' "$immutable_path")"',
+        'if [ "$immutable_uid" != 0 ] || [ "$immutable_actual_type" != "$immutable_type" ]; then',
+        '*[2367][0-7]|*[0-7][2367])',
+        'darwin_resolve_tool() {',
+        'link_name="$(/usr/bin/readlink "$tool_path")"',
+        "case \"$link_name\" in ''|.|..|*/*)",
+        'if [ "$link_depth" -gt 8 ]; then',
+        'tool_parent="$(cd -P "${tool_path%/*}" && /bin/pwd -P)"',
+        'case "$tool_path" in "$darwin_toolchain_bin"/*)',
+        'darwin_require_root_immutable_path "$tool_path" \'Regular File\'',
+        'darwin_developer_dir="$(/usr/bin/xcode-select --print-path)"',
+        'if [ "$darwin_developer_dir" != "$expected_darwin_developer_dir" ]; then',
+        'darwin_require_root_immutable_path "$darwin_developer_dir" \'Directory\'',
+        'darwin_require_root_immutable_path "$darwin_xcodebuild" \'Regular File\'',
+        'if [ "$("$darwin_xcodebuild" -version)" != "$expected_darwin_xcode_version" ]; then',
+        'darwin_sdkroot="$(DEVELOPER_DIR="$darwin_developer_dir" /usr/bin/xcrun --sdk macosx --show-sdk-path)"',
+        'if [ "$darwin_sdkroot" != "$expected_darwin_sdkroot" ]; then',
+        'darwin_require_root_immutable_path "$darwin_sdkroot" \'Directory\'',
+        'darwin_toolchain_bin="$(cd -P "$darwin_toolchain_bin" && /bin/pwd -P)"',
+        'darwin_require_root_immutable_path "$darwin_toolchain_bin" \'Directory\'',
+        'if [ "$(DEVELOPER_DIR="$darwin_developer_dir" /usr/bin/xcrun --sdk macosx --find clang)" != "$darwin_toolchain_bin/clang" ]; then',
+        'darwin_cc_bin="$(darwin_resolve_tool clang)"',
+        'darwin_cxx_bin="$(darwin_resolve_tool clang++)"',
+        'darwin_ar_bin="$(darwin_resolve_tool ar)"',
+        'darwin_as_bin="$(darwin_resolve_tool as)"',
+        'darwin_ld_bin="$(darwin_resolve_tool ld)"',
+        'darwin_nm_bin="$(darwin_resolve_tool nm)"',
+        'darwin_ranlib_bin="$(darwin_resolve_tool ranlib)"',
+        'darwin_strip_bin="$(darwin_resolve_tool strip)"',
+        'for system_name in awk bash cat chmod diff env find git grep head id make mkdir mktemp perl rm sed sh sort tr uname wc; do',
+        'link_trusted_tool cc "$darwin_cc_bin"',
+        'link_trusted_tool c++ "$darwin_cxx_bin"',
+        'link_trusted_tool ar "$darwin_ar_bin"',
+        'link_trusted_tool as "$darwin_as_bin"',
+        'link_trusted_tool ld "$darwin_ld_bin"',
+        'link_trusted_tool nm "$darwin_nm_bin"',
+        'link_trusted_tool ranlib "$darwin_ranlib_bin"',
+        'link_trusted_tool strip "$darwin_strip_bin"',
+        'for system_name in ar as cc c++ ld nm ranlib strip; do',
+        '\nprepare_darwin_toolchain\n',
+        '                "$darwin_sdkroot" \\\n                "${@}"',
+    )
+
+    def darwin_toolchain_authority_is_exact(candidate: str) -> bool:
+        if any(candidate.count(token) != 1 for token in darwin_toolchain_authority_tokens):
+            return False
+        if any(
+            token in candidate
+            for token in (
+                'link_system_tool xcrun',
+                '/Library/Developer/CommandLineTools',
+                '/var/folders',
+                'xcrun_nocache',
+            )
+        ):
+            return False
+        return (
+            candidate.index('prepare_darwin_toolchain() {')
+            < candidate.index('"$python_bin" -I ci/check-ordinary-wallet-plan-public-proof-surface.py')
+            < candidate.index('if ! /usr/bin/sudo -n true; then')
+            < candidate.index('\nprepare_darwin_toolchain\n')
+            < candidate.index('trusted_bin="$scratch/trusted-bin"')
+            < candidate.index('link_trusted_tool cc "$darwin_cc_bin"')
+            < candidate.index('proof_sandbox_profile="$scratch/build-proof.sb"')
+            < candidate.index('                "$darwin_sdkroot" \\\n                "${@}"')
+        )
+
+    if not darwin_toolchain_authority_is_exact(gate):
+        raise AssertionError("pinned Darwin SDK and toolchain authority is not exact")
+    for token in darwin_toolchain_authority_tokens:
+        mutated = gate.replace(token, "", 1)
+        if mutated == gate or darwin_toolchain_authority_is_exact(mutated):
+            raise AssertionError(f"Darwin toolchain authority mutation was accepted: {token}")
+    for name, mutation in (
+        (
+            "unversioned Xcode",
+            gate.replace("/Applications/Xcode_15.4.app", "/Applications/Xcode.app", 1),
+        ),
+        (
+            "ambient SDK resolution",
+            gate.replace(
+                'DEVELOPER_DIR="$darwin_developer_dir" /usr/bin/xcrun --sdk macosx --show-sdk-path',
+                '/usr/bin/xcrun --sdk macosx --show-sdk-path',
+                1,
+            ),
+        ),
+        (
+            "system compiler shim",
+            gate.replace('link_trusted_tool cc "$darwin_cc_bin"', 'link_system_tool cc', 1),
+        ),
+        (
+            "trusted xcrun shim",
+            gate.replace(
+                'link_trusted_tool cc "$darwin_cc_bin"',
+                'link_system_tool xcrun\n    link_trusted_tool cc "$darwin_cc_bin"',
+                1,
+            ),
+        ),
+    ):
+        if mutation == gate or darwin_toolchain_authority_is_exact(mutation):
+            raise AssertionError(f"Darwin toolchain {name} mutation was accepted")
     writable_handoff = '''for writable in "$build_home" "$proof_target" "$workspace_target" "$build_tmp"; do
     /usr/bin/sudo -n "$chown_bin" "$build_uid" "$writable"
     /usr/bin/sudo -n /bin/chmod 0700 "$writable"
@@ -1239,7 +1347,8 @@ done'''
     )
     darwin_xcode_select_read = (
         "'(allow file-read-metadata (literal \"/var\") "
-        "(literal \"/private/var/select/developer_dir\"))'"
+        "(literal \"/private/var/select/developer_dir\") "
+        "(literal \"/private/var/select/sh\"))'"
     )
     darwin_system_map = (
         "'(allow file-map-executable (subpath \"/System\") (subpath \"/usr\") "
@@ -1487,6 +1596,16 @@ done'''
             darwin_xcode_select_read,
             "'(allow file-read-metadata (subpath \"/private/var\"))'",
         ),
+        (
+            "Xcode selector data read",
+            darwin_xcode_select_read,
+            darwin_xcode_select_read.replace("file-read-metadata", "file-read-data"),
+        ),
+        (
+            "Xcode selector subtree read",
+            darwin_xcode_select_read,
+            "'(allow file-read-metadata (literal \"/var\") (subpath \"/private/var/select\"))'",
+        ),
     ):
         mutated = gate.replace(original, replacement, 1)
         if mutated == gate or darwin_profile_is_exact(mutated):
@@ -1603,10 +1722,10 @@ done'''
             raise AssertionError(f"sealed Linux boundary token is not exact: {token}")
     linux_recursive_read_only = '/usr/bin/mount -o remount,bind,ro=recursive /'
     linux_all_read_only_audit = '''if ! /usr/bin/awk '
-function has_option(options, wanted, count, index, fields) {
+function has_option(options, wanted, count, position, fields) {
     count = split(options, fields, ",")
-    for (index = 1; index <= count; index++) {
-        if (fields[index] == wanted) return 1
+    for (position = 1; position <= count; position++) {
+        if (fields[position] == wanted) return 1
     }
     return 0
 }
@@ -1627,10 +1746,10 @@ fi'''
     /usr/bin/mount -o remount,bind,rw "$writable"
 done'''
     linux_exact_writable_audit = '''if ! /usr/bin/awk -v build_home="$build_home" -v build_tmp="$build_tmp" -v target_dir="$target_dir" '
-function has_option(options, wanted, count, index, fields) {
+function has_option(options, wanted, count, position, fields) {
     count = split(options, fields, ",")
-    for (index = 1; index <= count; index++) {
-        if (fields[index] == wanted) return 1
+    for (position = 1; position <= count; position++) {
+        if (fields[position] == wanted) return 1
     }
     return 0
 }
@@ -1755,6 +1874,9 @@ fi'''
     for token in (
         '/usr/bin/sudo -n -u "$build_user" /usr/bin/sandbox-exec -f "$sandbox_profile"',
         '/usr/bin/env -i HOME="$build_home" TMPDIR="$build_tmp" PATH="$trusted_bin:/usr/bin:/bin"',
+        'SDKROOT="$darwin_sdkroot"',
+        'darwin_sdkroot=${20}',
+        '"$delayed_write_target" "$darwin_sdkroot"; do',
         '/usr/bin/pkill -TERM -u "$build_uid"',
         '/usr/bin/pkill -KILL -u "$build_uid"',
         '/usr/bin/pgrep -u "$build_uid"',
@@ -1914,23 +2036,26 @@ fi'''
     for name, mutated_diagnostic in signal_mutations.items():
         if mutated_diagnostic == darwin_wrapper or signal_diagnostic_is_exact(mutated_diagnostic):
             raise AssertionError(f"sealed Darwin signal diagnostic {name} mutation was accepted")
-    for name, wrapper, minimum in (
-        ("Darwin", darwin_wrapper, 20),
-        ("Linux", linux_wrapper, 20),
+    for name, wrapper, minimum, shift_count in (
+        ("Darwin", darwin_wrapper, 21, 20),
+        ("Linux", linux_wrapper, 20, 19),
     ):
+        initial_check = f'if [ "$#" -lt {minimum} ]'
+        shift = f"shift {shift_count}"
         if (
-            wrapper.count('if [ "$#" -lt 20 ]') != 1
-            or wrapper.count('shift 19') != 1
+            wrapper.count(initial_check) != 1
+            or wrapper.count(shift) != 1
             or wrapper.count('if [ "$#" -lt 1 ]; then') != 1
         ):
             raise AssertionError(f"sealed {name} wrapper lacks exact post-shift command check")
         def accepts(count: int) -> bool:
-            return count >= minimum and count - 19 >= 1
+            return count >= minimum and count - shift_count >= 1
 
-        accepted = {count: accepts(count) for count in (19, 20, 21)}
-        if accepted != {19: False, 20: True, 21: True}:
-            raise AssertionError(f"sealed {name} wrapper 19/20/21 argument contract differs")
-        for removed in ('if [ "$#" -lt 20 ]', 'shift 19', 'if [ "$#" -lt 1 ]; then'):
+        counts = (minimum - 1, minimum, minimum + 1)
+        accepted = {count: accepts(count) for count in counts}
+        if accepted != {minimum - 1: False, minimum: True, minimum + 1: True}:
+            raise AssertionError(f"sealed {name} wrapper argument contract differs")
+        for removed in (initial_check, shift, 'if [ "$#" -lt 1 ]; then'):
             mutated = wrapper.replace(removed, "", 1)
             if mutated == wrapper or mutated.count(removed) != 0:
                 raise AssertionError(f"sealed {name} wrapper argument mutation was accepted: {removed}")

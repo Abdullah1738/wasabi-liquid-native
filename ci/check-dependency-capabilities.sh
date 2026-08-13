@@ -23,6 +23,107 @@ case "$host_system" in
     Linux) python_bin=/usr/bin/python3; chown_bin=/usr/bin/chown ;;
     *) echo "unsupported compiler host" >&2; exit 1 ;;
 esac
+darwin_developer_dir=
+darwin_sdkroot=
+darwin_toolchain_bin=
+darwin_cc_bin=
+darwin_cxx_bin=
+darwin_ar_bin=
+darwin_as_bin=
+darwin_ld_bin=
+darwin_nm_bin=
+darwin_ranlib_bin=
+darwin_strip_bin=
+prepare_darwin_toolchain() {
+    if [ "$host_system" != Darwin ]; then
+        return
+    fi
+    expected_darwin_developer_dir=/Applications/Xcode_15.4.app/Contents/Developer
+    expected_darwin_sdkroot="$expected_darwin_developer_dir/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
+    expected_darwin_xcode_version='Xcode 15.4
+Build version 15F31d'
+    darwin_require_root_immutable_path() {
+        immutable_path=$1
+        immutable_type=$2
+        immutable_state="$(/usr/bin/sudo -n /usr/bin/stat -f '%u:%OLp:%HT' "$immutable_path")"
+        immutable_uid=${immutable_state%%:*}
+        immutable_remainder=${immutable_state#*:}
+        immutable_mode=${immutable_remainder%%:*}
+        immutable_actual_type=${immutable_remainder#*:}
+        case "$immutable_mode" in
+            [0-7][0-7][0-7]|[0-7][0-7][0-7][0-7]) ;;
+            *) echo "selected Darwin path has a noncanonical mode: $immutable_path" >&2; exit 1 ;;
+        esac
+        if [ "$immutable_uid" != 0 ] || [ "$immutable_actual_type" != "$immutable_type" ]; then
+            echo "selected Darwin path has an unreviewed owner or type: $immutable_path" >&2
+            exit 1
+        fi
+        case "$immutable_mode" in
+            *[2367][0-7]|*[0-7][2367])
+                echo "selected Darwin path is writable outside root ownership: $immutable_path" >&2
+                exit 1
+                ;;
+        esac
+    }
+    darwin_resolve_tool() {
+        tool_path="$darwin_toolchain_bin/$1"
+        link_depth=0
+        while [ -L "$tool_path" ]; do
+            link_name="$(/usr/bin/readlink "$tool_path")"
+            case "$link_name" in ''|.|..|*/*) echo "selected Darwin tool symlink escapes its reviewed directory" >&2; exit 1 ;; esac
+            tool_path="$darwin_toolchain_bin/$link_name"
+            link_depth=$((link_depth + 1))
+            if [ "$link_depth" -gt 8 ]; then
+                echo "selected Darwin tool symlink chain is noncanonical" >&2
+                exit 1
+            fi
+        done
+        tool_parent="$(cd -P "${tool_path%/*}" && /bin/pwd -P)"
+        tool_path="$tool_parent/${tool_path##*/}"
+        case "$tool_path" in "$darwin_toolchain_bin"/*) ;; *) echo "selected Darwin tool escapes its reviewed directory" >&2; exit 1 ;; esac
+        if [ ! -f "$tool_path" ] || [ ! -x "$tool_path" ]; then
+            echo "selected Darwin tool is unavailable: $1" >&2
+            exit 1
+        fi
+        darwin_require_root_immutable_path "$tool_path" 'Regular File'
+        /usr/bin/printf '%s\n' "$tool_path"
+    }
+    darwin_developer_dir="$(/usr/bin/xcode-select --print-path)"
+    darwin_developer_dir="$(cd -P "$darwin_developer_dir" && /bin/pwd -P)"
+    if [ "$darwin_developer_dir" != "$expected_darwin_developer_dir" ]; then
+        echo "selected Darwin developer directory differs from Xcode 15.4" >&2
+        exit 1
+    fi
+    darwin_require_root_immutable_path "$darwin_developer_dir" 'Directory'
+    darwin_xcodebuild="$darwin_developer_dir/usr/bin/xcodebuild"
+    darwin_require_root_immutable_path "$darwin_xcodebuild" 'Regular File'
+    if [ "$("$darwin_xcodebuild" -version)" != "$expected_darwin_xcode_version" ]; then
+        echo "selected Darwin Xcode build identity differs from 15F31d" >&2
+        exit 1
+    fi
+    darwin_sdkroot="$(DEVELOPER_DIR="$darwin_developer_dir" /usr/bin/xcrun --sdk macosx --show-sdk-path)"
+    darwin_sdkroot="$(cd -P "$darwin_sdkroot" && /bin/pwd -P)"
+    if [ "$darwin_sdkroot" != "$expected_darwin_sdkroot" ]; then
+        echo "selected Darwin SDK differs from the Xcode 15.4 default" >&2
+        exit 1
+    fi
+    darwin_require_root_immutable_path "$darwin_sdkroot" 'Directory'
+    darwin_toolchain_bin="$darwin_developer_dir/Toolchains/XcodeDefault.xctoolchain/usr/bin"
+    darwin_toolchain_bin="$(cd -P "$darwin_toolchain_bin" && /bin/pwd -P)"
+    darwin_require_root_immutable_path "$darwin_toolchain_bin" 'Directory'
+    if [ "$(DEVELOPER_DIR="$darwin_developer_dir" /usr/bin/xcrun --sdk macosx --find clang)" != "$darwin_toolchain_bin/clang" ]; then
+        echo "selected Darwin clang differs from the reviewed default toolchain" >&2
+        exit 1
+    fi
+    darwin_cc_bin="$(darwin_resolve_tool clang)"
+    darwin_cxx_bin="$(darwin_resolve_tool clang++)"
+    darwin_ar_bin="$(darwin_resolve_tool ar)"
+    darwin_as_bin="$(darwin_resolve_tool as)"
+    darwin_ld_bin="$(darwin_resolve_tool ld)"
+    darwin_nm_bin="$(darwin_resolve_tool nm)"
+    darwin_ranlib_bin="$(darwin_resolve_tool ranlib)"
+    darwin_strip_bin="$(darwin_resolve_tool strip)"
+}
 if [ ! -x "$python_bin" ]; then
     echo "reviewed Python interpreter path is unavailable" >&2
     exit 1
@@ -38,6 +139,11 @@ compiler_rustc_bin="$compiler_toolchain_root/bin/rustc"
 compiler_rustdoc_bin="$compiler_toolchain_root/bin/rustdoc"
 compiler_rustfmt_bin="$compiler_toolchain_root/bin/rustfmt"
 cargo_bin="$compiler_cargo_bin"
+if ! /usr/bin/sudo -n true; then
+    echo "distinct-owner build boundary requires noninteractive sudo" >&2
+    exit 1
+fi
+prepare_darwin_toolchain
 original_home="${HOME:?}"
 scratch="$(/usr/bin/mktemp -d "/tmp/wasabi-liquid-dependency-gate.XXXXXX")"
 scratch="$(cd "$scratch" && pwd -P)"
@@ -99,10 +205,6 @@ cleanup() {
     rm -rf "$scratch"
 }
 trap cleanup EXIT HUP INT TERM
-if ! /usr/bin/sudo -n true; then
-    echo "distinct-owner build boundary requires noninteractive sudo" >&2
-    exit 1
-fi
 trusted_bin="$scratch/trusted-bin"
 /bin/mkdir "$trusted_bin"
 link_trusted_tool() {
@@ -133,11 +235,22 @@ link_trusted_tool rustfmt "$compiler_rustfmt_bin"
 link_trusted_tool cargo-fmt "$compiler_toolchain_root/bin/cargo-fmt"
 link_trusted_tool cargo-clippy "$compiler_toolchain_root/bin/cargo-clippy"
 link_trusted_tool clippy-driver "$compiler_toolchain_root/bin/clippy-driver"
-for system_name in ar as awk bash cat cc c++ chmod diff env find git grep head id ld make mkdir mktemp nm perl ranlib rm sed sh sort strip tr uname wc; do
+for system_name in awk bash cat chmod diff env find git grep head id make mkdir mktemp perl rm sed sh sort tr uname wc; do
     link_system_tool "$system_name"
 done
 if [ "$host_system" = Darwin ]; then
-    link_system_tool xcrun
+    link_trusted_tool cc "$darwin_cc_bin"
+    link_trusted_tool c++ "$darwin_cxx_bin"
+    link_trusted_tool ar "$darwin_ar_bin"
+    link_trusted_tool as "$darwin_as_bin"
+    link_trusted_tool ld "$darwin_ld_bin"
+    link_trusted_tool nm "$darwin_nm_bin"
+    link_trusted_tool ranlib "$darwin_ranlib_bin"
+    link_trusted_tool strip "$darwin_strip_bin"
+else
+    for system_name in ar as cc c++ ld nm ranlib strip; do
+        link_system_tool "$system_name"
+    done
 fi
 PATH="$trusted_bin"
 export PATH
@@ -493,7 +606,7 @@ case "$host_system" in
                 '(allow mach-lookup)' \
                 '(allow file-read* (literal "/"))' \
                 '(allow file-read* (subpath "/System") (subpath "/usr") (subpath "/bin") (subpath "/sbin") (subpath "/Applications") (subpath "/Library/Developer") (subpath "/private/etc") (subpath "/private/var/db"))' \
-                '(allow file-read-metadata (literal "/var") (literal "/private/var/select/developer_dir"))' \
+                '(allow file-read-metadata (literal "/var") (literal "/private/var/select/developer_dir") (literal "/private/var/select/sh"))' \
                 "(allow file-read* (subpath \"$scratch\"))" \
                 "(allow file-read-metadata (literal \"$var_tmp_target\"))" \
                 '(allow file-map-executable (subpath "/System") (subpath "/usr") (subpath "/bin") (subpath "/sbin") (subpath "/Applications") (subpath "/Library/Developer"))' \
@@ -518,6 +631,7 @@ case "$host_system" in
                 "${RUSTDOCFLAGS-}" "${RUSTC_BOOTSTRAP-}" \
                 "${SEALED_DEPENDENCY_TARGET-}" "${SEALED_WORKSPACE_TARGET-}" \
                 "$original_home/.cargo" "$host_write_target" "$var_tmp_target" "$delayed_write_target" \
+                "$darwin_sdkroot" \
                 "${@}"
         }
         ;;

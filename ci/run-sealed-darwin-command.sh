@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-if [ "$#" -lt 20 ] || [ "$(/usr/bin/id -u)" -ne 0 ]; then
+if [ "$#" -lt 21 ] || [ "$(/usr/bin/id -u)" -ne 0 ]; then
     echo "sealed Darwin command requires root and exact boundary arguments" >&2
     exit 1
 fi
@@ -24,9 +24,10 @@ original_cargo_home=${16}
 host_write_target=${17}
 var_tmp_target=${18}
 delayed_write_target=${19}
-shift 19
+darwin_sdkroot=${20}
+shift 20
 if [ "$#" -lt 1 ]; then
-    echo "sealed Darwin command requires one command after 19 fixed arguments" >&2
+    echo "sealed Darwin command requires one command after 20 fixed arguments" >&2
     exit 1
 fi
 case "$target_dir" in
@@ -43,7 +44,7 @@ sealed_workspace_root=${sealed_workspace_target%/Cargo.toml}
 
 case "$build_user" in *[!a-z0-9]*|'') exit 1 ;; esac
 case "$build_uid" in *[!0-9]*|'') exit 1 ;; esac
-for path in "$sandbox_profile" "$build_home" "$build_tmp" "$cargo_home" "$target_dir" "$trusted_bin" "$rustc" "$rustdoc" "$rustfmt" "$original_cargo_home" "$host_write_target" "$var_tmp_target" "$delayed_write_target"; do
+for path in "$sandbox_profile" "$build_home" "$build_tmp" "$cargo_home" "$target_dir" "$trusted_bin" "$rustc" "$rustdoc" "$rustfmt" "$original_cargo_home" "$host_write_target" "$var_tmp_target" "$delayed_write_target" "$darwin_sdkroot"; do
     case "$path" in /*) ;; *) exit 1 ;; esac
 done
 cd -P "$sealed_workspace_root"
@@ -57,6 +58,7 @@ set +e
     /usr/bin/env -i HOME="$build_home" TMPDIR="$build_tmp" PATH="$trusted_bin:/usr/bin:/bin" \
     CARGO_HOME="$cargo_home" CARGO_TARGET_DIR="$target_dir" \
     RUSTC="$rustc" RUSTDOC="$rustdoc" RUSTFMT="$rustfmt" \
+    SDKROOT="$darwin_sdkroot" \
     RUSTDOCFLAGS="$rustdocflags" RUSTC_BOOTSTRAP="$rustc_bootstrap" \
     SEALED_DEPENDENCY_TARGET="$sealed_dependency_target" \
     SEALED_WORKSPACE_TARGET="$sealed_workspace_target" \
