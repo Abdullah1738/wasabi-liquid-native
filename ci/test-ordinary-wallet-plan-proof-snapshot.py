@@ -143,9 +143,11 @@ def test_run_git_environment(preparer) -> None:
         "PATH": "/usr/bin:/bin",
         "GIT_CONFIG_GLOBAL": "/dev/null",
         "GIT_CONFIG_SYSTEM": "/dev/null",
-        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_COUNT": "2",
         "GIT_CONFIG_KEY_0": "pack.writeReverseIndex",
         "GIT_CONFIG_VALUE_0": "false",
+        "GIT_CONFIG_KEY_1": "maintenance.auto",
+        "GIT_CONFIG_VALUE_1": "false",
         "GIT_TERMINAL_PROMPT": "0",
     }
     if (
@@ -915,6 +917,34 @@ def main() -> int:
                 ) from error
         else:
             raise AssertionError("valid Git reverse-index sidecar was accepted")
+
+        commit_graph_home = scratch / "commit-graph-git-home"
+        shutil.copytree(cargo_home, commit_graph_home)
+        graph_id = "0" * 40
+        commit_graph_directory = (
+            commit_graph_home
+            / source_objects.relative_to(cargo_home)
+            / "info/commit-graphs"
+        )
+        commit_graph_directory.mkdir(parents=True)
+        (commit_graph_directory / "commit-graph-chain").write_text(
+            graph_id + "\n", encoding="ascii"
+        )
+        (commit_graph_directory / f"graph-{graph_id}.graph").write_bytes(b"CGPH")
+        try:
+            preparer.exact_cache_sources(commit_graph_home, lock_bytes)
+        except preparer.SnapshotError as error:
+            expected = (
+                "Git object database contains unreviewed indirection or metadata: "
+                "'info/commit-graphs/commit-graph-chain'"
+            )
+            if str(error) != expected:
+                raise AssertionError(
+                    "Git commit-graph rejection did not identify its exact relative path: "
+                    f"{error}"
+                ) from error
+        else:
+            raise AssertionError("Git commit-graph metadata was accepted")
 
         alternate_home = scratch / "alternate-git-home"
         shutil.copytree(cargo_home, alternate_home)

@@ -726,15 +726,16 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
         raise AssertionError("workflow Cargo fetch bypasses tracked preflight")
     fetch_preflight = '"$python_bin" -I ci/check-cargo-fetch-preflight.py "$repository_root"'
     isolated_fetch = '/usr/bin/env -i HOME="$fetch_home" TMPDIR="$fetch_tmp" PATH="$trusted_bin"'
-    reverse_index_config = (
-        "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=pack.writeReverseIndex "
-        "GIT_CONFIG_VALUE_0=false"
+    fetch_git_config = (
+        "GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=pack.writeReverseIndex "
+        "GIT_CONFIG_VALUE_0=false \\\n"
+        "            GIT_CONFIG_KEY_1=maintenance.auto GIT_CONFIG_VALUE_1=false"
     )
     fetch_environment = (
         '/usr/bin/env -i HOME="$fetch_home" TMPDIR="$fetch_tmp" PATH="$trusted_bin" \\\n'
         '            CARGO_HOME="$source_cargo_home" CARGO_NET_GIT_FETCH_WITH_CLI=true \\\n'
         '            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 \\\n'
-        f"            {reverse_index_config} \\\n"
+        f"            {fetch_git_config} \\\n"
         '            GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false SSH_ASKPASS=/usr/bin/false \\\n'
         '            "$compiler_cargo_bin" fetch \\\n'
         "                --manifest-path "
@@ -747,10 +748,12 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
     def fetch_git_config_is_exact(candidate: str) -> bool:
         return (
             all(candidate.count(command) == 1 for command in fetch_commands)
-            and candidate.count(reverse_index_config) == 2
-            and candidate.count("GIT_CONFIG_COUNT=1") == 2
+            and candidate.count(fetch_git_config) == 2
+            and candidate.count("GIT_CONFIG_COUNT=2") == 2
             and candidate.count("GIT_CONFIG_KEY_0=pack.writeReverseIndex") == 2
             and candidate.count("GIT_CONFIG_VALUE_0=false") == 2
+            and candidate.count("GIT_CONFIG_KEY_1=maintenance.auto") == 2
+            and candidate.count("GIT_CONFIG_VALUE_1=false") == 2
         )
 
     if (
@@ -771,34 +774,42 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
     ):
         raise AssertionError("isolated snapshot-only Cargo fetch is not exact")
     for name, mutated_gate in {
-        "removed": gate.replace(reverse_index_config, "", 1),
-        "count changed": gate.replace("GIT_CONFIG_COUNT=1", "GIT_CONFIG_COUNT=2", 1),
+        "removed": gate.replace(fetch_git_config, "", 1),
+        "count changed": gate.replace("GIT_CONFIG_COUNT=2", "GIT_CONFIG_COUNT=3", 1),
         "key changed": gate.replace(
             "GIT_CONFIG_KEY_0=pack.writeReverseIndex",
             "GIT_CONFIG_KEY_0=pack.readReverseIndex",
             1,
         ),
         "value changed": gate.replace("GIT_CONFIG_VALUE_0=false", "GIT_CONFIG_VALUE_0=true", 1),
+        "maintenance key changed": gate.replace(
+            "GIT_CONFIG_KEY_1=maintenance.auto",
+            "GIT_CONFIG_KEY_1=maintenance.autoDetach",
+            1,
+        ),
+        "maintenance value changed": gate.replace(
+            "GIT_CONFIG_VALUE_1=false", "GIT_CONFIG_VALUE_1=true", 1
+        ),
         "duplicated": gate.replace(
-            reverse_index_config,
-            reverse_index_config + " " + reverse_index_config,
+            fetch_git_config,
+            fetch_git_config + " " + fetch_git_config,
             1,
         ),
         "relocated to credential provider": gate.replace(
-            f"            {reverse_index_config} \\\n",
+            f"            {fetch_git_config} \\\n",
             "",
             1,
         ).replace(
             "    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 \\\n"
             '    "$compiler_cargo_bin" login --registry wlpq-positive',
             "    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 \\\n"
-            f"    {reverse_index_config} \\\n"
+            f"    {fetch_git_config} \\\n"
             '    "$compiler_cargo_bin" login --registry wlpq-positive',
             1,
         ),
     }.items():
         if mutated_gate == gate or fetch_git_config_is_exact(mutated_gate):
-            raise AssertionError(f"isolated fetch Git reverse-index config {name} mutation was accepted")
+            raise AssertionError(f"isolated fetch Git config {name} mutation was accepted")
     first_fetch = gate.index('"$compiler_cargo_bin" fetch \\')
     if gate.index(fetch_preflight) > first_fetch or gate.index('    --snapshot-only \\') > first_fetch:
         raise AssertionError("tracked fetch preflight or proof snapshot follows Cargo fetch")

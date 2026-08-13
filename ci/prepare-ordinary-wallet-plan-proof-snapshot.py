@@ -674,9 +674,11 @@ def run_git(git_bin: Path, arguments: list[str], *, output_limit: int = MAX_SEAL
         "PATH": "/usr/bin:/bin",
         "GIT_CONFIG_GLOBAL": "/dev/null",
         "GIT_CONFIG_SYSTEM": "/dev/null",
-        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_COUNT": "2",
         "GIT_CONFIG_KEY_0": "pack.writeReverseIndex",
         "GIT_CONFIG_VALUE_0": "false",
+        "GIT_CONFIG_KEY_1": "maintenance.auto",
+        "GIT_CONFIG_VALUE_1": "false",
         "GIT_TERMINAL_PROMPT": "0",
     }
     result = subprocess.run(
