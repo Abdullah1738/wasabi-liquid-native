@@ -47,7 +47,7 @@ for path in "$original_home" "$hidden_home" "$build_home" "$build_tmp" "$cargo_h
 done
 if [ "$(/usr/bin/readlink /proc/1/ns/pid)" != "$(/usr/bin/readlink /proc/self/ns/pid)" ] ||
     [ "$(/usr/bin/findmnt --noheadings --output FSTYPE --target /proc | /usr/bin/tr -d ' ')" != proc ] ||
-    ! /usr/bin/awk '$1 == "NSpid:" && $NF == "1" { accepted = 1 } END { exit !accepted }' /proc/self/status; then
+    ! /usr/bin/awk '$1 == "NSpid:" && $NF == "1" { accepted = 1 } END { exit !accepted }' /proc/1/status; then
     echo "sealed Linux command lacks a private PID namespace and procfs" >&2
     exit 1
 fi

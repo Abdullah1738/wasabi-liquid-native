@@ -1400,6 +1400,7 @@ done'''
         ('/usr/bin/readlink /proc/self/ns/pid', 1),
         ('/usr/bin/findmnt --noheadings --output FSTYPE --target /proc', 1),
         ('NSpid:', 1),
+        ('/proc/1/status', 1),
         ('/usr/bin/mount --bind "$hidden_home" "$original_home"', 1),
         ('/usr/bin/mount --remount --bind --read-only "$mountpoint"', 1),
         ('/usr/bin/mount --remount --bind --rw "$writable"', 1),
@@ -1411,6 +1412,9 @@ done'''
     ):
         if linux_wrapper.count(token) != expected:
             raise AssertionError(f"sealed Linux boundary token is not exact: {token}")
+    linux_child_status = linux_wrapper.replace("/proc/1/status", "/proc/self/status", 1)
+    if linux_child_status == linux_wrapper or "/proc/1/status" in linux_child_status:
+        raise AssertionError("sealed Linux PID-one status mutation was accepted")
     darwin_wrapper = (ROOT / "ci/run-sealed-darwin-command.sh").read_text(encoding="utf-8")
     for token in (
         '/usr/bin/sudo -n -u "$build_user" /usr/bin/sandbox-exec -f "$sandbox_profile"',
