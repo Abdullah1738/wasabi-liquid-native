@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
@@ -251,7 +252,80 @@ def mutate(scratch: Path, name: str, action, *, close: bool = True, expected_err
         )
 
 
+def load_checker():
+    specification = importlib.util.spec_from_file_location("wlpq_checker_tests", CHECKER)
+    if specification is None or specification.loader is None:
+        raise AssertionError("ordinary-wallet-plan checker import failed")
+    checker = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(checker)
+    return checker
+
+
+def expect_scanner_error(checker, data: bytes, expected: str) -> None:
+    for entrypoint in (checker.elements_txid, checker.parse_public_transaction):
+        try:
+            entrypoint(data)
+        except checker.CorpusError as error:
+            if expected not in str(error):
+                raise AssertionError(f"unexpected scanner error: {error}") from error
+        else:
+            raise AssertionError(f"transaction scanner accepted {expected}")
+
+
+def test_transaction_scanner_guards(checker) -> None:
+    fixture = bytes.fromhex(
+        (ROOT / VECTORS / "public/test-candidate-valid.hex").read_text(encoding="utf-8").strip()
+    )
+    if fixture[4:6] != b"\x01\x01" or int.from_bytes(fixture[38:42], "little") != 0:
+        raise AssertionError("scanner mutation fixture layout changed")
+
+    for name, flag, expected in (
+        ("issuance", 0x80000000, "asset issuance"),
+        ("peg-in", 0x40000000, "peg-in input"),
+    ):
+        mutated = bytearray(fixture)
+        mutated[38:42] = flag.to_bytes(4, "little")
+        expect_scanner_error(checker, bytes(mutated), expected)
+
+    coinbase = bytearray(fixture)
+    coinbase[6:38] = bytes(32)
+    coinbase[38:42] = (0xFFFFFFFF).to_bytes(4, "little")
+    expect_scanner_error(checker, bytes(coinbase), "coinbase input")
+
+    null_index = bytearray(fixture)
+    null_index[38:42] = (0xFFFFFFFF).to_bytes(4, "little")
+    expect_scanner_error(checker, bytes(null_index), "null output index")
+
+    noncanonical_count = fixture[:5] + b"\xfd\x01\x00" + fixture[6:]
+    expect_scanner_error(checker, noncanonical_count, "noncanonical Elements compact-size integer")
+
+    oversized_count = bytearray(fixture)
+    oversized_count[5] = 0xFC
+    expect_scanner_error(checker, bytes(oversized_count), "input count exceeds remaining transaction bytes")
+    expect_scanner_error(checker, fixture + b"\x00", "trailing bytes")
+
+    empty_witness = b"".join(
+        (
+            (2).to_bytes(4, "little"),
+            b"\x01\x01",
+            bytes.fromhex("11" * 32),
+            (0).to_bytes(4, "little"),
+            b"\x00",
+            (0xFFFFFFFF).to_bytes(4, "little"),
+            b"\x01",
+            b"\x01" + bytes.fromhex("22" * 32),
+            b"\x01" + (1).to_bytes(8, "big"),
+            b"\x00\x00",
+            (0).to_bytes(4, "little"),
+            b"\x00\x00\x00\x00",
+            b"\x00\x00",
+        )
+    )
+    expect_scanner_error(checker, empty_witness, "superfluous empty public transaction witness flag")
+
+
 def main() -> int:
+    test_transaction_scanner_guards(load_checker())
     with tempfile.TemporaryDirectory(prefix="wlpq-corpus-mutations-") as directory:
         scratch = Path(directory)
         valid = scratch / "valid"

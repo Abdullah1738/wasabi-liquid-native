@@ -277,8 +277,13 @@ def skip_bytes(data: bytes, cursor: int) -> tuple[int, bytes]:
     return end, data[cursor:end]
 
 
-def elements_txid(data: bytes) -> str:
-    """Parse Elements transaction framing and hash its witness-free serialization."""
+def bounded_count(data: bytes, cursor: int, count: int, minimum_item_bytes: int, label: str) -> None:
+    if count > (len(data) - cursor) // minimum_item_bytes:
+        reject(f"{label} count exceeds remaining transaction bytes")
+
+
+def scan_public_transaction(data: bytes) -> dict:
+    """Scan the issuance-free, peg-in-free public transaction corpus surface."""
     if len(data) < 9:
         reject("public transaction fixture is too short")
     cursor = 0
@@ -294,94 +299,93 @@ def elements_txid(data: bytes) -> str:
     base += data[cursor:after_count]
     cursor = after_count
     input_count = count
+    bounded_count(data, cursor, input_count, 41, "public transaction input")
+    inputs = []
     for _ in range(input_count):
         if cursor + 37 > len(data):
             reject("truncated Elements input")
         start = cursor
+        previous_txid = data[cursor : cursor + 32]
+        previous_vout = int.from_bytes(data[cursor + 32 : cursor + 36], "little")
+        if previous_vout == 0xFFFFFFFF:
+            if previous_txid == bytes(32):
+                reject("coinbase input is outside the public fixture surface")
+            reject("null output index is outside the public fixture surface")
+        if previous_vout & 0x80000000:
+            reject("asset issuance is outside the public fixture surface")
+        if previous_vout & 0x40000000:
+            reject("peg-in input is outside the public fixture surface")
         cursor += 36
         cursor, _ = skip_bytes(data, cursor)
         if cursor + 4 > len(data):
             reject("truncated Elements input sequence")
         cursor += 4
-        if data[start + 35] & 0x80:
-            cursor = skip_confidential(data, cursor, 32, (0x0A, 0x0B))
-            cursor = skip_confidential(data, cursor, 8, (0x08, 0x09))
         base += data[start:cursor]
+        inputs.append({"txid": previous_txid.hex(), "vout": previous_vout})
     count_start = cursor
     output_count, cursor = compact_size(data, cursor)
     base += data[count_start:cursor]
+    bounded_count(data, cursor, output_count, 4, "public transaction output")
+    outputs = []
     for _ in range(output_count):
         start = cursor
-        cursor = skip_confidential(data, cursor, 32, (0x0A, 0x0B))
-        cursor = skip_confidential(data, cursor, 8, (0x08, 0x09))
-        cursor = skip_confidential(data, cursor, 32, (0x02, 0x03))
-        cursor, _ = skip_bytes(data, cursor)
+        prefixes = []
+        for width, commitments in ((32, (0x0A, 0x0B)), (8, (0x08, 0x09)), (32, (0x02, 0x03))):
+            if cursor >= len(data):
+                reject("truncated Elements output")
+            prefixes.append(data[cursor])
+            cursor = skip_confidential(data, cursor, width, commitments)
+        cursor, script = skip_bytes(data, cursor)
         base += data[start:cursor]
+        outputs.append({"prefixes": ",".join(f"{prefix:02x}" for prefix in prefixes), "script_sha256": digest(script)})
     if cursor + 4 > len(data):
         reject("public transaction fixture truncates locktime")
     base += data[cursor : cursor + 4]
     cursor += 4
+    output_witness = []
+    input_witness = []
+    witness_nonempty = False
     if had_witness:
         for _ in range(input_count):
-            for _ in range(2):
-                cursor, _ = skip_bytes(data, cursor)
+            cursor, amount_proof = skip_bytes(data, cursor)
+            cursor, inflation_proof = skip_bytes(data, cursor)
+            witness_nonempty |= bool(amount_proof or inflation_proof)
             stack_count, cursor = compact_size(data, cursor)
+            bounded_count(data, cursor, stack_count, 1, "script witness item")
+            witness_nonempty |= stack_count != 0
             for _ in range(stack_count):
                 cursor, _ = skip_bytes(data, cursor)
-            script_count, cursor = compact_size(data, cursor)
-            for _ in range(script_count):
+            pegin_count, cursor = compact_size(data, cursor)
+            bounded_count(data, cursor, pegin_count, 1, "peg-in witness item")
+            witness_nonempty |= pegin_count != 0
+            for _ in range(pegin_count):
                 cursor, _ = skip_bytes(data, cursor)
+            input_witness.append((len(amount_proof), len(inflation_proof)))
         for _ in range(output_count):
-            cursor, _ = skip_bytes(data, cursor)
-            cursor, _ = skip_bytes(data, cursor)
+            cursor, surjection = skip_bytes(data, cursor)
+            cursor, rangeproof = skip_bytes(data, cursor)
+            witness_nonempty |= bool(surjection or rangeproof)
+            output_witness.append((len(surjection), len(rangeproof)))
+        if not witness_nonempty:
+            reject("superfluous empty public transaction witness flag")
     if cursor != len(data):
         reject("public transaction fixture has trailing bytes")
-    return hashlib.sha256(hashlib.sha256(base).digest()).digest().hex()
+    return {
+        "txid": hashlib.sha256(hashlib.sha256(base).digest()).digest().hex(),
+        "flags": flags,
+        "inputs": inputs,
+        "outputs": outputs,
+        "input_witness": input_witness,
+        "output_witness": output_witness,
+    }
+
+
+def elements_txid(data: bytes) -> str:
+    return scan_public_transaction(data)["txid"]
 
 
 def parse_public_transaction(data: bytes) -> dict:
-    if len(data) < 9:
-        reject("public transaction fixture is too short")
-    cursor = 4
-    flags = data[cursor]
-    if flags not in (0, 1): reject("unsupported Elements transaction flag")
-    cursor += 1
-    input_count, cursor = compact_size(data, cursor)
-    inputs = []
-    for _ in range(input_count):
-        if cursor + 36 > len(data): reject("truncated public transaction input")
-        txid = data[cursor:cursor + 32].hex(); vout = int.from_bytes(data[cursor + 32:cursor + 36], "little"); issuance = bool(data[cursor + 35] & 0x80); cursor += 36
-        cursor, _ = skip_bytes(data, cursor)
-        if cursor + 4 > len(data): reject("truncated public transaction sequence")
-        cursor += 4
-        if issuance:
-            cursor = skip_confidential(data, cursor, 32, (0x0A, 0x0B)); cursor = skip_confidential(data, cursor, 8, (0x08, 0x09))
-        inputs.append({"txid": txid, "vout": vout & 0x3fffffff})
-    output_count, cursor = compact_size(data, cursor)
-    outputs = []
-    for _ in range(output_count):
-        prefixes = []
-        for width, commitments in ((32, (0x0A, 0x0B)), (8, (0x08, 0x09)), (32, (0x02, 0x03))):
-            prefixes.append(data[cursor]); cursor = skip_confidential(data, cursor, width, commitments)
-        cursor, script = skip_bytes(data, cursor)
-        outputs.append({"prefixes": ",".join(f"{prefix:02x}" for prefix in prefixes), "script_sha256": digest(script)})
-    if cursor + 4 > len(data): reject("truncated public transaction locktime")
-    cursor += 4
-    output_witness = []
-    input_witness = []
-    if flags:
-        for _ in range(input_count):
-            cursor, amount_proof = skip_bytes(data, cursor); cursor, inflation_proof = skip_bytes(data, cursor)
-            stack_count, cursor = compact_size(data, cursor)
-            for _ in range(stack_count): cursor, _ = skip_bytes(data, cursor)
-            pegin_count, cursor = compact_size(data, cursor)
-            for _ in range(pegin_count): cursor, _ = skip_bytes(data, cursor)
-            input_witness.append((len(amount_proof), len(inflation_proof)))
-        for _ in range(output_count):
-            cursor, surjection = skip_bytes(data, cursor); cursor, rangeproof = skip_bytes(data, cursor)
-            output_witness.append((len(surjection), len(rangeproof)))
-    if cursor != len(data): reject("public transaction fixture has trailing bytes")
-    return {"flags": flags, "inputs": inputs, "outputs": outputs, "input_witness": input_witness, "output_witness": output_witness}
+    return scan_public_transaction(data)
 
 
 def u16(data: bytes, offset: int) -> int:
