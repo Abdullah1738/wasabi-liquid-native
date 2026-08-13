@@ -726,6 +726,19 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
         raise AssertionError("workflow Cargo fetch bypasses tracked preflight")
     fetch_preflight = '"$python_bin" -I ci/check-cargo-fetch-preflight.py "$repository_root"'
     isolated_fetch = '/usr/bin/env -i HOME="$fetch_home" TMPDIR="$fetch_tmp" PATH="$trusted_bin"'
+    reverse_index_config = (
+        "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=pack.writeReverseIndex "
+        "GIT_CONFIG_VALUE_0=false"
+    )
+
+    def fetch_git_config_is_exact(candidate: str) -> bool:
+        return (
+            candidate.count(reverse_index_config) == 2
+            and candidate.count("GIT_CONFIG_COUNT=1") == 2
+            and candidate.count("GIT_CONFIG_KEY_0=pack.writeReverseIndex") == 2
+            and candidate.count("GIT_CONFIG_VALUE_0=false") == 2
+        )
+
     if (
         gate.count(fetch_preflight) != 1
         or gate.count(isolated_fetch) != 2
@@ -740,8 +753,26 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
         or gate.count('source_cargo_home="$scratch/source-cargo-home"') != 1
         or gate.count('for root_cargo_config in /.cargo/config /.cargo/config.toml; do') != 1
         or gate.count('[ -e "$root_cargo_config" ] || [ -L "$root_cargo_config" ]') != 1
+        or not fetch_git_config_is_exact(gate)
     ):
         raise AssertionError("isolated snapshot-only Cargo fetch is not exact")
+    for name, mutated_gate in {
+        "removed": gate.replace(reverse_index_config, "", 1),
+        "count changed": gate.replace("GIT_CONFIG_COUNT=1", "GIT_CONFIG_COUNT=2", 1),
+        "key changed": gate.replace(
+            "GIT_CONFIG_KEY_0=pack.writeReverseIndex",
+            "GIT_CONFIG_KEY_0=pack.readReverseIndex",
+            1,
+        ),
+        "value changed": gate.replace("GIT_CONFIG_VALUE_0=false", "GIT_CONFIG_VALUE_0=true", 1),
+        "duplicated": gate.replace(
+            reverse_index_config,
+            reverse_index_config + " " + reverse_index_config,
+            1,
+        ),
+    }.items():
+        if mutated_gate == gate or fetch_git_config_is_exact(mutated_gate):
+            raise AssertionError(f"isolated fetch Git reverse-index config {name} mutation was accepted")
     first_fetch = gate.index('"$compiler_cargo_bin" fetch \\')
     if gate.index(fetch_preflight) > first_fetch or gate.index('    --snapshot-only \\') > first_fetch:
         raise AssertionError("tracked fetch preflight or proof snapshot follows Cargo fetch")

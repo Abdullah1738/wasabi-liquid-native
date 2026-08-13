@@ -121,6 +121,45 @@ def archive_with_member(member: tarfile.TarInfo, data: bytes = b"") -> bytes:
     return output.getvalue()
 
 
+def test_run_git_environment(preparer) -> None:
+    original_run = preparer.subprocess.run
+    calls = []
+
+    def record_run(arguments, **kwargs):
+        calls.append((arguments, kwargs))
+        return subprocess.CompletedProcess(arguments, 0, stdout=b"", stderr=b"")
+
+    preparer.subprocess.run = record_run
+    try:
+        if preparer.run_git(Path("/usr/bin/git"), ["version"]) != b"":
+            raise AssertionError("isolated Git command returned unexpected output")
+    finally:
+        preparer.subprocess.run = original_run
+    if len(calls) != 1:
+        raise AssertionError("isolated Git command was not singular")
+    arguments, kwargs = calls[0]
+    expected_environment = {
+        "HOME": "/",
+        "PATH": "/usr/bin:/bin",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "pack.writeReverseIndex",
+        "GIT_CONFIG_VALUE_0": "false",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    if (
+        arguments != ["/usr/bin/git", "version"]
+        or kwargs.get("cwd") != "/"
+        or kwargs.get("env") != expected_environment
+        or kwargs.get("stdin") != subprocess.DEVNULL
+        or kwargs.get("stdout") != subprocess.PIPE
+        or kwargs.get("stderr") != subprocess.PIPE
+        or kwargs.get("check") is not False
+    ):
+        raise AssertionError("isolated Git command environment is not exact")
+
+
 def test_archive_and_git_topology_rejections(preparer, scratch: Path) -> None:
     package = {"name": "unsafe", "version": "1.0.0"}
     unsafe_members = []
@@ -330,6 +369,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="wlpq-proof-snapshot-") as directory:
         scratch = Path(directory)
         test_source_cargo_home_argument(source_cargo_home, scratch)
+        test_run_git_environment(preparer)
         test_archive_and_git_topology_rejections(preparer, scratch)
         source = scratch / "source"
         copy_exact_inputs(preparer, source)
@@ -817,6 +857,65 @@ def main() -> int:
         )
         objects_index = git_object.parts.index("objects")
         git_objects = Path(*git_object.parts[: objects_index + 1])
+
+        reverse_index_home = scratch / "reverse-index-git-home"
+        shutil.copytree(cargo_home, reverse_index_home)
+        source_pack = next(
+            path for path in sorted((cargo_home / "git/db").glob("*/objects/pack/*.pack"))
+        )
+        generated_pack = scratch / "reverse-index-generator" / source_pack.name
+        generated_pack.parent.mkdir()
+        shutil.copy2(source_pack, generated_pack)
+        generated = subprocess.run(
+            ["/usr/bin/git", "index-pack", "--rev-index", str(generated_pack)],
+            cwd="/",
+            env={
+                "HOME": "/",
+                "PATH": "/usr/bin:/bin",
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_SYSTEM": "/dev/null",
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "pack.writeReverseIndex",
+                "GIT_CONFIG_VALUE_0": "true",
+                "GIT_TERMINAL_PROMPT": "0",
+            },
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        generated_reverse_index = generated_pack.with_suffix(".rev")
+        if generated.returncode != 0 or not generated_reverse_index.is_file():
+            raise AssertionError(
+                "failed to construct valid Git reverse-index mutation: "
+                + generated.stderr.decode("utf-8", errors="replace")
+            )
+        source_objects = source_pack.parent.parent
+        reverse_index = (
+            reverse_index_home
+            / source_objects.relative_to(cargo_home)
+            / "pack"
+            / generated_reverse_index.name
+        )
+        shutil.copy2(generated_reverse_index, reverse_index)
+        reverse_relative = reverse_index.relative_to(
+            reverse_index_home / source_objects.relative_to(cargo_home)
+        ).as_posix()
+        try:
+            preparer.exact_cache_sources(reverse_index_home, lock_bytes)
+        except preparer.SnapshotError as error:
+            expected = (
+                "Git object database contains an unreviewed pack sidecar: "
+                f"{reverse_relative!r}"
+            )
+            if str(error) != expected:
+                raise AssertionError(
+                    "Git reverse-index rejection did not identify its exact relative path: "
+                    f"{error}"
+                ) from error
+        else:
+            raise AssertionError("valid Git reverse-index sidecar was accepted")
+
         alternate_home = scratch / "alternate-git-home"
         shutil.copytree(cargo_home, alternate_home)
         alternates = alternate_home / git_objects / "info/alternates"

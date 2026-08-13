@@ -303,7 +303,10 @@ def validate_git_objects(objects: Path, files: list[Path]) -> None:
         if len(relative.parts) == 2 and relative.parts[0] == "pack":
             match = re.fullmatch(r"pack-([0-9a-f]{40})\.(pack|idx)", name)
             if match is None:
-                reject("Git object database contains an unreviewed pack sidecar")
+                reject(
+                    "Git object database contains an unreviewed pack sidecar: "
+                    f"{relative.as_posix()!r}"
+                )
             (packs if match.group(2) == "pack" else indexes).add(match.group(1))
         elif (
             len(relative.parts) == 2
@@ -312,7 +315,10 @@ def validate_git_objects(objects: Path, files: list[Path]) -> None:
         ):
             continue
         else:
-            reject("Git object database contains unreviewed indirection or metadata")
+            reject(
+                "Git object database contains unreviewed indirection or metadata: "
+                f"{relative.as_posix()!r}"
+            )
     if packs != indexes:
         reject("Git object database pack and index closure differs")
 
@@ -668,6 +674,9 @@ def run_git(git_bin: Path, arguments: list[str], *, output_limit: int = MAX_SEAL
         "PATH": "/usr/bin:/bin",
         "GIT_CONFIG_GLOBAL": "/dev/null",
         "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "pack.writeReverseIndex",
+        "GIT_CONFIG_VALUE_0": "false",
         "GIT_TERMINAL_PROMPT": "0",
     }
     result = subprocess.run(

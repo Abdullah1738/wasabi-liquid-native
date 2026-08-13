@@ -231,6 +231,7 @@ fi
     /usr/bin/env -i HOME="$fetch_home" TMPDIR="$fetch_tmp" PATH="$trusted_bin" \
             CARGO_HOME="$source_cargo_home" CARGO_NET_GIT_FETCH_WITH_CLI=true \
             GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+            GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=pack.writeReverseIndex GIT_CONFIG_VALUE_0=false \
             GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false SSH_ASKPASS=/usr/bin/false \
             "$compiler_cargo_bin" fetch \
                 --manifest-path "$sealed_workspace/Cargo.toml" \
@@ -238,6 +239,7 @@ fi
     /usr/bin/env -i HOME="$fetch_home" TMPDIR="$fetch_tmp" PATH="$trusted_bin" \
             CARGO_HOME="$source_cargo_home" CARGO_NET_GIT_FETCH_WITH_CLI=true \
             GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+            GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=pack.writeReverseIndex GIT_CONFIG_VALUE_0=false \
             GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false SSH_ASKPASS=/usr/bin/false \
             "$compiler_cargo_bin" fetch \
                 --manifest-path "$proof_snapshot/Cargo.toml" \
