@@ -366,7 +366,8 @@ if [ -e "$credential_sentinel" ]; then
     echo "external credential provider escaped isolated Cargo fetch" >&2
     exit 1
 fi
-python3 -I ci/test-ordinary-wallet-plan-proof-snapshot.py "$source_cargo_home"
+WLPQ_TEST_DARWIN_SDKROOT="$darwin_sdkroot" \
+    python3 -I ci/test-ordinary-wallet-plan-proof-snapshot.py "$source_cargo_home"
 python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py \
     --copy-cache \
     "$source_cargo_home" \

@@ -74,11 +74,20 @@ if ! /usr/bin/awk '$1 == "NSpid:" && $NF == "1" { accepted = 1 } END { exit !acc
     exit 1
 fi
 /usr/bin/mount --bind "$hidden_home" "$original_home"
+preexisting_mount_ids="$(/usr/bin/awk 'NF < 6 { exit 1 } { print $1 }' /proc/self/mountinfo | /usr/bin/sort -n)"
+if [ -z "$preexisting_mount_ids" ]; then
+    echo "sealed Linux pre-transition mount inventory is empty" >&2
+    exit 1
+fi
 
-# Make the complete inherited VFS mount tree read-only without resolving stale
-# or covered nested mountpoint names. Kernel mountinfo is then the authority
-# that recursive semantics were applied to every record.
-/usr/bin/mount -o remount,bind,ro=recursive /
+# Apply the read-only VFS attribute directly to the complete inherited mount
+# tree. Kernel mountinfo is then the authority that every record transitioned.
+/usr/bin/python3 -I "$sealed_workspace_root/ci/set-recursive-mount-readonly.py"
+post_transition_mount_ids="$(/usr/bin/awk 'NF < 6 { exit 1 } { print $1 }' /proc/self/mountinfo | /usr/bin/sort -n)"
+if [ "$post_transition_mount_ids" != "$preexisting_mount_ids" ]; then
+    echo "sealed Linux mount inventory changed during read-only transition" >&2
+    exit 1
+fi
 if ! /usr/bin/awk '
 function has_option(options, wanted, count, position, fields) {
     count = split(options, fields, ",")

@@ -20,6 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PREPARER = ROOT / "ci/prepare-ordinary-wallet-plan-proof-snapshot.py"
 CHECKER = ROOT / "ci/check-ordinary-wallet-plan-public-proof-surface.py"
+TEST_DARWIN_SDKROOT_VARIABLE = "WLPQ_TEST_DARWIN_SDKROOT"
 
 
 def explicit_source_cargo_home(arguments: list[str]) -> Path:
@@ -310,6 +311,21 @@ def cargo_binary() -> str:
     if cargo is None:
         raise AssertionError("Cargo is required for private proof snapshot mutations")
     return cargo
+
+
+def controlled_build_environment(scratch: Path) -> dict[str, str]:
+    environment = os.environ.copy()
+    darwin_sdkroot = environment.pop(TEST_DARWIN_SDKROOT_VARIABLE, "")
+    if sys.platform == "darwin":
+        sdkroot = Path(darwin_sdkroot)
+        if not sdkroot.is_absolute() or sdkroot.is_symlink() or not sdkroot.is_dir():
+            raise AssertionError("validated Darwin test SDK root is required")
+        environment["SDKROOT"] = str(sdkroot)
+    elif darwin_sdkroot:
+        raise AssertionError("Darwin test SDK root was supplied on a non-Darwin host")
+    environment["CARGO_HOME"] = str(scratch / "build-script-runtime-cargo-home")
+    environment["CARGO_TARGET_DIR"] = str(scratch / "build-script-target")
+    return environment
 
 
 def materialize_sources(manifest: Path, cargo_home: Path, target: Path) -> None:
@@ -789,9 +805,7 @@ def main() -> int:
         )
         (build_script_crate / "src").mkdir()
         (build_script_crate / "src/lib.rs").write_text("", encoding="utf-8")
-        build_environment = os.environ.copy()
-        build_environment["CARGO_HOME"] = str(scratch / "build-script-runtime-cargo-home")
-        build_environment["CARGO_TARGET_DIR"] = str(scratch / "build-script-target")
+        build_environment = controlled_build_environment(scratch)
         build_environment["SEALED_SOURCE_TARGET"] = str(build_script_target)
         build_result = subprocess.run(
             [

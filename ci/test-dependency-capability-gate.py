@@ -840,7 +840,8 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
     proof_preflight = '"$python_bin" -I ci/check-ordinary-wallet-plan-public-proof-surface.py "$repository_root"'
     proof_surface_mutations = "python3 -I ci/test-ordinary-wallet-plan-public-proof-surface.py"
     proof_snapshot_mutations = (
-        'python3 -I ci/test-ordinary-wallet-plan-proof-snapshot.py "$source_cargo_home"'
+        'WLPQ_TEST_DARWIN_SDKROOT="$darwin_sdkroot" \\\n'
+        '    python3 -I ci/test-ordinary-wallet-plan-proof-snapshot.py "$source_cargo_home"'
     )
     if (
         gate.count(proof_preflight) != 1
@@ -887,6 +888,22 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
 
     if not proof_snapshot_wiring_is_exact(gate):
         raise AssertionError("private proof snapshot mutations do not consume the isolated fetched Cargo home")
+    proof_snapshot_test = (ROOT / "ci/test-ordinary-wallet-plan-proof-snapshot.py").read_text(
+        encoding="utf-8"
+    )
+    for token in (
+        'TEST_DARWIN_SDKROOT_VARIABLE = "WLPQ_TEST_DARWIN_SDKROOT"',
+        'darwin_sdkroot = environment.pop(TEST_DARWIN_SDKROOT_VARIABLE, "")',
+        'if sys.platform == "darwin":',
+        'if not sdkroot.is_absolute() or sdkroot.is_symlink() or not sdkroot.is_dir():',
+        'environment["SDKROOT"] = str(sdkroot)',
+        'elif darwin_sdkroot:',
+        'build_environment = controlled_build_environment(scratch)',
+    ):
+        if proof_snapshot_test.count(token) != 1:
+            raise AssertionError(f"private proof snapshot Darwin SDK boundary is not exact: {token}")
+    if 'environment["DEVELOPER_DIR"]' in proof_snapshot_test:
+        raise AssertionError("private proof snapshot inherited a Darwin developer-directory override")
     snapshot_without_call = gate.replace(proof_snapshot_mutations + "\n", "", 1)
     snapshot_wiring_mutations = {
         "missing source Cargo home": gate.replace(
@@ -1709,8 +1726,11 @@ done'''
         ('NSpid:', 1),
         ('/proc/1/status', 2),
         ('/usr/bin/mount --bind "$hidden_home" "$original_home"', 1),
-        ('/usr/bin/mount -o remount,bind,ro=recursive /', 1),
-        ('/proc/self/mountinfo', 2),
+        ('preexisting_mount_ids="$(/usr/bin/awk \'NF < 6 { exit 1 } { print $1 }\' /proc/self/mountinfo | /usr/bin/sort -n)"', 1),
+        ('/usr/bin/python3 -I "$sealed_workspace_root/ci/set-recursive-mount-readonly.py"', 1),
+        ('post_transition_mount_ids="$(/usr/bin/awk \'NF < 6 { exit 1 } { print $1 }\' /proc/self/mountinfo | /usr/bin/sort -n)"', 1),
+        ('if [ "$post_transition_mount_ids" != "$preexisting_mount_ids" ]; then', 1),
+        ('/proc/self/mountinfo', 4),
         ('sealed Linux recursive read-only mount transition is incomplete', 1),
         ('sealed Linux writable mount inventory differs from the exact build roots', 1),
         ('/usr/bin/mount -o remount,bind,rw "$writable"', 1),
@@ -1722,7 +1742,19 @@ done'''
     ):
         if linux_wrapper.count(token) != expected:
             raise AssertionError(f"sealed Linux boundary token is not exact: {token}")
-    linux_recursive_read_only = '/usr/bin/mount -o remount,bind,ro=recursive /'
+    linux_recursive_read_only = (
+        '/usr/bin/python3 -I "$sealed_workspace_root/ci/set-recursive-mount-readonly.py"'
+    )
+    linux_mount_identity_audit = '''preexisting_mount_ids="$(/usr/bin/awk 'NF < 6 { exit 1 } { print $1 }' /proc/self/mountinfo | /usr/bin/sort -n)"
+if [ -z "$preexisting_mount_ids" ]; then
+    echo "sealed Linux pre-transition mount inventory is empty" >&2
+    exit 1
+fi'''
+    linux_post_transition_identity_audit = '''post_transition_mount_ids="$(/usr/bin/awk 'NF < 6 { exit 1 } { print $1 }' /proc/self/mountinfo | /usr/bin/sort -n)"
+if [ "$post_transition_mount_ids" != "$preexisting_mount_ids" ]; then
+    echo "sealed Linux mount inventory changed during read-only transition" >&2
+    exit 1
+fi'''
     linux_all_read_only_audit = '''if ! /usr/bin/awk '
 function has_option(options, wanted, count, position, fields) {
     count = split(options, fields, ",")
@@ -1790,7 +1822,9 @@ fi'''
 
     def linux_mount_boundary_is_exact(candidate: str) -> bool:
         required = (
+            linux_mount_identity_audit,
             linux_recursive_read_only,
+            linux_post_transition_identity_audit,
             linux_all_read_only_audit,
             linux_writable_loop,
             linux_exact_writable_audit,
@@ -1801,6 +1835,8 @@ fi'''
             'mountpoints="$(/usr/bin/findmnt',
             'for mountpoint in $mountpoints',
             'remount,bind,ro "$mountpoint"',
+            'set-recursive-mount-readonly.py" || :',
+            'remount,bind,ro=recursive /',
             'remount,rw=recursive',
             'remount,bind,ro /',
             'remount,ro=recursive /',
@@ -1810,7 +1846,9 @@ fi'''
             return False
         return (
             candidate.index('/usr/bin/mount --bind "$hidden_home" "$original_home"')
+            < candidate.index(linux_mount_identity_audit)
             < candidate.index(linux_recursive_read_only)
+            < candidate.index(linux_post_transition_identity_audit)
             < candidate.index(linux_all_read_only_audit)
             < candidate.index(linux_writable_loop)
             < candidate.index(linux_exact_writable_audit)
@@ -1819,6 +1857,95 @@ fi'''
 
     if not linux_mount_boundary_is_exact(linux_wrapper):
         raise AssertionError("sealed Linux recursive mount boundary is not exact")
+    mount_helper = (ROOT / "ci/set-recursive-mount-readonly.py").read_text(encoding="utf-8")
+    mount_attributes_layout = '''    _fields_ = (
+        ("attr_set", ctypes.c_uint64),
+        ("attr_clr", ctypes.c_uint64),
+        ("propagation", ctypes.c_uint64),
+        ("userns_fd", ctypes.c_uint64),
+    )'''
+    mount_helper_tokens = (
+        'AT_FDCWD = -100',
+        'AT_RECURSIVE = 0x8000',
+        'MOUNT_ATTR_RDONLY = 0x00000001',
+        'SYS_MOUNT_SETATTR_X86_64 = 442',
+        'class MountAttributes(ctypes.Structure):',
+        mount_attributes_layout,
+        'sys.platform != "linux"\n        or os.uname().machine != "x86_64"',
+        'or len(sys.argv) != 1\n        or os.geteuid() != 0',
+        'libc = ctypes.CDLL(None, use_errno=True)',
+        'syscall = libc.syscall',
+        'syscall.restype = ctypes.c_long',
+        'attributes = MountAttributes(attr_set=MOUNT_ATTR_RDONLY)',
+        'ctypes.c_long(SYS_MOUNT_SETATTR_X86_64)',
+        'ctypes.c_int(AT_FDCWD)',
+        'ctypes.c_char_p(b"/")',
+        'ctypes.c_uint(AT_RECURSIVE)',
+        'ctypes.byref(attributes)',
+        'ctypes.c_size_t(ctypes.sizeof(attributes))',
+        'error_number = ctypes.get_errno()',
+    )
+
+    def mount_helper_is_exact(candidate: str) -> bool:
+        return (
+            all(candidate.count(token) == 1 for token in mount_helper_tokens)
+            and 'subprocess' not in candidate
+            and 'socket' not in candidate
+            and 'os.environ' not in candidate
+            and 'libc.mount_setattr' not in candidate
+            and 'attr_clr=' not in candidate
+            and 'propagation=' not in candidate
+            and '_pack_' not in candidate
+            and '_align_' not in candidate
+            and '_layout_' not in candidate
+            and candidate.index('attributes = MountAttributes(attr_set=MOUNT_ATTR_RDONLY)')
+            < candidate.index('    if syscall(')
+            < candidate.index('        error_number = ctypes.get_errno()')
+        )
+
+    if not mount_helper_is_exact(mount_helper):
+        raise AssertionError("sealed Linux mount_setattr helper is not exact")
+    for token in mount_helper_tokens:
+        mutated = mount_helper.replace(token, "", 1)
+        if mutated == mount_helper or mount_helper_is_exact(mutated):
+            raise AssertionError(f"sealed Linux mount helper mutation was accepted: {token}")
+    for name, original, replacement in (
+        ("nonrecursive flags", "AT_RECURSIVE = 0x8000", "AT_RECURSIVE = 0"),
+        ("writable attributes", "MOUNT_ATTR_RDONLY = 0x00000001", "MOUNT_ATTR_RDONLY = 0"),
+        ("non-root target", 'ctypes.c_char_p(b"/")', 'ctypes.c_char_p(b"/tmp")'),
+        (
+            "cleared read-only attribute",
+            "attributes = MountAttributes(attr_set=MOUNT_ATTR_RDONLY)",
+            "attributes = MountAttributes(attr_clr=MOUNT_ATTR_RDONLY)",
+        ),
+        (
+            "extra ABI field",
+            mount_attributes_layout,
+            mount_attributes_layout.replace(
+                '        ("userns_fd", ctypes.c_uint64),',
+                '        ("userns_fd", ctypes.c_uint64),\n'
+                '        ("unexpected", ctypes.c_uint64),',
+            ),
+        ),
+        (
+            "packed ABI layout",
+            mount_attributes_layout,
+            "    _pack_ = 1\n" + mount_attributes_layout,
+        ),
+        (
+            "over-aligned ABI layout",
+            mount_attributes_layout,
+            "    _align_ = 16\n" + mount_attributes_layout,
+        ),
+        (
+            "alternate ABI layout",
+            mount_attributes_layout,
+            '    _layout_ = "gcc-sysv"\n' + mount_attributes_layout,
+        ),
+    ):
+        mutated = mount_helper.replace(original, replacement, 1)
+        if mutated == mount_helper or mount_helper_is_exact(mutated):
+            raise AssertionError(f"sealed Linux mount helper {name} mutation was accepted")
     for diagnostic in (
         'if (reported < 20)',
         'sealed Linux unexpected writable mount record:',
@@ -1829,10 +1956,13 @@ fi'''
             raise AssertionError(f"sealed Linux mount diagnostic is not exact: {diagnostic}")
     linux_mount_mutations = {
         "missing recursive transition": linux_wrapper.replace(linux_recursive_read_only, "", 1),
-        "writable recursive transition": linux_wrapper.replace("ro=recursive", "rw=recursive", 1),
-        "nonrecursive transition": linux_wrapper.replace("ro=recursive", "ro", 1),
-        "filesystem-remount transition": linux_wrapper.replace("remount,bind", "remount", 1),
-        "non-root transition": linux_wrapper.replace("ro=recursive /", 'ro=recursive "$original_home"', 1),
+        "missing pre-transition inventory": linux_wrapper.replace(linux_mount_identity_audit, "", 1),
+        "missing post-transition inventory": linux_wrapper.replace(
+            linux_post_transition_identity_audit, "", 1
+        ),
+        "alternate helper": linux_wrapper.replace(
+            "set-recursive-mount-readonly.py", "unreviewed-mount-helper.py", 1
+        ),
         "ignored recursive failure": linux_wrapper.replace(
             linux_recursive_read_only, linux_recursive_read_only + " || :", 1
         ),
