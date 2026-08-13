@@ -1695,6 +1695,10 @@ done'''
         if mutated == gate or darwin_cleanup_is_exact(mutated):
             raise AssertionError(f"Darwin cleanup {name} mutation was accepted")
     darwin_root_read = "'(allow file-read* (literal \"/\"))'"
+    darwin_tmp_parent_metadata = (
+        "'(allow file-read-metadata (literal \"/private\") "
+        "(literal \"/private/tmp\"))'"
+    )
     darwin_system_read = (
         "'(allow file-read* (subpath \"/System\") (subpath \"/usr\") "
         "(subpath \"/bin\") (subpath \"/sbin\") (subpath \"/Applications\") "
@@ -1753,6 +1757,7 @@ done'''
         darwin_root_read,
         darwin_system_read,
         darwin_xcode_select_read,
+        darwin_tmp_parent_metadata,
         r'"(allow file-read* (subpath \"$scratch\"))"',
         r'"(allow file-read-metadata (literal \"$var_tmp_target\"))"',
         darwin_system_map,
@@ -1773,7 +1778,7 @@ done'''
         if (
             len(re.findall(r"\(\s*allow(?:\s|\))", candidate)) != len(darwin_allow_tokens)
             or len(re.findall(r"\(\s*deny(?:\s|\))", candidate)) != 2
-            or candidate.count("(allow file-read") != 6
+            or candidate.count("(allow file-read") != 7
             or candidate.count("(allow file-map-executable") != 2
             or candidate.count("(allow process-exec") != 3
             or '(subpath "/")' in candidate
@@ -2019,6 +2024,52 @@ done'''
             "additive user subtree read",
             darwin_system_read,
             darwin_system_read[:-2] + ' (subpath "/Users"))\'',
+        ),
+        ("missing private tmp parent metadata", darwin_tmp_parent_metadata, ""),
+        (
+            "private parent subtree metadata",
+            darwin_tmp_parent_metadata,
+            "'(allow file-read-metadata (subpath \"/private\") (literal \"/private/tmp\"))'",
+        ),
+        (
+            "private tmp subtree metadata",
+            darwin_tmp_parent_metadata,
+            "'(allow file-read-metadata (literal \"/private\") (subpath \"/private/tmp\"))'",
+        ),
+        (
+            "private tmp parent data read",
+            darwin_tmp_parent_metadata,
+            darwin_tmp_parent_metadata.replace("file-read-metadata", "file-read-data"),
+        ),
+        (
+            "missing private parent literal",
+            darwin_tmp_parent_metadata,
+            "'(allow file-read-metadata (literal \"/private/tmp\"))'",
+        ),
+        (
+            "missing private tmp literal",
+            darwin_tmp_parent_metadata,
+            "'(allow file-read-metadata (literal \"/private\"))'",
+        ),
+        (
+            "unfiltered private metadata",
+            darwin_tmp_parent_metadata,
+            "'(allow file-read-metadata)'",
+        ),
+        (
+            "private subtree read",
+            darwin_tmp_parent_metadata,
+            "'(allow file-read* (subpath \"/private\"))'",
+        ),
+        (
+            "private tmp subtree read",
+            darwin_tmp_parent_metadata,
+            "'(allow file-read* (subpath \"/private/tmp\"))'",
+        ),
+        (
+            "tmp subtree read",
+            darwin_tmp_parent_metadata,
+            "'(allow file-read* (subpath \"/tmp\"))'",
         ),
         (
             "restored device subtree read",
@@ -2840,6 +2891,10 @@ fn require_linux_mount_boundary() {}'''
         "all-input dep-info": (
             '--emit=dep-info=- >"$gate_output/ordinary-wallet-plan.dep-info"'
         ),
+        "bounded compiler diagnostics": (
+            'python3 -I ci/capture-bounded-command-diagnostics.py \\\n'
+            '    --capture-stdin "$plan_diagnostic_output"'
+        ),
         "ordinary pset import": (
             "use wasabi_liquid_native_ordinary_pset::{ConfidentialOutput, ExplicitFee};"
         ),
@@ -2886,6 +2941,129 @@ fn require_linux_mount_boundary() {}'''
         mutated_gate = gate.replace(token, "", 1)
         if mutated_gate == gate or token in mutated_gate:
             raise AssertionError(f"ordinary-wallet plan shell {name} mutation was accepted")
+    diagnostic_lifecycle_stanza = r'''plan_diagnostic_output="$gate_output/ordinary-wallet-plan.stderr"
+plan_diagnostic_status="$gate_output/ordinary-wallet-plan.status"
+if ! (
+    if run_sealed "$compiler_cargo_bin" rustc \
+            -p wasabi-liquid-native-ordinary-wallet-plan \
+            --lib \
+            --locked \
+            --offline \
+            -- \
+            --emit=dep-info=- >"$gate_output/ordinary-wallet-plan.dep-info"
+    then
+        plan_pipeline_status=0
+    else
+        plan_pipeline_status=$?
+    fi
+    /usr/bin/printf '%s\n' "$plan_pipeline_status" >"$plan_diagnostic_status"
+) 2>&1 | python3 -I ci/capture-bounded-command-diagnostics.py \
+    --capture-stdin "$plan_diagnostic_output"
+then
+    echo "ordinary-wallet plan bounded compiler diagnostic capture failed" >&2
+    exit 1
+fi
+if [ ! -f "$plan_diagnostic_status" ]; then
+    echo "ordinary-wallet plan compiler status handoff is missing" >&2
+    exit 1
+fi
+plan_compile_status="$(cat "$plan_diagnostic_status")"
+case "$plan_compile_status" in *[!0-9]*|'') echo "ordinary-wallet plan compiler status handoff is invalid" >&2; exit 1 ;; esac
+if [ "$plan_compile_status" -gt 255 ]; then
+    echo "ordinary-wallet plan compiler status handoff is out of range" >&2
+    exit 1
+fi
+if [ "$plan_compile_status" -ne 0 ]; then
+    if ! python3 -I ci/capture-bounded-command-diagnostics.py \
+        --emit "$plan_diagnostic_output"; then
+        echo "ordinary-wallet plan bounded compiler diagnostic emission failed" >&2
+        exit 1
+    fi
+    echo "ordinary-wallet plan compiler source closure derivation failed" >&2
+    exit 1
+fi'''
+    if (
+        gate.count(diagnostic_lifecycle_stanza) != 1
+        or len(re.findall(r"(?m)^plan_diagnostic_output=", gate)) != 1
+        or len(re.findall(r"(?m)^plan_diagnostic_status=", gate)) != 1
+        or len(re.findall(r"(?m)^plan_compile_status=", gate)) != 1
+        or len(re.findall(r"(?m)^\s*plan_pipeline_status=", gate)) != 2
+        or gate.count('--emit "$plan_diagnostic_output"') != 1
+        or "ordinary-wallet-plan.stderr.fifo" in gate
+        or 'wait "$plan_diagnostic_collector"' in gate
+    ):
+        raise AssertionError("bounded compiler diagnostic lifecycle is not exact")
+    for name, token in (
+        ("producer success status", "        plan_pipeline_status=0\n"),
+        ("producer failure status", "        plan_pipeline_status=$?\n"),
+        ("status handoff", "    /usr/bin/printf '%s\\n' \"$plan_pipeline_status\" >\"$plan_diagnostic_status\"\n"),
+        ("collector pipeline", ') 2>&1 | python3 -I ci/capture-bounded-command-diagnostics.py \\\n'),
+        ("missing-status rejection", 'if [ ! -f "$plan_diagnostic_status" ]; then\n'),
+        ("status parse", 'plan_compile_status="$(cat "$plan_diagnostic_status")"\n'),
+        ("status range", 'if [ "$plan_compile_status" -gt 255 ]; then\n'),
+        ("failure-only emission", 'if [ "$plan_compile_status" -ne 0 ]; then\n'),
+        ("bounded emission", '        --emit "$plan_diagnostic_output"; then\n'),
+    ):
+        mutated = gate.replace(token, "", 1)
+        if mutated == gate or mutated.count(diagnostic_lifecycle_stanza) != 0:
+            raise AssertionError(f"bounded compiler diagnostic {name} mutation was accepted")
+    if gate.count("python3 -I ci/test-bounded-command-diagnostics.py") != 1:
+        raise AssertionError("bounded command diagnostic mutation test is not singular")
+    diagnostic_helper = (
+        ROOT / "ci/capture-bounded-command-diagnostics.py"
+    ).read_text(encoding="utf-8")
+    diagnostic_cap_tokens = (
+        "MAX_DIAGNOSTIC_BYTES = 16 * 1024",
+        'TRUNCATION_MARKER = b"\\n[diagnostics truncated]\\n"',
+        "chunk = os.read(0, 64 * 1024)",
+        "if not stat.S_ISFIFO(stdin_metadata.st_mode):",
+        "os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, \"O_NOFOLLOW\", 0)",
+        "or output_metadata.st_nlink != 1",
+        "or output_metadata.st_uid != os.getuid()",
+        "or exact_identity(os.lstat(output)) != exact_identity(output_metadata)",
+        "if len(retained) < MAX_DIAGNOSTIC_BYTES:",
+        "retained.extend(chunk[: MAX_DIAGNOSTIC_BYTES - len(retained)])",
+        "if total > MAX_DIAGNOSTIC_BYTES:",
+        "retained[MAX_DIAGNOSTIC_BYTES - len(TRUNCATION_MARKER) :] = TRUNCATION_MARKER",
+        "or before.st_size > MAX_DIAGNOSTIC_BYTES",
+        "or before.st_nlink != 1",
+        "or before.st_uid != os.getuid()",
+        "if exact_identity(opened) != exact_identity(before):",
+        "data = os.read(descriptor, MAX_DIAGNOSTIC_BYTES + 1)",
+        "or len(data) > MAX_DIAGNOSTIC_BYTES",
+        "exact_identity(os.fstat(descriptor)) != exact_identity(opened)",
+        "os.lstat(output)\n        ) != exact_identity(opened)",
+    )
+
+    def diagnostic_caps_are_exact(candidate: str) -> bool:
+        return (
+            all(candidate.count(token) == 1 for token in diagnostic_cap_tokens)
+            and len(re.findall(r"(?m)^MAX_DIAGNOSTIC_BYTES\s*=", candidate)) == 1
+            and len(re.findall(r"(?m)^TRUNCATION_MARKER\s*=", candidate)) == 1
+        )
+
+    if not diagnostic_caps_are_exact(diagnostic_helper):
+        raise AssertionError("bounded command diagnostic byte limits are not exact")
+    for token in diagnostic_cap_tokens:
+        mutated = diagnostic_helper.replace(token, "", 1)
+        if mutated == diagnostic_helper or diagnostic_caps_are_exact(mutated):
+            raise AssertionError(
+                f"bounded command diagnostic cap mutation was accepted: {token}"
+            )
+    for name, mutation in (
+        ("reassigned cap", "\nMAX_DIAGNOSTIC_BYTES = 32 * 1024\n"),
+        ("reassigned marker", '\nTRUNCATION_MARKER = b"changed"\n'),
+    ):
+        mutated = diagnostic_helper + mutation
+        if diagnostic_caps_are_exact(mutated):
+            raise AssertionError(f"bounded command diagnostic {name} mutation was accepted")
+    for unbounded_emitter in (
+        'cat "$plan_diagnostic_output"',
+        'sed -n \'1,120p\' "$plan_diagnostic_output"',
+        'tail "$plan_diagnostic_output"',
+    ):
+        if unbounded_emitter in gate:
+            raise AssertionError("unbounded compiler diagnostic emitter was accepted")
     if not focused_replay_is_exact(gate):
         raise AssertionError("focused conformance replay is not exact and singular")
     focused_stanza = """run_sealed "$compiler_cargo_bin" test \\

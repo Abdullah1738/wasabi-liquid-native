@@ -280,6 +280,7 @@ python3 -I ci/test-ordinary-wallet-plan-public-proof-surface.py
 python3 -I ci/test-pinned-rust-toolchain.py
 python3 -I ci/test-cargo-fetch-preflight.py
 python3 -I ci/test-sealed-rust-command-bin.py
+python3 -I ci/test-bounded-command-diagnostics.py
 python3 -I ci/test-sealed-tree-readable.py
 python3 -I ci/test-cargo-credential-provider.py
 source_cargo_home="$scratch/source-cargo-home"
@@ -664,6 +665,7 @@ case "$host_system" in
                 '(allow file-read* (literal "/"))' \
                 '(allow file-read* (subpath "/System") (subpath "/usr") (subpath "/bin") (subpath "/sbin") (subpath "/Applications") (subpath "/Library/Developer") (subpath "/private/etc") (subpath "/private/var/db"))' \
                 '(allow file-read-metadata (literal "/var") (literal "/private/var/select/developer_dir") (literal "/private/var/select/sh"))' \
+                '(allow file-read-metadata (literal "/private") (literal "/private/tmp"))' \
                 "(allow file-read* (subpath \"$scratch\"))" \
                 "(allow file-read-metadata (literal \"$var_tmp_target\"))" \
                 '(allow file-map-executable (subpath "/System") (subpath "/usr") (subpath "/bin") (subpath "/sbin") (subpath "/Applications") (subpath "/Library/Developer"))' \
@@ -1264,14 +1266,44 @@ if [ "$plan_trait_impl_count" -ne 42 ] || grep -En '^[[:space:]]+impl[[:space:]<
     echo "ordinary-wallet plan exact trait implementation syntax changed" >&2
     exit 1
 fi
-if ! run_sealed "$compiler_cargo_bin" rustc \
-        -p wasabi-liquid-native-ordinary-wallet-plan \
-        --lib \
-        --locked \
-        --offline \
-        -- \
-        --emit=dep-info=- >"$gate_output/ordinary-wallet-plan.dep-info" 2>/dev/null
+plan_diagnostic_output="$gate_output/ordinary-wallet-plan.stderr"
+plan_diagnostic_status="$gate_output/ordinary-wallet-plan.status"
+if ! (
+    if run_sealed "$compiler_cargo_bin" rustc \
+            -p wasabi-liquid-native-ordinary-wallet-plan \
+            --lib \
+            --locked \
+            --offline \
+            -- \
+            --emit=dep-info=- >"$gate_output/ordinary-wallet-plan.dep-info"
+    then
+        plan_pipeline_status=0
+    else
+        plan_pipeline_status=$?
+    fi
+    /usr/bin/printf '%s\n' "$plan_pipeline_status" >"$plan_diagnostic_status"
+) 2>&1 | python3 -I ci/capture-bounded-command-diagnostics.py \
+    --capture-stdin "$plan_diagnostic_output"
 then
+    echo "ordinary-wallet plan bounded compiler diagnostic capture failed" >&2
+    exit 1
+fi
+if [ ! -f "$plan_diagnostic_status" ]; then
+    echo "ordinary-wallet plan compiler status handoff is missing" >&2
+    exit 1
+fi
+plan_compile_status="$(cat "$plan_diagnostic_status")"
+case "$plan_compile_status" in *[!0-9]*|'') echo "ordinary-wallet plan compiler status handoff is invalid" >&2; exit 1 ;; esac
+if [ "$plan_compile_status" -gt 255 ]; then
+    echo "ordinary-wallet plan compiler status handoff is out of range" >&2
+    exit 1
+fi
+if [ "$plan_compile_status" -ne 0 ]; then
+    if ! python3 -I ci/capture-bounded-command-diagnostics.py \
+        --emit "$plan_diagnostic_output"; then
+        echo "ordinary-wallet plan bounded compiler diagnostic emission failed" >&2
+        exit 1
+    fi
     echo "ordinary-wallet plan compiler source closure derivation failed" >&2
     exit 1
 fi
