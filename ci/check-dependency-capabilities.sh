@@ -42,25 +42,27 @@ prepare_darwin_toolchain() {
     expected_darwin_sdkroot="$expected_darwin_developer_dir/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
     expected_darwin_xcode_version='Xcode 15.4
 Build version 15F31d'
-    darwin_require_root_immutable_path() {
-        immutable_path=$1
-        immutable_type=$2
-        immutable_state="$(/usr/bin/sudo -n /usr/bin/stat -f '%u:%OLp:%HT' "$immutable_path")"
-        immutable_uid=${immutable_state%%:*}
-        immutable_remainder=${immutable_state#*:}
-        immutable_mode=${immutable_remainder%%:*}
-        immutable_actual_type=${immutable_remainder#*:}
-        case "$immutable_mode" in
+    darwin_host_uid="$(/usr/bin/id -u)"
+    case "$darwin_host_uid" in *[!0-9]*|'') echo "Darwin host UID is unavailable" >&2; exit 1 ;; esac
+    darwin_require_host_authority_path() {
+        authority_path=$1
+        authority_type=$2
+        authority_state="$(/usr/bin/sudo -n /usr/bin/stat -f '%u:%OLp:%HT' "$authority_path")"
+        authority_uid=${authority_state%%:*}
+        authority_remainder=${authority_state#*:}
+        authority_mode=${authority_remainder%%:*}
+        authority_actual_type=${authority_remainder#*:}
+        case "$authority_mode" in
             [0-7][0-7][0-7]|[0-7][0-7][0-7][0-7]) ;;
-            *) echo "selected Darwin path has a noncanonical mode: $immutable_path" >&2; exit 1 ;;
+            *) echo "selected Darwin path has a noncanonical mode: $authority_path" >&2; exit 1 ;;
         esac
-        if [ "$immutable_uid" != 0 ] || [ "$immutable_actual_type" != "$immutable_type" ]; then
-            echo "selected Darwin path has an unreviewed owner or type: $immutable_path" >&2
+        if { [ "$authority_uid" != 0 ] && [ "$authority_uid" != "$darwin_host_uid" ]; } || [ "$authority_actual_type" != "$authority_type" ]; then
+            echo "selected Darwin path has an unreviewed owner or type: $authority_path" >&2
             exit 1
         fi
-        case "$immutable_mode" in
+        case "$authority_mode" in
             *[2367][0-7]|*[0-7][2367])
-                echo "selected Darwin path is writable outside root ownership: $immutable_path" >&2
+                echo "selected Darwin path is writable outside its host owner: $authority_path" >&2
                 exit 1
                 ;;
         esac
@@ -85,7 +87,7 @@ Build version 15F31d'
             echo "selected Darwin tool is unavailable: $1" >&2
             exit 1
         fi
-        darwin_require_root_immutable_path "$tool_path" 'Regular File'
+        darwin_require_host_authority_path "$tool_path" 'Regular File'
         /usr/bin/printf '%s\n' "$tool_path"
     }
     darwin_developer_dir="$(/usr/bin/xcode-select --print-path)"
@@ -94,9 +96,9 @@ Build version 15F31d'
         echo "selected Darwin developer directory differs from Xcode 15.4" >&2
         exit 1
     fi
-    darwin_require_root_immutable_path "$darwin_developer_dir" 'Directory'
+    darwin_require_host_authority_path "$darwin_developer_dir" 'Directory'
     darwin_xcodebuild="$darwin_developer_dir/usr/bin/xcodebuild"
-    darwin_require_root_immutable_path "$darwin_xcodebuild" 'Regular File'
+    darwin_require_host_authority_path "$darwin_xcodebuild" 'Regular File'
     if [ "$("$darwin_xcodebuild" -version)" != "$expected_darwin_xcode_version" ]; then
         echo "selected Darwin Xcode build identity differs from 15F31d" >&2
         exit 1
@@ -107,10 +109,10 @@ Build version 15F31d'
         echo "selected Darwin SDK differs from the Xcode 15.4 default" >&2
         exit 1
     fi
-    darwin_require_root_immutable_path "$darwin_sdkroot" 'Directory'
+    darwin_require_host_authority_path "$darwin_sdkroot" 'Directory'
     darwin_toolchain_bin="$darwin_developer_dir/Toolchains/XcodeDefault.xctoolchain/usr/bin"
     darwin_toolchain_bin="$(cd -P "$darwin_toolchain_bin" && /bin/pwd -P)"
-    darwin_require_root_immutable_path "$darwin_toolchain_bin" 'Directory'
+    darwin_require_host_authority_path "$darwin_toolchain_bin" 'Directory'
     if [ "$(DEVELOPER_DIR="$darwin_developer_dir" /usr/bin/xcrun --sdk macosx --find clang)" != "$darwin_toolchain_bin/clang" ]; then
         echo "selected Darwin clang differs from the reviewed default toolchain" >&2
         exit 1

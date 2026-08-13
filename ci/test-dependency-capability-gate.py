@@ -1104,9 +1104,11 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
         'expected_darwin_developer_dir=/Applications/Xcode_15.4.app/Contents/Developer',
         'expected_darwin_sdkroot="$expected_darwin_developer_dir/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"',
         "expected_darwin_xcode_version='Xcode 15.4\nBuild version 15F31d'",
-        'darwin_require_root_immutable_path() {',
-        'immutable_state="$(/usr/bin/sudo -n /usr/bin/stat -f \'%u:%OLp:%HT\' "$immutable_path")"',
-        'if [ "$immutable_uid" != 0 ] || [ "$immutable_actual_type" != "$immutable_type" ]; then',
+        'darwin_host_uid="$(/usr/bin/id -u)"',
+        'case "$darwin_host_uid" in *[!0-9]*|\'\')',
+        'darwin_require_host_authority_path() {',
+        'authority_state="$(/usr/bin/sudo -n /usr/bin/stat -f \'%u:%OLp:%HT\' "$authority_path")"',
+        'if { [ "$authority_uid" != 0 ] && [ "$authority_uid" != "$darwin_host_uid" ]; } || [ "$authority_actual_type" != "$authority_type" ]; then',
         '*[2367][0-7]|*[0-7][2367])',
         'darwin_resolve_tool() {',
         'link_name="$(/usr/bin/readlink "$tool_path")"',
@@ -1114,17 +1116,17 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
         'if [ "$link_depth" -gt 8 ]; then',
         'tool_parent="$(cd -P "${tool_path%/*}" && /bin/pwd -P)"',
         'case "$tool_path" in "$darwin_toolchain_bin"/*)',
-        'darwin_require_root_immutable_path "$tool_path" \'Regular File\'',
+        'darwin_require_host_authority_path "$tool_path" \'Regular File\'',
         'darwin_developer_dir="$(/usr/bin/xcode-select --print-path)"',
         'if [ "$darwin_developer_dir" != "$expected_darwin_developer_dir" ]; then',
-        'darwin_require_root_immutable_path "$darwin_developer_dir" \'Directory\'',
-        'darwin_require_root_immutable_path "$darwin_xcodebuild" \'Regular File\'',
+        'darwin_require_host_authority_path "$darwin_developer_dir" \'Directory\'',
+        'darwin_require_host_authority_path "$darwin_xcodebuild" \'Regular File\'',
         'if [ "$("$darwin_xcodebuild" -version)" != "$expected_darwin_xcode_version" ]; then',
         'darwin_sdkroot="$(DEVELOPER_DIR="$darwin_developer_dir" /usr/bin/xcrun --sdk macosx --show-sdk-path)"',
         'if [ "$darwin_sdkroot" != "$expected_darwin_sdkroot" ]; then',
-        'darwin_require_root_immutable_path "$darwin_sdkroot" \'Directory\'',
+        'darwin_require_host_authority_path "$darwin_sdkroot" \'Directory\'',
         'darwin_toolchain_bin="$(cd -P "$darwin_toolchain_bin" && /bin/pwd -P)"',
-        'darwin_require_root_immutable_path "$darwin_toolchain_bin" \'Directory\'',
+        'darwin_require_host_authority_path "$darwin_toolchain_bin" \'Directory\'',
         'if [ "$(DEVELOPER_DIR="$darwin_developer_dir" /usr/bin/xcrun --sdk macosx --find clang)" != "$darwin_toolchain_bin/clang" ]; then',
         'darwin_cc_bin="$(darwin_resolve_tool clang)"',
         'darwin_cxx_bin="$(darwin_resolve_tool clang++)"',
@@ -1733,10 +1735,21 @@ NF < 6 { invalid = 1; next }
 {
     read_only = has_option($6, "ro")
     read_write = has_option($6, "rw")
-    if (!read_only || read_write) invalid = 1
+    if (!read_only || read_write) {
+        invalid = 1
+        if (reported < 20) {
+            print "sealed Linux unexpected writable mount record: " $5 " " $6 > "/dev/stderr"
+        }
+        reported++
+    }
     if ($5 == "/" && read_only && !read_write) root_read_only = 1
 }
-END { exit !(NR > 0 && root_read_only && !invalid) }
+END {
+    if (reported > 20) {
+        print "sealed Linux additional writable mount records: " reported - 20 > "/dev/stderr"
+    }
+    exit !(NR > 0 && root_read_only && !invalid)
+}
 ' /proc/self/mountinfo; then
     echo "sealed Linux recursive read-only mount transition is incomplete" >&2
     exit 1
@@ -1806,6 +1819,14 @@ fi'''
 
     if not linux_mount_boundary_is_exact(linux_wrapper):
         raise AssertionError("sealed Linux recursive mount boundary is not exact")
+    for diagnostic in (
+        'if (reported < 20)',
+        'sealed Linux unexpected writable mount record:',
+        'if (reported > 20)',
+        'sealed Linux additional writable mount records:',
+    ):
+        if linux_wrapper.count(diagnostic) != 1:
+            raise AssertionError(f"sealed Linux mount diagnostic is not exact: {diagnostic}")
     linux_mount_mutations = {
         "missing recursive transition": linux_wrapper.replace(linux_recursive_read_only, "", 1),
         "writable recursive transition": linux_wrapper.replace("ro=recursive", "rw=recursive", 1),

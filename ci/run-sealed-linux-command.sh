@@ -91,10 +91,21 @@ NF < 6 { invalid = 1; next }
 {
     read_only = has_option($6, "ro")
     read_write = has_option($6, "rw")
-    if (!read_only || read_write) invalid = 1
+    if (!read_only || read_write) {
+        invalid = 1
+        if (reported < 20) {
+            print "sealed Linux unexpected writable mount record: " $5 " " $6 > "/dev/stderr"
+        }
+        reported++
+    }
     if ($5 == "/" && read_only && !read_write) root_read_only = 1
 }
-END { exit !(NR > 0 && root_read_only && !invalid) }
+END {
+    if (reported > 20) {
+        print "sealed Linux additional writable mount records: " reported - 20 > "/dev/stderr"
+    }
+    exit !(NR > 0 && root_read_only && !invalid)
+}
 ' /proc/self/mountinfo; then
     echo "sealed Linux recursive read-only mount transition is incomplete" >&2
     exit 1
