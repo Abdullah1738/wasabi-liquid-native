@@ -1495,8 +1495,8 @@ done'''
         ('NSpid:', 1),
         ('/proc/1/status', 2),
         ('/usr/bin/mount --bind "$hidden_home" "$original_home"', 1),
-        ('/usr/bin/mount --remount --bind --read-only "$mountpoint"', 1),
-        ('/usr/bin/mount --remount --bind --rw "$writable"', 1),
+        ('/usr/bin/mount -o remount,bind,ro "$mountpoint"', 1),
+        ('/usr/bin/mount -o remount,bind,rw "$writable"', 1),
         ('/usr/bin/setpriv --reuid="$build_uid" --regid="$build_uid" --clear-groups', 1),
         ('/usr/bin/env -i HOME="$build_home" TMPDIR="$build_tmp" PATH="$trusted_bin:/usr/bin:/bin"', 1),
         ('SEALED_ORIGINAL_CARGO_HOME="$original_cargo_home"', 1),
@@ -1505,6 +1505,15 @@ done'''
     ):
         if linux_wrapper.count(token) != expected:
             raise AssertionError(f"sealed Linux boundary token is not exact: {token}")
+    for name, original, replacement in (
+        ("inherited read-only remount", 'remount,bind,ro "$mountpoint"', 'remount,bind,rw "$mountpoint"'),
+        ("writable target remount", 'remount,bind,rw "$writable"', 'remount,bind,ro "$writable"'),
+        ("inherited bind scope", 'remount,bind,ro "$mountpoint"', 'remount,ro "$mountpoint"'),
+        ("writable bind scope", 'remount,bind,rw "$writable"', 'remount,rw "$writable"'),
+    ):
+        mutated = linux_wrapper.replace(original, replacement, 1)
+        if mutated == linux_wrapper or original in mutated:
+            raise AssertionError(f"sealed Linux {name} mutation was accepted")
     linux_namespace_diagnostics = (
         "sealed Linux PID-one namespace handle is unavailable",
         "sealed Linux active PID namespace handle is unavailable",
@@ -1571,7 +1580,7 @@ fi'''.replace("PLATFORM", platform)
         return (
             candidate.index(sibling)
             < candidate.index('for writable in "$build_home" "$build_tmp" "$target_dir"; do')
-            < candidate.index('/usr/bin/mount --remount --bind --rw "$writable"')
+            < candidate.index('/usr/bin/mount -o remount,bind,rw "$writable"')
             < candidate.index(chdir)
             < candidate.index('exec /usr/bin/python3 "$sealed_workspace_root/ci/run-sealed-command-supervisor.py"')
         )

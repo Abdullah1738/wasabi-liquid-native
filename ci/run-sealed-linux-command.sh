@@ -82,12 +82,12 @@ old_ifs=$IFS
 IFS='
 '
 for mountpoint in $mountpoints; do
-    /usr/bin/mount --remount --bind --read-only "$mountpoint"
+    /usr/bin/mount -o remount,bind,ro "$mountpoint"
 done
 IFS=$old_ifs
 for writable in "$build_home" "$build_tmp" "$target_dir"; do
     /usr/bin/mount --bind "$writable" "$writable"
-    /usr/bin/mount --remount --bind --rw "$writable"
+    /usr/bin/mount -o remount,bind,rw "$writable"
 done
 
 cd -P "$sealed_workspace_root"
