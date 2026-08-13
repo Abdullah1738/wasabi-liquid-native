@@ -3136,6 +3136,87 @@ fi'''
     surface_mutations = (
         ROOT / "ci/test-ordinary-wallet-plan-surface.py"
     ).read_text(encoding="utf-8")
+    surface_sdk_invocation = '''WLPQ_TEST_DARWIN_SDKROOT="$darwin_sdkroot" \\
+    python3 -I ci/test-ordinary-wallet-plan-surface.py'''
+    surface_sdk_environment = '''def cargo_environment(root: Path, *, platform: str | None = None) -> dict[str, str]:
+    environment = os.environ.copy()
+    darwin_sdkroot = environment.pop(TEST_DARWIN_SDKROOT_VARIABLE, "")
+    environment.pop("SDKROOT", None)
+    active_platform = sys.platform if platform is None else platform
+    if active_platform == "darwin":
+        sdkroot = Path(darwin_sdkroot)
+        if not sdkroot.is_absolute() or sdkroot.is_symlink() or not sdkroot.is_dir():
+            raise AssertionError("validated Darwin test SDK root is required")
+        environment["SDKROOT"] = str(sdkroot)
+    elif darwin_sdkroot:
+        raise AssertionError("Darwin test SDK root was supplied on a non-Darwin host")
+    environment["CARGO_TARGET_DIR"] = str(root.parent / ".target")
+    return environment'''
+
+    def surface_sdk_boundary_is_exact(candidate_gate: str, candidate_test: str) -> bool:
+        return (
+            candidate_gate.count(surface_sdk_invocation) == 1
+            and candidate_test.count(
+                'TEST_DARWIN_SDKROOT_VARIABLE = "WLPQ_TEST_DARWIN_SDKROOT"'
+            )
+            == 1
+            and candidate_test.count(surface_sdk_environment) == 1
+            and candidate_test.count("def test_cargo_environment_boundary() -> None:") == 1
+            and candidate_test.count("    test_cargo_environment_boundary()\n") == 1
+            and 'environment["DEVELOPER_DIR"]' not in candidate_test
+        )
+
+    if not surface_sdk_boundary_is_exact(gate, surface_mutations):
+        raise AssertionError("private surface-mutation Darwin SDK boundary is not exact")
+    for name, candidate_gate, candidate_test in (
+        ("gate handoff", gate.replace(surface_sdk_invocation, "", 1), surface_mutations),
+        (
+            "test-only variable consumption",
+            gate,
+            surface_mutations.replace(
+                '    darwin_sdkroot = environment.pop(TEST_DARWIN_SDKROOT_VARIABLE, "")\n',
+                "",
+                1,
+            ),
+        ),
+        (
+            "absolute SDK root",
+            gate,
+            surface_mutations.replace("not sdkroot.is_absolute() or ", "", 1),
+        ),
+        (
+            "ambient SDK root removal",
+            gate,
+            surface_mutations.replace('    environment.pop("SDKROOT", None)\n', "", 1),
+        ),
+        (
+            "symlink rejection",
+            gate,
+            surface_mutations.replace("sdkroot.is_symlink() or ", "", 1),
+        ),
+        (
+            "directory rejection",
+            gate,
+            surface_mutations.replace("or not sdkroot.is_dir()", "", 1),
+        ),
+        (
+            "Darwin-only child assignment",
+            gate,
+            surface_mutations.replace('        environment["SDKROOT"] = str(sdkroot)\n', "", 1),
+        ),
+        (
+            "non-Darwin rejection",
+            gate,
+            surface_mutations.replace("    elif darwin_sdkroot:\n", "", 1),
+        ),
+        (
+            "focused behavior test",
+            gate,
+            surface_mutations.replace("    test_cargo_environment_boundary()\n", "", 1),
+        ),
+    ):
+        if surface_sdk_boundary_is_exact(candidate_gate, candidate_test):
+            raise AssertionError(f"private surface-mutation Darwin SDK {name} mutation was accepted")
     owner_mutable_helper = '''def make_owner_mutable(root: Path) -> None:
     paths = (root, *root.rglob("*"))
     for path in paths:

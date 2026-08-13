@@ -8,11 +8,13 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
+TEST_DARWIN_SDKROOT_VARIABLE = "WLPQ_TEST_DARWIN_SDKROOT"
 
 
 def test_precomputed_compiled_source_boundary() -> None:
@@ -184,10 +186,75 @@ def replace_lib_with_inline_table(root: Path) -> None:
     )
 
 
-def cargo_environment(root: Path) -> dict[str, str]:
+def cargo_environment(root: Path, *, platform: str | None = None) -> dict[str, str]:
     environment = os.environ.copy()
+    darwin_sdkroot = environment.pop(TEST_DARWIN_SDKROOT_VARIABLE, "")
+    environment.pop("SDKROOT", None)
+    active_platform = sys.platform if platform is None else platform
+    if active_platform == "darwin":
+        sdkroot = Path(darwin_sdkroot)
+        if not sdkroot.is_absolute() or sdkroot.is_symlink() or not sdkroot.is_dir():
+            raise AssertionError("validated Darwin test SDK root is required")
+        environment["SDKROOT"] = str(sdkroot)
+    elif darwin_sdkroot:
+        raise AssertionError("Darwin test SDK root was supplied on a non-Darwin host")
     environment["CARGO_TARGET_DIR"] = str(root.parent / ".target")
     return environment
+
+
+def test_cargo_environment_boundary() -> None:
+    original = os.environ.get(TEST_DARWIN_SDKROOT_VARIABLE)
+    original_sdkroot = os.environ.get("SDKROOT")
+    try:
+        with tempfile.TemporaryDirectory(prefix="ordinary-wallet-plan-sdkroot-") as directory:
+            sdkroot = Path(directory).resolve()
+            os.environ[TEST_DARWIN_SDKROOT_VARIABLE] = str(sdkroot)
+            os.environ["SDKROOT"] = "/tmp/unreviewed-sdkroot"
+            environment = cargo_environment(ROOT, platform="darwin")
+            if (
+                environment.get("SDKROOT") != str(sdkroot)
+                or TEST_DARWIN_SDKROOT_VARIABLE in environment
+            ):
+                raise AssertionError("validated Darwin SDK root was not isolated")
+            try:
+                cargo_environment(ROOT, platform="linux")
+            except AssertionError:
+                pass
+            else:
+                raise AssertionError("Darwin SDK root was accepted on a non-Darwin host")
+
+            os.environ[TEST_DARWIN_SDKROOT_VARIABLE] = ""
+            if "SDKROOT" in cargo_environment(ROOT, platform="linux"):
+                raise AssertionError("ambient SDK root reached a non-Darwin Cargo child")
+
+            sdkroot_link = sdkroot / "sdkroot-link"
+            sdkroot_link.symlink_to(sdkroot, target_is_directory=True)
+            os.environ[TEST_DARWIN_SDKROOT_VARIABLE] = str(sdkroot_link)
+            try:
+                cargo_environment(ROOT, platform="darwin")
+            except AssertionError:
+                pass
+            else:
+                raise AssertionError("symlinked Darwin SDK root was accepted")
+
+            invalid = sdkroot / "not-a-directory"
+            invalid.write_text("not an SDK root\n")
+            os.environ[TEST_DARWIN_SDKROOT_VARIABLE] = str(invalid)
+            try:
+                cargo_environment(ROOT, platform="darwin")
+            except AssertionError:
+                pass
+            else:
+                raise AssertionError("non-directory Darwin SDK root was accepted")
+    finally:
+        if original is None:
+            os.environ.pop(TEST_DARWIN_SDKROOT_VARIABLE, None)
+        else:
+            os.environ[TEST_DARWIN_SDKROOT_VARIABLE] = original
+        if original_sdkroot is None:
+            os.environ.pop("SDKROOT", None)
+        else:
+            os.environ["SDKROOT"] = original_sdkroot
 
 
 def require_compiles(root: Path, *, integration_test: bool = False) -> None:
@@ -354,6 +421,7 @@ def add_local_stateful_encoder(root: Path, declaration: str, expression: str) ->
 
 def main() -> None:
     test_precomputed_compiled_source_boundary()
+    test_cargo_environment_boundary()
     test_make_owner_mutable()
     with tempfile.TemporaryDirectory(prefix="ordinary-wallet-plan-surface-") as directory:
         scratch = Path(directory)

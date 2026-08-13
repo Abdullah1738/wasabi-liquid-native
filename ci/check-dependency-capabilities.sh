@@ -1226,7 +1226,8 @@ if ! grep -Fq 'crate-type = ["rlib"]' crates/wallet-facts-wire/Cargo.toml ||
 fi
 
 python3 -I -c 'import importlib.util, pathlib; p = pathlib.Path("ci/check-ordinary-wallet-plan-surface.py"); s = importlib.util.spec_from_file_location("plan_surface", p); m = importlib.util.module_from_spec(s); s.loader.exec_module(m); m.validate_manifest_targets(); m.validate_dependency_authority_surface(m.production_text())'
-python3 -I ci/test-ordinary-wallet-plan-surface.py
+WLPQ_TEST_DARWIN_SDKROOT="$darwin_sdkroot" \
+    python3 -I ci/test-ordinary-wallet-plan-surface.py
 plan_sources="$(find crates/ordinary-wallet-plan/src -type f -name '*.rs' ! -name 'tests.rs' -print | sort)"
 plan_lexical_source="$(
     python3 -I -c 'import importlib.util, pathlib; p = pathlib.Path("ci/check-ordinary-wallet-plan-surface.py"); s = importlib.util.spec_from_file_location("plan_surface", p); m = importlib.util.module_from_spec(s); s.loader.exec_module(m); print(m.strip_rust_comments(m.production_text()), end="")'
