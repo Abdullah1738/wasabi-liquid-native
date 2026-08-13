@@ -490,7 +490,8 @@ case "$host_system" in
                 '(allow sysctl-read)' \
                 '(allow mach-lookup)' \
                 '(allow file-read* (literal "/"))' \
-                '(allow file-read* (subpath "/System") (subpath "/usr") (subpath "/bin") (subpath "/sbin") (subpath "/Applications") (subpath "/Library/Developer") (subpath "/private/etc") (subpath "/private/var/db") (subpath "/dev"))' \
+                '(allow file-read* (subpath "/System") (subpath "/usr") (subpath "/bin") (subpath "/sbin") (subpath "/Applications") (subpath "/Library/Developer") (subpath "/private/etc") (subpath "/private/var/db"))' \
+                '(allow file-read-metadata (literal "/var") (literal "/private/var/select/developer_dir"))' \
                 "(allow file-read* (subpath \"$scratch\"))" \
                 "(allow file-read-metadata (literal \"$var_tmp_target\"))" \
                 "(allow file-write* (subpath \"$build_home\") (subpath \"$build_tmp\") (subpath \"$profile_target\"))" \

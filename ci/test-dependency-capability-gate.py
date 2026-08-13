@@ -1230,14 +1230,26 @@ done'''
         mutated = gate.replace(token, "", 1)
         if mutated == gate or darwin_cleanup_is_exact(mutated):
             raise AssertionError(f"Darwin cleanup {name} mutation was accepted")
+    darwin_root_read = "'(allow file-read* (literal \"/\"))'"
+    darwin_system_read = (
+        "'(allow file-read* (subpath \"/System\") (subpath \"/usr\") "
+        "(subpath \"/bin\") (subpath \"/sbin\") (subpath \"/Applications\") "
+        "(subpath \"/Library/Developer\") (subpath \"/private/etc\") "
+        "(subpath \"/private/var/db\"))'"
+    )
+    darwin_xcode_select_read = (
+        "'(allow file-read-metadata (literal \"/var\") "
+        "(literal \"/private/var/select/developer_dir\"))'"
+    )
     darwin_profile_tokens = (
         "'(deny default)'",
         "'(allow process*)'",
         "'(allow signal (target self))'",
         "'(allow sysctl-read)'",
         "'(allow mach-lookup)'",
-        "'(allow file-read* (literal \"/\"))'",
-        "'(allow file-read* (subpath \"/System\")",
+        darwin_root_read,
+        darwin_system_read,
+        darwin_xcode_select_read,
         r'"(allow file-read* (subpath \"$scratch\"))"',
         r'"(allow file-read-metadata (literal \"$var_tmp_target\"))"',
         r'"(allow file-write* (subpath \"$build_home\")',
@@ -1248,7 +1260,13 @@ done'''
     def darwin_profile_is_exact(candidate: str) -> bool:
         if any(candidate.count(token) != 1 for token in darwin_profile_tokens):
             return False
-        if '(subpath "/")' in candidate or "(allow file-read*)" in candidate:
+        if (
+            candidate.count("(allow file-read") != 5
+            or '(subpath "/")' in candidate
+            or "(allow file-read*)" in candidate
+            or '(subpath "/dev")' in candidate
+            or '(subpath "/dev/fd")' in candidate
+        ):
             return False
         return [candidate.index(token) for token in darwin_profile_tokens] == sorted(
             candidate.index(token) for token in darwin_profile_tokens
@@ -1256,29 +1274,61 @@ done'''
 
     if not darwin_profile_is_exact(gate):
         raise AssertionError("sealed Darwin profile ordering or root-directory grant is not exact")
-    root_read = "'(allow file-read* (literal \"/\"))'"
     for name, replacement in (
         ("missing root read", ""),
         ("root subtree read", "'(allow file-read* (subpath \"/\"))'"),
         ("unfiltered read", "'(allow file-read*)'"),
     ):
-        mutated = gate.replace(root_read, replacement, 1)
+        mutated = gate.replace(darwin_root_read, replacement, 1)
         if mutated == gate or darwin_profile_is_exact(mutated):
             raise AssertionError(f"sealed Darwin {name} mutation was accepted")
     additive_unfiltered = gate.replace(
-        root_read + " \\\n",
-        root_read + ' \\\n                "(allow file-read*)" \\\n',
+        darwin_root_read + " \\\n",
+        darwin_root_read + ' \\\n                "(allow file-read*)" \\\n',
         1,
     )
     if additive_unfiltered == gate or darwin_profile_is_exact(additive_unfiltered):
         raise AssertionError("sealed Darwin additive unfiltered read mutation was accepted")
-    reordered = gate.replace(root_read + " \\\n", "", 1).replace(
+    reordered = gate.replace(darwin_root_read + " \\\n", "", 1).replace(
         "                '(deny network*)'",
-        "                " + root_read + " \\\n                '(deny network*)'",
+        "                " + darwin_root_read + " \\\n                '(deny network*)'",
         1,
     )
     if reordered == gate or darwin_profile_is_exact(reordered):
         raise AssertionError("sealed Darwin root-directory grant reordering was accepted")
+    for name, original, replacement in (
+        (
+            "additive user subtree read",
+            darwin_system_read,
+            darwin_system_read[:-2] + ' (subpath "/Users"))\'',
+        ),
+        (
+            "restored device subtree read",
+            darwin_system_read,
+            darwin_system_read[:-2] + ' (subpath "/dev"))\'',
+        ),
+        ("missing system read", darwin_system_read, ""),
+        ("missing Xcode selector read", darwin_xcode_select_read, ""),
+        (
+            "broadened Xcode selector read",
+            darwin_xcode_select_read,
+            "'(allow file-read-metadata (subpath \"/private/var\"))'",
+        ),
+    ):
+        mutated = gate.replace(original, replacement, 1)
+        if mutated == gate or darwin_profile_is_exact(mutated):
+            raise AssertionError(f"sealed Darwin {name} mutation was accepted")
+    for device in ("null", "random", "urandom", "tty", "stdin", "stdout", "stderr"):
+        additive_device_read = gate.replace(
+            darwin_xcode_select_read + " \\\n",
+            darwin_xcode_select_read
+            + f' \\\n                \'(allow file-read* (literal "/dev/{device}"))\' \\\n',
+            1,
+        )
+        if additive_device_read == gate or darwin_profile_is_exact(additive_device_read):
+            raise AssertionError(
+                f"sealed Darwin additive /dev/{device} read mutation was accepted"
+            )
     dependency_target_selection = (
         'sealed_dependency_target="$(find "$workspace_cargo_home/registry/src" '
         '-type f ! -name .cargo-ok -print -quit)"'
