@@ -730,10 +730,24 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
         "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=pack.writeReverseIndex "
         "GIT_CONFIG_VALUE_0=false"
     )
+    fetch_environment = (
+        '/usr/bin/env -i HOME="$fetch_home" TMPDIR="$fetch_tmp" PATH="$trusted_bin" \\\n'
+        '            CARGO_HOME="$source_cargo_home" CARGO_NET_GIT_FETCH_WITH_CLI=true \\\n'
+        '            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 \\\n'
+        f"            {reverse_index_config} \\\n"
+        '            GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false SSH_ASKPASS=/usr/bin/false \\\n'
+        '            "$compiler_cargo_bin" fetch \\\n'
+        "                --manifest-path "
+    )
+    fetch_commands = (
+        fetch_environment + '"$sealed_workspace/Cargo.toml" \\\n                --locked',
+        fetch_environment + '"$proof_snapshot/Cargo.toml" \\\n                --locked',
+    )
 
     def fetch_git_config_is_exact(candidate: str) -> bool:
         return (
-            candidate.count(reverse_index_config) == 2
+            all(candidate.count(command) == 1 for command in fetch_commands)
+            and candidate.count(reverse_index_config) == 2
             and candidate.count("GIT_CONFIG_COUNT=1") == 2
             and candidate.count("GIT_CONFIG_KEY_0=pack.writeReverseIndex") == 2
             and candidate.count("GIT_CONFIG_VALUE_0=false") == 2
@@ -768,6 +782,18 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
         "duplicated": gate.replace(
             reverse_index_config,
             reverse_index_config + " " + reverse_index_config,
+            1,
+        ),
+        "relocated to credential provider": gate.replace(
+            f"            {reverse_index_config} \\\n",
+            "",
+            1,
+        ).replace(
+            "    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 \\\n"
+            '    "$compiler_cargo_bin" login --registry wlpq-positive',
+            "    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 \\\n"
+            f"    {reverse_index_config} \\\n"
+            '    "$compiler_cargo_bin" login --registry wlpq-positive',
             1,
         ),
     }.items():
