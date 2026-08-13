@@ -34,12 +34,23 @@ case "$target_dir" in
     */workspace-target) inactive_target_dir=${target_dir%/*}/ordinary-wallet-plan-public-proof-target ;;
     *) exit 1 ;;
 esac
+expected_workspace_target="${target_dir%/*}/sealed-workspace/Cargo.toml"
+if [ "$sealed_workspace_target" != "$expected_workspace_target" ]; then
+    echo "sealed Darwin workspace target differs from its exact sibling" >&2
+    exit 1
+fi
+sealed_workspace_root=${sealed_workspace_target%/Cargo.toml}
 
 case "$build_user" in *[!a-z0-9]*|'') exit 1 ;; esac
 case "$build_uid" in *[!0-9]*|'') exit 1 ;; esac
 for path in "$sandbox_profile" "$build_home" "$build_tmp" "$cargo_home" "$target_dir" "$trusted_bin" "$rustc" "$rustdoc" "$rustfmt" "$original_cargo_home" "$host_write_target" "$var_tmp_target" "$delayed_write_target"; do
     case "$path" in /*) ;; *) exit 1 ;; esac
 done
+cd -P "$sealed_workspace_root"
+if [ "$(/bin/pwd -P)" != "$sealed_workspace_root" ]; then
+    echo "sealed Darwin workspace root is nonphysical or noncanonical" >&2
+    exit 1
+fi
 
 set +e
 /usr/bin/sudo -n -u "$build_user" /usr/bin/sandbox-exec -f "$sandbox_profile" \

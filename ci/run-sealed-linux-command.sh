@@ -34,6 +34,12 @@ case "$target_dir" in
     */workspace-target) inactive_target_dir=${target_dir%/*}/ordinary-wallet-plan-public-proof-target ;;
     *) exit 1 ;;
 esac
+expected_workspace_target="${target_dir%/*}/sealed-workspace/Cargo.toml"
+if [ "$sealed_workspace_target" != "$expected_workspace_target" ]; then
+    echo "sealed Linux workspace target differs from its exact sibling" >&2
+    exit 1
+fi
+sealed_workspace_root=${sealed_workspace_target%/Cargo.toml}
 
 case "$build_uid" in *[!0-9]*|'') exit 1 ;; esac
 for path in "$original_home" "$hidden_home" "$build_home" "$build_tmp" "$cargo_home" "$target_dir" "$trusted_bin" "$original_cargo_home" "$host_write_target" "$var_tmp_target" "$delayed_write_target"; do
@@ -62,7 +68,11 @@ for writable in "$build_home" "$build_tmp" "$target_dir"; do
     /usr/bin/mount --remount --bind --rw "$writable"
 done
 
-sealed_workspace_root=${sealed_workspace_target%/*}
+cd -P "$sealed_workspace_root"
+if [ "$(/bin/pwd -P)" != "$sealed_workspace_root" ]; then
+    echo "sealed Linux workspace root is nonphysical or noncanonical" >&2
+    exit 1
+fi
 exec /usr/bin/python3 "$sealed_workspace_root/ci/run-sealed-command-supervisor.py" \
     /usr/bin/setpriv --reuid="$build_uid" --regid="$build_uid" --clear-groups \
     /usr/bin/env -i HOME="$build_home" TMPDIR="$build_tmp" PATH="$trusted_bin:/usr/bin:/bin" \

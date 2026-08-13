@@ -545,6 +545,10 @@ export SEALED_DEPENDENCY_TARGET SEALED_WORKSPACE_TARGET
     "$python_bin" -I "$sealed_workspace/ci/check-sealed-tree-readable.py" \
         "$proof_snapshot" "$proof_cargo_home" "$workspace_cargo_home" \
         "$sealed_workspace" "$sealed_toolchain" "$sealed_probe"
+if [ "$(run_sealed /bin/pwd -P)" != "$sealed_workspace" ]; then
+    echo "sealed command current directory differs from the workspace authority" >&2
+    exit 1
+fi
 case "$(run_sealed "$compiler_cargo_bin" --version --verbose)" in
     cargo\ 1.96.0\ *30a34c6821b57de0aaec83a901aca39f88f6778c*) ;;
     *) echo "isolated Cargo version or commit mismatch" >&2; exit 1 ;;

@@ -1422,6 +1422,85 @@ done'''
     ):
         if darwin_wrapper.count(token) != 1:
             raise AssertionError(f"sealed Darwin boundary token is not exact: {token}")
+
+    def sealed_cwd_is_exact(candidate: str, platform: str) -> bool:
+        sibling = '''expected_workspace_target="${target_dir%/*}/sealed-workspace/Cargo.toml"
+if [ "$sealed_workspace_target" != "$expected_workspace_target" ]; then
+    echo "sealed PLATFORM workspace target differs from its exact sibling" >&2
+    exit 1
+fi
+sealed_workspace_root=${sealed_workspace_target%/Cargo.toml}'''.replace(
+            "PLATFORM", platform
+        )
+        chdir = '''cd -P "$sealed_workspace_root"
+if [ "$(/bin/pwd -P)" != "$sealed_workspace_root" ]; then
+    echo "sealed PLATFORM workspace root is nonphysical or noncanonical" >&2
+    exit 1
+fi'''.replace("PLATFORM", platform)
+        if candidate.count(sibling) != 1 or candidate.count(chdir) != 1:
+            return False
+        if platform == "Darwin":
+            return (
+                candidate.index(sibling)
+                < candidate.index('for path in "$sandbox_profile"')
+                < candidate.index(chdir)
+                < candidate.index("set +e")
+                < candidate.index('/usr/bin/sudo -n -u "$build_user" /usr/bin/sandbox-exec')
+            )
+        return (
+            candidate.index(sibling)
+            < candidate.index('for writable in "$build_home" "$build_tmp" "$target_dir"; do')
+            < candidate.index('/usr/bin/mount --remount --bind --rw "$writable"')
+            < candidate.index(chdir)
+            < candidate.index('exec /usr/bin/python3 "$sealed_workspace_root/ci/run-sealed-command-supervisor.py"')
+        )
+
+    for platform, wrapper in (("Darwin", darwin_wrapper), ("Linux", linux_wrapper)):
+        if not sealed_cwd_is_exact(wrapper, platform):
+            raise AssertionError(f"sealed {platform} physical workspace CWD is not exact")
+        cwd_mutations = {
+            "missing physical chdir": wrapper.replace('cd -P "$sealed_workspace_root"', "", 1),
+            "logical chdir": wrapper.replace('cd -P "$sealed_workspace_root"', 'cd "$sealed_workspace_root"', 1),
+            "alternate derivation": wrapper.replace(
+                'expected_workspace_target="${target_dir%/*}/sealed-workspace/Cargo.toml"',
+                'expected_workspace_target="$build_home/sealed-workspace/Cargo.toml"',
+                1,
+            ),
+            "broadened target": wrapper.replace(
+                'if [ "$sealed_workspace_target" != "$expected_workspace_target" ]; then',
+                'case "$sealed_workspace_target" in */Cargo.toml) ;; *)',
+                1,
+            ),
+            "missing physical equality": wrapper.replace(
+                'if [ "$(/bin/pwd -P)" != "$sealed_workspace_root" ]; then',
+                'if false; then',
+                1,
+            ),
+        }
+        for mutation_name, mutated_wrapper in cwd_mutations.items():
+            if mutated_wrapper == wrapper or sealed_cwd_is_exact(mutated_wrapper, platform):
+                raise AssertionError(
+                    f"sealed {platform} CWD {mutation_name} mutation was accepted"
+                )
+
+    sealed_cwd_probe = '''if [ "$(run_sealed /bin/pwd -P)" != "$sealed_workspace" ]; then
+    echo "sealed command current directory differs from the workspace authority" >&2
+    exit 1
+fi'''
+    if (
+        gate.count(sealed_cwd_probe) != 1
+        or gate.index(sealed_cwd_probe)
+        > gate.index('case "$(run_sealed "$compiler_cargo_bin" --version --verbose)" in')
+    ):
+        raise AssertionError("sealed command live CWD assertion is not exact")
+    for name, replacement in (
+        ("missing", ""),
+        ("logical", sealed_cwd_probe.replace("/bin/pwd -P", "/bin/pwd -L")),
+        ("unchecked", 'run_sealed /bin/pwd -P >/dev/null'),
+    ):
+        mutated_gate = gate.replace(sealed_cwd_probe, replacement, 1)
+        if mutated_gate == gate or mutated_gate.count(sealed_cwd_probe) != 0:
+            raise AssertionError(f"sealed command live CWD {name} mutation was accepted")
     signal_diagnostic = '''status=$?
 if [ "$status" -gt 128 ]; then
     echo "sealed Darwin command returned signal-style status $status (signal $((status - 128)))" >&2
