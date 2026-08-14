@@ -1,4 +1,5 @@
 use static_assertions::assert_not_impl_any;
+use wasabi_liquid_native_output_opening::OpenedOutput;
 use wasabi_liquid_native_wallet_facts::{DescriptorCatalog, DescriptorNetwork};
 
 use super::*;
@@ -851,6 +852,24 @@ fn fee_staging_clears_asset_and_value_on_drop_transfer_and_unwind() {
     assert_eq!(completed.staged_fee, 1);
 
     reset_drop_audit();
+    let mut prepared = PreparedFee {
+        value: ExplicitFee::new(asset, 17).unwrap(),
+    };
+    let mut transferred_fee = prepared.transfer();
+    let transferred_prepared = DROP_AUDIT.with(|audit| *audit.borrow());
+    assert!(transferred_prepared.all_zeroized);
+    assert_eq!(transferred_prepared.prepared_fee_transfer_clear, 1);
+    assert_eq!(transferred_prepared.prepared_fee, 0);
+    assert_eq!(transferred_prepared.fee_transfer, 0);
+    drop(prepared);
+    let dropped_prepared = DROP_AUDIT.with(|audit| *audit.borrow());
+    assert!(dropped_prepared.all_zeroized);
+    assert_eq!(dropped_prepared.prepared_fee_transfer_clear, 1);
+    assert_eq!(dropped_prepared.prepared_fee, 1);
+    transferred_fee.zeroize();
+    assert!(fee_is_zeroized(&transferred_fee));
+
+    reset_drop_audit();
     configure_panic(StagingPoint::FeeTransferCleared, 0);
     assert!(
         std::panic::catch_unwind(|| {
@@ -1011,3 +1030,88 @@ fn final_prepared_assembly_unwind_destroys_the_completed_owner() {
     assert_eq!(audit.prepared, 1);
     assert_eq!(audit.prepared_fee, 1);
 }
+
+#[test]
+fn prepared_composition_transfer_unwind_destroys_the_completed_owner() {
+    let catalog = DescriptorCatalog::derive(TEST_DESCRIPTOR, DescriptorNetwork::Test, 0).unwrap();
+    let outpoint = OutPoint::new(Txid::from_byte_array(TXID), 0);
+    let asset = AssetId::LIQUIDTESTNET_BTC;
+    let value = 10_u64;
+    let candidate = [0x01];
+    let previous = Vec::new();
+    let borrowed = [BorrowedSelectedOutput::new(
+        &outpoint, &asset, &value, &candidate, &previous,
+    )];
+    let selected = SelectedOutputBatch::new(&borrowed).unwrap();
+    let address =
+        ConfidentialLiquidAddress::parse(TESTNET_ADDRESS, LiquidAddressProfile::LiquidTestnet)
+            .unwrap();
+    let outputs = vec![ConfidentialOutput::from_address(asset, 9, &address).unwrap()];
+    let fee = PreparedFee {
+        value: ExplicitFee::new(asset, 1).unwrap(),
+    };
+    let prepared = assemble_prepared(
+        &catalog,
+        selected,
+        outputs,
+        fee,
+        ScopedU64(7),
+        ScopedArray(TESTNET_MANIFEST),
+        ScopedArray(TESTNET_PEGGED_ASSET),
+        ScopedUsize(1),
+        ScopedUsize(1),
+    )
+    .unwrap();
+
+    reset_drop_audit();
+    configure_panic(StagingPoint::PreparedCompositionTransfer, 0);
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = prepared.into_blinded_ordinary_wallet_pset(
+                &mut NeverOpeningProvider,
+                &mut NoRandomnessExpected,
+            );
+        }))
+        .is_err()
+    );
+    clear_panic();
+    let audit = DROP_AUDIT.with(|audit| *audit.borrow());
+    assert!(audit.all_zeroized);
+    assert_eq!(audit.prepared, 1);
+    assert_eq!(audit.prepared_fee_transfer_clear, 1);
+    assert_eq!(audit.prepared_fee, 1);
+}
+
+struct NeverOpeningProvider;
+
+impl SelectedOutputOpeningProvider for NeverOpeningProvider {
+    fn open_selected_output(
+        &mut self,
+        _: &Secp256k1<All>,
+        _: &elements::TxOut,
+    ) -> Option<OpenedOutput> {
+        panic!("prepared composition transfer invoked its provider")
+    }
+}
+
+struct NoRandomnessExpected;
+
+impl RngCore for NoRandomnessExpected {
+    fn next_u32(&mut self) -> u32 {
+        panic!("prepared composition transfer requested randomness")
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        panic!("prepared composition transfer requested randomness")
+    }
+
+    fn fill_bytes(&mut self, _: &mut [u8]) {
+        panic!("prepared composition transfer requested randomness")
+    }
+
+    fn try_fill_bytes(&mut self, _: &mut [u8]) -> Result<(), rand::Error> {
+        panic!("prepared composition transfer requested randomness")
+    }
+}
+
+impl CryptoRng for NoRandomnessExpected {}

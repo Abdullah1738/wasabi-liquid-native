@@ -154,9 +154,9 @@ def add_ordinary_pset_capability(root: Path, item: str, source: str) -> None:
     replace_once(
         root,
         "crates/ordinary-wallet-plan/src/lib.rs",
-        "use wasabi_liquid_native_ordinary_pset::{ConfidentialOutput, ExplicitFee};",
+        "use wasabi_liquid_native_ordinary_pset::{BlindedOrdinaryPset, ConfidentialOutput, ExplicitFee};",
         "use wasabi_liquid_native_ordinary_pset::{"
-        f"ConfidentialOutput, ExplicitFee, {item}"
+        f"BlindedOrdinaryPset, ConfidentialOutput, ExplicitFee, {item}"
         "};",
     )
     append_lib(root, source)
@@ -167,9 +167,9 @@ def add_wallet_facts_capability(root: Path, item: str, source: str) -> None:
         root,
         "crates/ordinary-wallet-plan/src/lib.rs",
         "    BorrowedSelectedOutput, DescriptorCatalog, DescriptorNetwork, SelectedOutputBatch,\n"
-        "    prepare_selected_owned_inputs,\n",
+        "    SelectedOutputOpeningProvider, prepare_selected_owned_inputs,\n",
         "    BorrowedSelectedOutput, DescriptorCatalog, DescriptorNetwork, SelectedOutputBatch,\n"
-        f"    prepare_selected_owned_inputs, {item},\n",
+        f"    SelectedOutputOpeningProvider, prepare_selected_owned_inputs, {item},\n",
     )
     append_lib(root, source)
 
@@ -1245,6 +1245,26 @@ def main() -> None:
                 'path = "tests/preparation.rs"\nrequired-features = ["mutated"]\n'
             ),
         )
+        mutate(
+            scratch,
+            "composition-dependency-removed",
+            lambda root: replace_once(
+                root,
+                "crates/ordinary-wallet-plan/Cargo.toml",
+                'wasabi-liquid-native-ordinary-wallet-pset = { path = "../ordinary-wallet-pset" }\n',
+                "",
+            ),
+        )
+        mutate(
+            scratch,
+            "opening-test-dependency-removed",
+            lambda root: replace_once(
+                root,
+                "crates/ordinary-wallet-plan/Cargo.toml",
+                'wasabi-liquid-native-output-opening = { path = "../output-opening" }\n',
+                "",
+            ),
+        )
         for name, item, source in [
             ("pset-spendable-input", "SpendableInput", "\nfn leaked(_: Option<SpendableInput>) {}\n"),
             (
@@ -1256,11 +1276,6 @@ def main() -> None:
                 "pset-constructor",
                 "prepare_ordinary_pset",
                 "\nfn leaked() { let _ = prepare_ordinary_pset; }\n",
-            ),
-            (
-                "pset-blinded-owner",
-                "BlindedOrdinaryPset",
-                "\nfn leaked(_: Option<BlindedOrdinaryPset>) {}\n",
             ),
             (
                 "pset-signing-trait",
@@ -1285,6 +1300,57 @@ def main() -> None:
                     root, item, source
                 ),
             )
+        mutate_compiling(
+            scratch,
+            "pset-direct-blinded-map-accessor",
+            lambda root: append_lib(
+                root,
+                "\n/// Test-only mutation exposing the returned sensitive PSET map.\n"
+                "pub const fn leaked_direct_pset_map(\n"
+                "    value: &BlindedOrdinaryPset,\n"
+                ") -> &elements::pset::PartiallySignedTransaction {\n"
+                "    value.as_pset()\n"
+                "}\n",
+            ),
+        )
+        mutate_compiling(
+            scratch,
+            "composition-call-aliased",
+            lambda root: (
+                replace_once(
+                    root,
+                    "crates/ordinary-wallet-plan/src/lib.rs",
+                    "    OrdinaryWalletPsetError, build_blinded_ordinary_wallet_pset,\n",
+                    "    OrdinaryWalletPsetError, build_blinded_ordinary_wallet_pset as compose_pset,\n",
+                ),
+                replace_once(
+                    root,
+                    "crates/ordinary-wallet-plan/src/lib.rs",
+                    "        build_blinded_ordinary_wallet_pset(\n",
+                    "        compose_pset(\n",
+                ),
+            ),
+        )
+        mutate_compiling(
+            scratch,
+            "composition-return-type-aliased",
+            lambda root: (
+                replace_once(
+                    root,
+                    "crates/ordinary-wallet-plan/src/lib.rs",
+                    "/// A linear request that completed all public preparation.\n",
+                    "/// Test-only mutation replacing the exact composition result type.\n"
+                    "pub type ComposedOrdinaryWalletPset = BlindedOrdinaryPset;\n\n"
+                    "/// A linear request that completed all public preparation.\n",
+                ),
+                replace_once(
+                    root,
+                    "crates/ordinary-wallet-plan/src/lib.rs",
+                    ") -> Result<BlindedOrdinaryPset, OrdinaryWalletPsetError>\n",
+                    ") -> Result<ComposedOrdinaryWalletPset, OrdinaryWalletPsetError>\n",
+                ),
+            ),
+        )
         mutate(
             scratch,
             "wallet-facts-observation-function",
@@ -1314,12 +1380,6 @@ def main() -> None:
                 "CandidateBatch",
                 "\n#[allow(dead_code)]\nfn leaked(_: Option<CandidateBatch>) {}\n",
             ),
-            (
-                "wallet-facts-opening-trait",
-                "SelectedOutputOpeningProvider",
-                "\n#[allow(dead_code)]\n"
-                "fn leaked<T: SelectedOutputOpeningProvider>(_: &T) {}\n",
-            ),
         ]:
             mutate_compiling(
                 scratch,
@@ -1328,6 +1388,24 @@ def main() -> None:
                     root, item, source
                 ),
             )
+        mutate_compiling(
+            scratch,
+            "wallet-facts-opening-provider-aliased",
+            lambda root: (
+                replace_once(
+                    root,
+                    "crates/ordinary-wallet-plan/src/lib.rs",
+                    "    SelectedOutputOpeningProvider, prepare_selected_owned_inputs,\n",
+                    "    SelectedOutputOpeningProvider as OpeningProvider, prepare_selected_owned_inputs,\n",
+                ),
+                replace_once(
+                    root,
+                    "crates/ordinary-wallet-plan/src/lib.rs",
+                    "        P: SelectedOutputOpeningProvider + ?Sized,\n",
+                    "        P: OpeningProvider + ?Sized,\n",
+                ),
+            ),
+        )
         mutate_compiling(
             scratch,
             "wallet-facts-braced-alias",
@@ -1543,13 +1621,79 @@ impl core::borrow::Borrow<[u8]> for EncodedOrdinaryWalletPlanRequest {
         )
         mutate(
             scratch,
+            "prepared-fee-transfer-clear-noop",
+            lambda root: replace_once(
+                root,
+                "crates/ordinary-wallet-plan/src/lib.rs",
+                "        self.value.zeroize();\n"
+                "        #[cfg(test)]\n"
+                "        note_zeroized_drop(DropKind::PreparedFeeTransferClear, self.is_zeroized());\n",
+                "        #[cfg(test)]\n"
+                "        note_zeroized_drop(DropKind::PreparedFeeTransferClear, self.is_zeroized());\n",
+            ),
+        )
+        mutate(
+            scratch,
+            "prepared-fee-transfer-clear-audit-removed",
+            lambda root: replace_once(
+                root,
+                "crates/ordinary-wallet-plan/src/lib.rs",
+                "        #[cfg(test)]\n"
+                "        note_zeroized_drop(DropKind::PreparedFeeTransferClear, self.is_zeroized());\n",
+                "",
+            ),
+        )
+        mutate(
+            scratch,
             "prepared-fee-zeroize-noop",
             lambda root: replace_once(
                 root,
                 "crates/ordinary-wallet-plan/src/lib.rs",
-                "impl PreparedFee {\n    fn zeroize(&mut self) {\n        self.value.zeroize();\n    }",
-                "impl PreparedFee {\n    fn zeroize(&mut self) {}",
+                "    fn zeroize(&mut self) {\n        self.value.zeroize();\n    }",
+                "    fn zeroize(&mut self) {}",
             ),
+        )
+        mutate(
+            scratch,
+            "composition-transfer-hook-before-fee-clear",
+            lambda root: replace_once(
+                root,
+                "crates/ordinary-wallet-plan/src/lib.rs",
+                "        let fee = self.fee.transfer();\n"
+                "        #[cfg(test)]\n"
+                "        maybe_panic_at(StagingPoint::PreparedCompositionTransfer);\n",
+                "        #[cfg(test)]\n"
+                "        maybe_panic_at(StagingPoint::PreparedCompositionTransfer);\n"
+                "        let fee = self.fee.transfer();\n",
+            ),
+        )
+        mutate(
+            scratch,
+            "blinded-pset-borrow-surface-expanded",
+            lambda root: replace_once(
+                root,
+                "crates/ordinary-pset/src/lib.rs",
+                "impl BlindedOrdinaryPset {\n",
+                "impl BlindedOrdinaryPset {\n"
+                "    /// Test-only mutation adding another direct sensitive-map accessor.\n"
+                "    pub const fn leaked_pset_map(&self) -> &PartiallySignedTransaction {\n"
+                "        &self.pset\n"
+                "    }\n\n",
+            ),
+            contains="ordinary-wallet plan authority-critical inherent method inventory changed",
+        )
+        mutate(
+            scratch,
+            "blinded-pset-signing-surface-expanded",
+            lambda root: replace_once(
+                root,
+                "crates/ordinary-pset/src/signing.rs",
+                "impl BlindedOrdinaryPset {\n",
+                "impl BlindedOrdinaryPset {\n"
+                "    /// Test-only mutation expanding the returned signing capability.\n"
+                "    pub const fn leaked_signing_surface(&self) {}\n\n",
+            ),
+            contains="ordinary-wallet plan authority-critical inherent method inventory changed",
         )
         mutate(
             scratch,

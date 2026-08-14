@@ -1443,7 +1443,7 @@ def main() -> int:
             expected_lock_digest = sys.argv[5]
             if expected_lock_digest not in {
                 FILES[Path("ci/ordinary-wallet-plan-public-proof.Cargo.lock")][1],
-                "f5e471c6a9664d29e8c30ea44b0c6934d3be98c00d87d5ea45cb5843b717adde",
+                "5a6a3fa2fbf890844009d1ff1ad40841977a0ffa32c0faba795fa211262f8678",
             }:
                 reject("copied Cargo source lock authority is unreviewed")
             lock_bytes = stable_read(lock_file.parent, lock_file, 256 * 1024)
@@ -1468,7 +1468,7 @@ def main() -> int:
             expected_lock_digest = sys.argv[8]
             if expected_lock_digest not in {
                 FILES[Path("ci/ordinary-wallet-plan-public-proof.Cargo.lock")][1],
-                "f5e471c6a9664d29e8c30ea44b0c6934d3be98c00d87d5ea45cb5843b717adde",
+                "5a6a3fa2fbf890844009d1ff1ad40841977a0ffa32c0faba795fa211262f8678",
             }:
                 reject("final Cargo source lock authority is unreviewed")
             lock_bytes = stable_read(lock_file.parent, lock_file, 256 * 1024)
@@ -1492,7 +1492,7 @@ def main() -> int:
                 lambda value: Path(value).absolute(), sys.argv[2:]
             )
             lock_bytes = stable_read(source_root, source_root / "Cargo.lock", 256 * 1024)
-            if hashlib.sha256(lock_bytes).hexdigest() != "f5e471c6a9664d29e8c30ea44b0c6934d3be98c00d87d5ea45cb5843b717adde":
+            if hashlib.sha256(lock_bytes).hexdigest() != "5a6a3fa2fbf890844009d1ff1ad40841977a0ffa32c0faba795fa211262f8678":
                 reject("workspace cache authority lock mismatch")
             copy_safe_cargo_cache(source_cargo_home, private_cargo_home, lock_bytes)
             print("private workspace Cargo cache copied")

@@ -1,18 +1,18 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-//! Canonical source-only ordinary-wallet plan request preparation.
+//! Canonical source-only ordinary-wallet plan request preparation and PSET composition.
 //!
 //! This internal Rust `rlib` accepts only caller-owned public plan declarations
 //! and exact funding transaction bytes. It performs no native loading, C ABI,
-//! provider invocation, node access, signing, PSET construction, randomness,
-//! persistence, reservation, or currentness check. The caller must generate a
-//! fresh, unpredictable source epoch for each wallet session and must never
-//! reuse it: epoch reuse links otherwise separate requests. The frame is
-//! plaintext, unauthenticated, and provides no replay protection. Parsing and
-//! validation have variable timing. Public preparation deliberately leaves the
-//! selected confidential output's committed asset and value unopened until a
-//! later provider-authorized transition.
+//! node access, signing, persistence, reservation, or currentness check. The
+//! caller must generate a fresh, unpredictable source epoch for each wallet
+//! session and must never reuse it: epoch reuse links otherwise separate
+//! requests. The frame is plaintext, unauthenticated, and provides no replay
+//! protection. Parsing and validation have variable timing. Public preparation
+//! leaves the selected confidential output's committed asset and value unopened;
+//! one consuming transition delegates to the existing provider-authorized,
+//! randomized ordinary-wallet PSET construction and blinding operation.
 
 mod reader;
 mod writer;
@@ -24,13 +24,17 @@ use core::cmp::Ordering;
 use core::fmt;
 use core::str;
 
+use elements::secp256k1_zkp::rand::{CryptoRng, RngCore};
 use elements::secp256k1_zkp::{All, Secp256k1};
 use elements::{AssetId, OutPoint, Txid};
 use wasabi_liquid_native_address::{ConfidentialLiquidAddress, LiquidAddressProfile};
-use wasabi_liquid_native_ordinary_pset::{ConfidentialOutput, ExplicitFee};
+use wasabi_liquid_native_ordinary_pset::{BlindedOrdinaryPset, ConfidentialOutput, ExplicitFee};
+use wasabi_liquid_native_ordinary_wallet_pset::{
+    OrdinaryWalletPsetError, build_blinded_ordinary_wallet_pset,
+};
 use wasabi_liquid_native_wallet_facts::{
     BorrowedSelectedOutput, DescriptorCatalog, DescriptorNetwork, SelectedOutputBatch,
-    prepare_selected_owned_inputs,
+    SelectedOutputOpeningProvider, prepare_selected_owned_inputs,
 };
 use zeroize::Zeroize;
 
@@ -525,6 +529,55 @@ impl PubliclyPreparedOrdinaryWalletPlanRequest<'_> {
     pub const fn confidential_destination_count(&self) -> usize {
         self.destination_count
     }
+
+    /// Consumes this publicly prepared request into a blinded ordinary-wallet PSET.
+    ///
+    /// The exact retained catalog, selected-output batch, confidential
+    /// destinations, and explicit fee are transferred without exposing their
+    /// parts. The existing ordinary-wallet orchestration independently repeats
+    /// balance and public selected-output validation, creates both randomized
+    /// layouts, opens every selected confidential commitment through the
+    /// caller-owned provider, binds the actual asset and value to the declared
+    /// expectation, constructs the PSET, and blinds it immediately.
+    ///
+    /// Provider calls are nontransactional. Calls completed before a later
+    /// refusal, opening mismatch, construction failure, blinding failure, or
+    /// unwind are not rolled back. A complete retry requires a newly prepared
+    /// request and starts provider calls again at row zero.
+    ///
+    /// The caller must authenticate source-revision currentness and obtain any
+    /// required reservation before invoking this method. This transition does
+    /// not establish node or chain authenticity, current unspentness, fee
+    /// policy, reservation, broadcast acceptance, or confirmation authority.
+    pub fn into_blinded_ordinary_wallet_pset<R, P>(
+        mut self,
+        provider: &mut P,
+        rng: &mut R,
+    ) -> Result<BlindedOrdinaryPset, OrdinaryWalletPsetError>
+    where
+        R: RngCore + CryptoRng,
+        P: SelectedOutputOpeningProvider + ?Sized,
+    {
+        let selected_inputs = self
+            .selected_inputs
+            .take()
+            .ok_or(OrdinaryWalletPsetError::InvalidPlan)?;
+        let outputs = self
+            .outputs
+            .take()
+            .ok_or(OrdinaryWalletPsetError::InvalidPlan)?;
+        let fee = self.fee.transfer();
+        #[cfg(test)]
+        maybe_panic_at(StagingPoint::PreparedCompositionTransfer);
+        build_blinded_ordinary_wallet_pset(
+            self._catalog,
+            provider,
+            selected_inputs,
+            outputs,
+            fee,
+            rng,
+        )
+    }
 }
 
 impl Drop for PubliclyPreparedOrdinaryWalletPlanRequest<'_> {
@@ -635,6 +688,14 @@ struct PreparedFee {
 }
 
 impl PreparedFee {
+    fn transfer(&mut self) -> ExplicitFee {
+        let fee = self.value;
+        self.value.zeroize();
+        #[cfg(test)]
+        note_zeroized_drop(DropKind::PreparedFeeTransferClear, self.is_zeroized());
+        fee
+    }
+
     fn zeroize(&mut self) {
         self.value.zeroize();
     }
@@ -1657,6 +1718,7 @@ enum DropKind {
     StagedFee,
     PreparedFee,
     FeeTransfer,
+    PreparedFeeTransferClear,
     PreparedExpectationBatch,
     PreparedSelectedBatch,
     PreparedBorrowedBatch,
@@ -1685,6 +1747,7 @@ enum StagingPoint {
     PreparedSelectedBatch,
     FeeTransferCleared,
     FinalPreparedAssembly,
+    PreparedCompositionTransfer,
 }
 
 #[cfg(test)]
@@ -1707,6 +1770,7 @@ struct DropAudit {
     staged_fee: usize,
     prepared_fee: usize,
     fee_transfer: usize,
+    prepared_fee_transfer_clear: usize,
     prepared_expectation_batch: usize,
     prepared_selected_batch: usize,
     prepared_borrowed_batch: usize,
@@ -1715,7 +1779,7 @@ struct DropAudit {
 
 #[cfg(test)]
 thread_local! {
-    static DROP_AUDIT: std::cell::RefCell<DropAudit> = const { std::cell::RefCell::new(DropAudit { encoded: 0, borrowed_scalar: 0, scalar: 0, identifier: 0, header: 0, view_facts: 0, selected: 0, destination: 0, parsed: 0, prepared: 0, expectation: 0, writer: 0, temporary: 0, prepared_output_batch: 0, staged_fee: 0, prepared_fee: 0, fee_transfer: 0, prepared_expectation_batch: 0, prepared_selected_batch: 0, prepared_borrowed_batch: 0, all_zeroized: true }) };
+    static DROP_AUDIT: std::cell::RefCell<DropAudit> = const { std::cell::RefCell::new(DropAudit { encoded: 0, borrowed_scalar: 0, scalar: 0, identifier: 0, header: 0, view_facts: 0, selected: 0, destination: 0, parsed: 0, prepared: 0, expectation: 0, writer: 0, temporary: 0, prepared_output_batch: 0, staged_fee: 0, prepared_fee: 0, fee_transfer: 0, prepared_fee_transfer_clear: 0, prepared_expectation_batch: 0, prepared_selected_batch: 0, prepared_borrowed_batch: 0, all_zeroized: true }) };
     static PANIC_AT: std::cell::Cell<Option<StagingPoint>> = const { std::cell::Cell::new(None) };
     static PANIC_AFTER: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
@@ -1763,6 +1827,7 @@ fn note_zeroized_drop(kind: DropKind, zeroized: bool) {
             DropKind::StagedFee => audit.staged_fee += 1,
             DropKind::PreparedFee => audit.prepared_fee += 1,
             DropKind::FeeTransfer => audit.fee_transfer += 1,
+            DropKind::PreparedFeeTransferClear => audit.prepared_fee_transfer_clear += 1,
             DropKind::PreparedExpectationBatch => audit.prepared_expectation_batch += 1,
             DropKind::PreparedSelectedBatch => audit.prepared_selected_batch += 1,
             DropKind::PreparedBorrowedBatch => audit.prepared_borrowed_batch += 1,

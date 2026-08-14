@@ -2987,7 +2987,7 @@ fn require_linux_mount_boundary() {}'''
             '    --capture-stdin "$plan_diagnostic_output"'
         ),
         "ordinary pset import": (
-            "use wasabi_liquid_native_ordinary_pset::{ConfidentialOutput, ExplicitFee};"
+            "use wasabi_liquid_native_ordinary_pset::{BlindedOrdinaryPset, ConfidentialOutput, ExplicitFee};"
         ),
         "ordinary pset API rejection": (
             "ordinary-wallet plan ordinary-pset capability escaped its boundary"
@@ -3004,7 +3004,7 @@ fn require_linux_mount_boundary() {}'''
         ),
         "outer attribute inventory": 'plan_outer_attribute_hash="$(',
         "outer attribute hash": (
-            "51ebc7d7bb8f19ef7c51c0f6614e23c4f950a3caaf8a652588206492ea2c02df"
+            "7ccc619aadfe05a781fc9d199b68fb58585e74cc5dd9e4938536d92397c70c36"
         ),
         "trait implementation inventory": 'plan_trait_impl_count="$(',
         "production source inventory": (

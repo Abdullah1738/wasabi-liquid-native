@@ -295,7 +295,7 @@ workspace_cargo_home="$scratch/workspace-final-cargo-home"
 proof_cache_authority="$scratch/proof-cache-authority.jsonl"
 workspace_cache_authority="$scratch/workspace-cache-authority.jsonl"
 proof_lock_sha256=4ca45ca0dd27b2a545b0d93174e02487cc756b26a34d946de5dcb349ceea7aab
-workspace_lock_sha256=f5e471c6a9664d29e8c30ea44b0c6934d3be98c00d87d5ea45cb5843b717adde
+workspace_lock_sha256=5a6a3fa2fbf890844009d1ff1ad40841977a0ffa32c0faba795fa211262f8678
 python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py \
     --snapshot-only \
     "$repository_root" \
@@ -1100,7 +1100,7 @@ baseline_hash = "544ad20b54fe2e279a3074a5cfdeec49bd13752f358ffd0d67c0573546af326
 wire_post_hash = "f30d4a8bfc6b43f61fb7eefdd0d86f866ebef815d5aa57cc2b5b3319023fcf25"
 provider_post_hash = "5d105ea8138170cac5501f42d148855b9b9141d38b3c2b9532a246a4d5dc9ade"
 plan_base_hash = "3287e329ab3d1b9868cb5eb3c39b1713a0d660b0dcd35100688bfb7c7a867178"
-current_hash = "f5e471c6a9664d29e8c30ea44b0c6934d3be98c00d87d5ea45cb5843b717adde"
+current_hash = "5a6a3fa2fbf890844009d1ff1ad40841977a0ffa32c0faba795fa211262f8678"
 if baseline_text != baseline_hash + "\n":
     raise SystemExit("wallet-facts conformance lock baseline pin mismatch")
 if hashlib.sha256(lock_bytes).hexdigest() != current_hash:
@@ -1120,6 +1120,8 @@ dependencies = [
  "static_assertions",
  "wasabi-liquid-native-address",
  "wasabi-liquid-native-ordinary-pset",
+ "wasabi-liquid-native-ordinary-wallet-pset",
+ "wasabi-liquid-native-output-opening",
  "wasabi-liquid-native-wallet-facts",
  "zeroize",
 ]
@@ -1265,7 +1267,7 @@ plan_outer_attribute_hash="$(
     grep -h -E '^[[:space:]]*#\[' $plan_sources |
         python3 -I -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'
 )"
-if [ "$plan_outer_attribute_hash" != "51ebc7d7bb8f19ef7c51c0f6614e23c4f950a3caaf8a652588206492ea2c02df" ]; then
+if [ "$plan_outer_attribute_hash" != "7ccc619aadfe05a781fc9d199b68fb58585e74cc5dd9e4938536d92397c70c36" ]; then
     echo "ordinary-wallet plan allowed outer attribute inventory changed" >&2
     exit 1
 fi
@@ -1341,7 +1343,7 @@ if [ "$plan_compiled_sources" != "$expected_plan_compiled_sources" ]; then
     exit 1
 fi
 python3 -I -c 'import importlib.util, pathlib, sys; p = pathlib.Path("ci/check-ordinary-wallet-plan-surface.py"); s = importlib.util.spec_from_file_location("plan_surface", p); m = importlib.util.module_from_spec(s); s.loader.exec_module(m); m.validate_with_compiled_source_files(tuple(path.removeprefix("crates/ordinary-wallet-plan/") for path in sys.argv[1].splitlines()))' "$plan_compiled_sources"
-if printf '%s\n' "$plan_lexical_source" | grep -En 'wasabi_liquid_native_output_opening|wasabi_liquid_native_ordinary_wallet_pset|open_prepared_selected_owned_inputs|SelectedOutputOpeningProvider|SecretKey|rand::|getrandom|std[[:space:]]*::[[:space:]]*(process|env|thread|fs|net|time)|no_mangle|export_name|extern[[:space:]]*"C"|include(_str|_bytes)?[[:space:]]*!|AddressParams::ELEMENTS|LiquidAddressProfile::ElementsDefault'; then
+if printf '%s\n' "$plan_lexical_source" | grep -En 'wasabi_liquid_native_output_opening|open_prepared_selected_owned_inputs|SecretKey|getrandom|std[[:space:]]*::[[:space:]]*(process|env|thread|fs|net|time)|no_mangle|export_name|extern[[:space:]]*"C"|include(_str|_bytes)?[[:space:]]*!|AddressParams::ELEMENTS|LiquidAddressProfile::ElementsDefault'; then
     echo "ordinary-wallet plan source capability escaped its reviewed boundary" >&2
     exit 1
 fi
@@ -1363,19 +1365,21 @@ if [ "$plan_function_macro_count" -ne 9 ] || [ "$plan_test_thread_local_count" -
     exit 1
 fi
 if [ "$(printf '%s\n' "$plan_lexical_source" | grep -o 'wasabi_liquid_native_ordinary_pset' | awk 'END { print NR + 0 }')" -ne 1 ] ||
-    [ "$(printf '%s\n' "$plan_lexical_source" | grep -F -c 'use wasabi_liquid_native_ordinary_pset::{ConfidentialOutput, ExplicitFee};')" -ne 1 ] ||
+    [ "$(printf '%s\n' "$plan_lexical_source" | grep -F -c 'use wasabi_liquid_native_ordinary_pset::{BlindedOrdinaryPset, ConfidentialOutput, ExplicitFee};')" -ne 1 ] ||
+    [ "$(printf '%s\n' "$plan_lexical_source" | grep -o 'BlindedOrdinaryPset' | awk 'END { print NR + 0 }')" -ne 2 ] ||
     [ "$(printf '%s\n' "$plan_lexical_source" | grep -o 'ConfidentialOutput' | awk 'END { print NR + 0 }')" -ne 6 ] ||
-    [ "$(printf '%s\n' "$plan_lexical_source" | grep -o 'ExplicitFee' | awk 'END { print NR + 0 }')" -ne 8 ] ||
+    [ "$(printf '%s\n' "$plan_lexical_source" | grep -o 'ExplicitFee' | awk 'END { print NR + 0 }')" -ne 9 ] ||
     [ "$(printf '%s\n' "$plan_lexical_source" | grep -F -c 'ConfidentialOutput::from_address')" -ne 2 ] ||
     [ "$(printf '%s\n' "$plan_lexical_source" | grep -F -c 'ExplicitFee::new')" -ne 2 ]; then
     echo "ordinary-wallet plan ordinary-pset exact API inventory changed" >&2
     exit 1
 fi
-if printf '%s\n' "$plan_lexical_source" | grep -En '(^|[^[:alnum:]_])(prepare_ordinary_pset|SpendableInput|PreparedOrdinaryPset|BlindedOrdinaryPset|PsetConstructionError|OrdinaryPsetBlindingError|OrdinaryP2wpkhSigner|SignedOrdinaryPset|OrdinarySigningFailure|FinalizedOrdinaryTransaction|PartiallySignedTransaction|sign_and_finalize|serialize_for_broadcast|serialize_sensitive|as_pset|blind)([^[:alnum:]_]|$)'; then
+if printf '%s\n' "$plan_lexical_source" | grep -En '(^|[^[:alnum:]_])(prepare_ordinary_pset|SpendableInput|PreparedOrdinaryPset|PsetConstructionError|OrdinaryPsetBlindingError|OrdinaryP2wpkhSigner|SignedOrdinaryPset|OrdinarySigningFailure|FinalizedOrdinaryTransaction|PartiallySignedTransaction|sign_and_finalize|serialize_for_broadcast|serialize_sensitive|as_pset|blind)([^[:alnum:]_]|$)'; then
     echo "ordinary-wallet plan ordinary-pset capability escaped its boundary" >&2
     exit 1
 fi
 for required_call in \
+    'build_blinded_ordinary_wallet_pset(' \
     'prepare_selected_owned_inputs(' \
     'SelectedOutputBatch::new(' \
     'ConfidentialOutput::from_address(' \

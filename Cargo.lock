@@ -453,6 +453,8 @@ dependencies = [
  "static_assertions",
  "wasabi-liquid-native-address",
  "wasabi-liquid-native-ordinary-pset",
+ "wasabi-liquid-native-ordinary-wallet-pset",
+ "wasabi-liquid-native-output-opening",
  "wasabi-liquid-native-wallet-facts",
  "zeroize",
 ]
