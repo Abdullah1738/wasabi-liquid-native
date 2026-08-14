@@ -1014,14 +1014,14 @@ python3 -I ci/check-ordinary-wallet-plan-conformance.py "$repository_root"
 plan_conformance_inventory_hash="$(
     python3 -I -c 'import hashlib, pathlib; print(hashlib.sha256(pathlib.Path("contracts/ordinary-wallet-plan/v1/nonlinkable-reference/vectors/SHA256SUMS").read_bytes()).hexdigest())'
 )"
-if [ "$plan_conformance_inventory_hash" != "c0cdf0e1353b32a941fb7fa34ceb5ab682c76c1f5d01e892578ea8a800a25014" ]; then
+if [ "$plan_conformance_inventory_hash" != "a4aaa0e0b13b5544fd8e53f703a685fc56f4ec95f1e1c052f19bf50365ce2f6c" ]; then
     echo "ordinary-wallet plan conformance inventory root mismatch" >&2
     exit 1
 fi
 plan_conformance_parent_hash="$(
     python3 -I -c 'import hashlib, pathlib; print(hashlib.sha256(pathlib.Path("contracts/ordinary-wallet-plan/v1/nonlinkable-reference/SHA256SUMS").read_bytes()).hexdigest())'
 )"
-if [ "$plan_conformance_parent_hash" != "45265732edffe658cb7925ad536c4c8372219cc415d4b185d67f8230dde113c7" ]; then
+if [ "$plan_conformance_parent_hash" != "a1e1db8cba234d5154e947a32539c0ac461ddbaa812a0dd4e7c4e007a9541600" ]; then
     echo "ordinary-wallet plan conformance parent root mismatch" >&2
     exit 1
 fi

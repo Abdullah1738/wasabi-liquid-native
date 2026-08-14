@@ -33,7 +33,7 @@ EXPECTED_TEST_MODULE_SHA256 = (
     "d43f53361a98090f0206db9711febb373d7ae8c9a8c7bcf864206a5b1c6d95a6"
 )
 EXPECTED_CONFORMANCE_TEST_SHA256 = (
-    "dc55a9ba1ac40e87e83889e9599b84d05e6ee06bcb90d2cf92877d518ff812ae"
+    "68922bc580767bfc39202a4cd4fb5952512979a86842f3e12aece084ae532bd0"
 )
 PIN_REVIEW_BOUNDARY = (
     "pins are drift alarms; updating pins/checker requires fresh review"

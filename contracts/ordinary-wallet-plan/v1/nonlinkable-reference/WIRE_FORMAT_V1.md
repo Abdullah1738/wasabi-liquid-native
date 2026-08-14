@@ -1,6 +1,6 @@
 # Ordinary wallet plan wire v1 corpus
 
-Corpus ID: `ordinary-wallet-plan-wire-v1-conformance-1`
+Corpus ID: `ordinary-wallet-plan-wire-v1-conformance-2`
 
 This directory is a language-neutral, public-only compatibility authority for
 the source-only WLPQ v1 request. It is not a runtime transcript, wallet backup,

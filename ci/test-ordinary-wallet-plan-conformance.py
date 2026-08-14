@@ -403,8 +403,28 @@ def test_transaction_scanner_guards(checker) -> None:
     expect_scanner_error(checker, empty_witness, "superfluous empty public transaction witness flag")
 
 
+def test_indexed_u32be_fill(checker) -> None:
+    view = checker.ListView([])
+    empty_identity = checker.value_identity(view)
+    view.resize(8_193, checker.IndexedU32BeFill())
+    if checker.value_identity(view) == empty_identity or view.length != 8_193:
+        raise AssertionError("indexed u32be fill did not change sparse identity and length")
+    expected = ((0, b"\x00\x00\x00\x00"), (1, b"\x00\x00\x00\x01"), (8_192, b"\x00\x00\x20\x00"))
+    for index, data in expected:
+        if view.get(index).materialize(4) != data:
+            raise AssertionError("indexed u32be fill materialized the wrong item")
+    clone = checker.clone_value(view)
+    if clone is view or checker.value_identity(clone) != checker.value_identity(view) or not checker.strict_byte_order(clone):
+        raise AssertionError("indexed u32be sparse clone lost identity or ordering")
+    clone.set(1, checker.ByteView.from_bytes(b"\x00\x00\x00\x00"))
+    if checker.strict_byte_order(clone) or not checker.strict_byte_order(view):
+        raise AssertionError("indexed u32be sparse override did not detect a duplicate independently")
+
+
 def main() -> int:
-    test_transaction_scanner_guards(load_checker())
+    checker = load_checker()
+    test_transaction_scanner_guards(checker)
+    test_indexed_u32be_fill(checker)
     with tempfile.TemporaryDirectory(prefix="wlpq-corpus-mutations-") as directory:
         scratch = Path(directory)
         test_mutable_copy_modes(scratch)
@@ -417,6 +437,7 @@ def main() -> int:
         mutate(scratch, "missing-file", lambda root: (root / VECTORS / "frames/frame-test-toy-single.hex").unlink())
         mutate(scratch, "crlf", lambda root: (root / VECTORS / "CORPUS_V1.md").write_bytes((root / VECTORS / "CORPUS_V1.md").read_bytes().replace(b"\n", b"\r\n")))
         mutate(scratch, "bom", lambda root: (root / REFERENCE / "WIRE_FORMAT_V1.md").write_bytes(b"\xef\xbb\xbf" + (root / REFERENCE / "WIRE_FORMAT_V1.md").read_bytes()))
+        mutate(scratch, "source-schema-document", lambda root: replace(root / VECTORS / "CORPUS_V1.md", "wlpq-source-object-v2", "wlpq-source-object-v3"), expected_error="corpus document omits source schema authority")
         mutate(scratch, "uppercase-hex", lambda root: (root / VECTORS / "frames/frame-test-toy-single.hex").write_text((root / VECTORS / "frames/frame-test-toy-single.hex").read_text().upper()))
         mutate(scratch, "error-text", lambda root: replace(root / REFERENCE / "ERROR_MAPPING_V1.tsv", "ordinary wallet plan wire plan was rejected", "ordinary wallet plan wire request was rejected"))
         mutate(scratch, "context-manifest", lambda root: replace(root / REFERENCE / "CONTEXTS_V1.tsv", "b88244f81daf14b2f47915d430ec41e5402de538020f1e4847e8ddbd6f238e5b", "a88244f81daf14b2f47915d430ec41e5402de538020f1e4847e8ddbd6f238e5b"))
@@ -472,6 +493,20 @@ def main() -> int:
         mutate(scratch, "source-model-oversized-fixed-field", lambda root: mutate_source_object(root, "model-native-encode-value-zero", lambda value: value.update(operations=[{"op": "set-bytes", "path": "request.selected[0].txid", "value": {"kind": "repeat", "byte_hex": "00", "length": 67_108_864}}])), expected_error="unsupported or noncanonical byte view")
         mutate(scratch, "source-model-huge-list-view", lambda root: mutate_source_object(root, "model-native-encode-selected-count-plus-one", lambda value: value["operations"][0].update(length=67_108_865)), expected_error="source operation type, fields, or target mismatch")
         mutate(scratch, "source-model-list-fill-type", lambda root: mutate_source_object(root, "model-native-encode-selected-count-plus-one", lambda value: value["operations"][0].update(fill={"kind": "repeat", "byte_hex": "00", "length": 1})), expected_error="source list fill recipe mismatch")
+        mutate(scratch, "source-model-v2-schema-on-v1-model", lambda root: mutate_source_object(root, "model-managed-batch-expanded-bytes-plus-one", lambda value: value.update(schema="wlpq-source-object-v2")), expected_error="source object schema identifier mismatch")
+        mutate(scratch, "source-model-v1-schema-on-v2-model", lambda root: mutate_source_object(root, "model-managed-batch-expanded-count-plus-one", lambda value: value.update(schema="wlpq-source-object-v1")), expected_error="source object schema identifier mismatch")
+        mutate(scratch, "source-model-indexed-fill-under-v1", lambda root: mutate_source_object(root, "model-managed-row-empty-previous", lambda value: value["operations"].append({"op": "resize-list", "path": "row.previous", "length": 2, "fill": {"kind": "indexed-u32be"}})), expected_error="indexed u32be fill is outside its exact empty-list authority")
+        mutate(scratch, "source-model-indexed-fill-extra-field", lambda root: mutate_source_object(root, "model-managed-batch-expanded-count-plus-one", lambda value: value["operations"][2]["fill"].update(prefix="u32be")), expected_error="source list fill recipe mismatch")
+        mutate(scratch, "source-model-indexed-fill-wrong-path", lambda root: mutate_source_object(root, "model-managed-batch-expanded-count-plus-one", lambda value: value["operations"][2].update(path="batch.rows", length=2)), expected_error="indexed u32be fill is outside its exact empty-list authority")
+        mutate(scratch, "source-model-indexed-fill-nonempty", lambda root: mutate_source_object(root, "model-managed-batch-expanded-count-plus-one", lambda value: value["operations"].pop(0)), expected_error="indexed u32be fill is outside its exact empty-list authority")
+        mutate(scratch, "source-model-indexed-fill-wrong-kind", lambda root: mutate_source_object(root, "model-managed-batch-expanded-count-plus-one", lambda value: value["operations"][2].update(fill={"kind": "indexed-u32le"})), expected_error="source list fill recipe mismatch")
+        mutate(scratch, "source-model-indexed-fill-duplicate", lambda root: mutate_source_object(root, "model-managed-batch-expanded-count-plus-one", lambda value: value["operations"][2].update(fill={"kind": "repeat", "byte_hex": "00", "length": 4})), expected_error="funding batch source contains an invalid funding row")
+        mutate(scratch, "source-model-indexed-fill-row-limit-alias", lambda root: mutate_source_object(root, "model-managed-batch-expanded-count-plus-one", lambda value: value["operations"][2].update(length=16385)), expected_error="funding batch source contains an invalid funding row")
+        mutate(scratch, "source-model-indexed-fill-count-boundary", lambda root: mutate_source_object(root, "model-managed-batch-expanded-count-plus-one", lambda value: value["operations"][3].update(length=8192)), expected_error="source object independently derived outcome mismatch")
+        mutate(scratch, "source-model-expanded-bytes-duplicate", lambda root: mutate_source_object(root, "model-managed-batch-expanded-bytes-plus-one", lambda value: value["operations"][6]["value"].update(byte_hex="00")), expected_error="funding batch source contains an invalid funding row")
+        mutate(scratch, "source-model-expanded-bytes-out-of-order", lambda root: mutate_source_object(root, "model-managed-batch-expanded-bytes-plus-one", lambda value: value["operations"][6]["value"].update(byte_hex="ff")), expected_error="funding batch source contains an invalid funding row")
+        mutate(scratch, "source-model-expanded-bytes-row-limit-alias", lambda root: mutate_source_object(root, "model-managed-batch-expanded-bytes-plus-one", lambda value: value["operations"][0]["value"].update(length=0)), expected_error="funding batch source contains an invalid funding row")
+        mutate(scratch, "source-model-expanded-bytes-boundary", lambda root: mutate_source_object(root, "model-managed-batch-expanded-bytes-plus-one", lambda value: value["operations"][19]["value"].update(length=4194302)), expected_error="source object independently derived outcome mismatch")
         mutate(scratch, "source-model-huge-path-index", lambda root: mutate_source_object(root, "model-native-encode-value-zero", lambda value: value["operations"][0].update(path="request.selected[67108863].value")), expected_error="list view index out of range")
         mutate(scratch, "source-model-copy-type", lambda root: mutate_source_object(root, "model-native-encode-value-zero", lambda value: value["operations"].__setitem__(0, {"op": "copy", "path": "request.selected[0].value", "from": "request.selected[0].candidate"})), expected_error="copy source and target types differ")
         mutate(scratch, "source-model-null-copy-type", lambda root: mutate_source_object(root, "model-native-encode-value-zero", lambda value: value.update(operations=[{"op": "set-null", "path": "request.selected[0].candidate"}, {"op": "copy", "path": "request.selected[0].candidate", "from": "request.selected[0].previous"}])), expected_error="copy source and target types differ")
@@ -503,7 +538,7 @@ def main() -> int:
         mutate(scratch, "same-code-frame-swap", lambda root: replace(root / VECTORS / "frames/frame-fee-zero.hex", (root / VECTORS / "frames/frame-fee-zero.hex").read_text(), (root / VECTORS / "frames/frame-selected-value-zero.hex").read_text()))
         mutate(scratch, "mutation-child", lambda root: replace(root / VECTORS / "MUTATIONS_V1.tsv", "\tframe-address-length-plus-one\treplace\t", "\tframe-address-length-zero\treplace\t"))
         mutate(scratch, "mutation-target", lambda root: replace(root / VECTORS / "MUTATIONS_V1.tsv", "mutation-frame-malformed-address\tframe-test-public-valid\tframe-malformed-address\tlogical-repack\tdestination.0.address", "mutation-frame-malformed-address\tframe-test-public-valid\tframe-malformed-address\tlogical-repack\tdestination.0.value"))
-        mutate(scratch, "corpus-id", lambda root: replace(root / REFERENCE / "CORPUS_ID", "ordinary-wallet-plan-wire-v1-conformance-1", "ordinary-wallet-plan-wire-v1-conformance-2"))
+        mutate(scratch, "corpus-id", lambda root: replace(root / REFERENCE / "CORPUS_ID", "ordinary-wallet-plan-wire-v1-conformance-2", "ordinary-wallet-plan-wire-v1-conformance-3"))
         mutate(scratch, "declared-root", lambda root: flip_first_byte(root / REFERENCE / "CORPUS_ROOT_SHA256"), close=False)
         mutate(scratch, "parent-checksum", lambda root: flip_first_byte(root / REFERENCE / "SHA256SUMS"), close=False)
         mutate(scratch, "malformed-checksum", lambda root: (root / VECTORS / "SHA256SUMS").write_text("invalid\n"), close=False)

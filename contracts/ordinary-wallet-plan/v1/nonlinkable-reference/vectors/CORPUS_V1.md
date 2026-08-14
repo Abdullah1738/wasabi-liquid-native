@@ -11,12 +11,16 @@ checksummed public descriptors only. No construction material or confidential
 opening is included. The fixtures are synthetic and are not associated with
 funds or an account.
 
-Source-object JSON uses one closed schema: a typed root reconstructed from an
-exact frame (or a checked sparse expression) followed by typed operations over
-declared paths. The checker rejects unknown fields, paths, types, operations,
-no-op edits, materialized giant values, and any model without exactly one case
-or boundary consumer. Expected outcomes are table assertions, not instructions
-to the evaluator.
+Source-object JSON uses an exact closed, versioned schema union: every object
+uses `wlpq-source-object-v1` except
+`model-managed-batch-expanded-count-plus-one`, which alone uses
+`wlpq-source-object-v2`. V2 adds only the exact `indexed-u32be` sparse fill for
+the two explicitly cleared previous-transaction lists in that model. Each item
+at index i is the exact four-byte big-endian encoding of i. The checker rejects
+schema/model aliases, unknown fields, paths, types, operations, no-op edits,
+materialized giant values, and any model without exactly one case or boundary
+consumer. Expected outcomes are table assertions, not instructions to the
+evaluator.
 
 Prepare results bind only the frozen public validation phase. The corpus does
 not claim that selected confidential commitments match declared assets or

@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 
-CORPUS_ID = "ordinary-wallet-plan-wire-v1-conformance-1"
+CORPUS_ID = "ordinary-wallet-plan-wire-v1-conformance-2"
 REFERENCE = Path("contracts/ordinary-wallet-plan/v1/nonlinkable-reference")
 VECTORS = REFERENCE / "vectors"
 LOWER_HASH = re.compile(r"[0-9a-f]{64}\Z")
@@ -36,10 +36,10 @@ MAX_TRANSACTION_BYTES = 67_108_864
 MAX_OUTPUT_INDEX = 1_073_741_823
 MAX_VALUE = 2_100_000_000_000_000
 TEST_SOURCE_EPOCH = "41" * 32
-CASE_TABLE_SHA256 = "2cf40a89f2c4fc50306a309f16c36899aca1827bb74a475a5122b49aa22d520c"
+CASE_TABLE_SHA256 = "a7759a0a0650f7729bc02f4e978cf12f7aadf7b166758f2e762bcde0e7018110"
 FIXTURE_ASSERTIONS_TABLE_SHA256 = "6e57397cf38c7b3a7bedb51e0b98995761342e8b5daf3122c67254a476ca0c28"
-REVIEWED_PARENT_ROOT_SHA256 = "45265732edffe658cb7925ad536c4c8372219cc415d4b185d67f8230dde113c7"
-REVIEWED_NESTED_ROOT_SHA256 = "c0cdf0e1353b32a941fb7fa34ceb5ab682c76c1f5d01e892578ea8a800a25014"
+REVIEWED_PARENT_ROOT_SHA256 = "a1e1db8cba234d5154e947a32539c0ac461ddbaa812a0dd4e7c4e007a9541600"
+REVIEWED_NESTED_ROOT_SHA256 = "a4aaa0e0b13b5544fd8e53f703a685fc56f4ec95f1e1c052f19bf50365ce2f6c"
 
 TEST_MANIFEST = "e4e7ec03e19ce5f83fd04c586788b724d88052b65ef2480cc93bcd50324f6b20"
 MAIN_MANIFEST = "b88244f81daf14b2f47915d430ec41e5402de538020f1e4847e8ddbd6f238e5b"
@@ -1290,6 +1290,16 @@ class ByteView:
         return self.literal if self.literal is not None else bytes([self.fill]) * self.length
 
 
+class IndexedU32BeFill:
+    def get(self, index: int) -> ByteView:
+        if type(index) is not int or not 0 <= index <= (1 << 32) - 1:
+            reject("indexed u32be fill index is out of range")
+        return ByteView.from_bytes(index.to_bytes(4, "big"))
+
+    def identity(self) -> tuple[str]:
+        return ("indexed-u32be",)
+
+
 class ListView:
     def __init__(self, items: list, length: int | None = None, fill=None, overrides: dict[int, object] | None = None):
         if not isinstance(items, list) or length is not None and type(length) is not int:
@@ -1308,7 +1318,11 @@ class ListView:
             reject("list view index out of range")
         if index < len(self.items):
             return self.items[index]
-        return self.overrides[index] if index in self.overrides else clone_value(self.fill)
+        if index in self.overrides:
+            return self.overrides[index]
+        if isinstance(self.fill, IndexedU32BeFill):
+            return self.fill.get(index)
+        return clone_value(self.fill)
 
     def set(self, index: int, value) -> None:
         if not 0 <= index < self.length:
@@ -1348,13 +1362,15 @@ def clone_value(value):
         return ByteView(value.length, value.literal, value.fill)
     if isinstance(value, ListView):
         return ListView([clone_value(item) for item in value.items], value.length, clone_value(value.fill), {index: clone_value(item) for index, item in value.overrides.items()})
+    if isinstance(value, IndexedU32BeFill):
+        return IndexedU32BeFill()
     if isinstance(value, dict):
         return {key: clone_value(item) for key, item in value.items()}
     return value
 
 
 def value_identity(value):
-    if isinstance(value, (ByteView, ListView)):
+    if isinstance(value, (ByteView, IndexedU32BeFill, ListView)):
         return value.identity()
     if isinstance(value, dict):
         return tuple((key, value_identity(item)) for key, item in sorted(value.items()))
@@ -1508,7 +1524,7 @@ def set_child(parent, key, value) -> None:
         parent[key] = value
 
 
-def apply_source_operations(state: dict, operations: list, fixtures: dict[str, bytes]) -> None:
+def apply_source_operations(state: dict, operations: list, fixtures: dict[str, bytes], schema: str, model_id: str) -> None:
     if not isinstance(operations, list) or len(operations) > 1024:
         reject("source object operations are not a list")
     allowed = {"set-null", "set-u64", "set-bytes", "clear-list", "resize-list", "copy", "swap", "set-reference", "clone-instance", "dispose"}
@@ -1535,7 +1551,11 @@ def apply_source_operations(state: dict, operations: list, fixtures: dict[str, b
         elif op == "resize-list" and set(operation) == {"op", "path", "length", "fill"} and target_type == "list" and isinstance(current, ListView) and type(operation["length"]) is int and 0 <= operation["length"] <= list_path_limit(path):
             fill = operation["fill"]
             if not isinstance(fill, dict): reject("source list fill recipe mismatch")
-            if (path == "row.previous" or re.fullmatch(r"(?:request\.selected|batch\.rows)\[[0-9]+\]\.previous", path)) and fill.get("kind") in ("fixture", "repeat", "literal"):
+            if strict_value_equal(fill, {"kind": "indexed-u32be"}):
+                if schema != "wlpq-source-object-v2" or model_id != "model-managed-batch-expanded-count-plus-one" or path not in ("batch.rows[0].previous", "batch.rows[1].previous") or current.length != 0:
+                    reject("indexed u32be fill is outside its exact empty-list authority")
+                fill_value = IndexedU32BeFill()
+            elif (path == "row.previous" or re.fullmatch(r"(?:request\.selected|batch\.rows)\[[0-9]+\]\.previous", path)) and fill.get("kind") in ("fixture", "repeat", "literal"):
                 fill_value = bytes_from_spec(fill, fixtures, MAX_TRANSACTION)
             elif path == "request.selected" and strict_value_equal(fill, {"kind": "selected-copy", "index": 0}):
                 fill_value = current.get(0)
@@ -1717,24 +1737,35 @@ def build_source_state(root_spec: dict, frames: dict[str, bytes]) -> tuple[dict,
     reject("source root kind is unknown")
 
 
+def evaluate_funding_row(row: dict) -> tuple[tuple[str, int, str], tuple[int, int] | None]:
+    if row["candidate"] is None or row["previous"] is None:
+        if row["candidate"] is None and isinstance(row["previous"], ListView) and row["previous"].length > MAX_PREVIOUS:
+            return ("error", 1, "null-before-limit"), None
+        if row["candidate"] is None and isinstance(row["previous"], ListView) and not strict_byte_order(row["previous"]):
+            return ("error", 1, "null-before-encoding"), None
+        return ("error", 1, "invalid-argument"), None
+    if any(row["previous"].get(index) is None for index in range(row["previous"].length)):
+        return ("error", 1, "invalid-argument"), None
+    if not 1 <= row["candidate"].length <= MAX_TRANSACTION or row["previous"].length > MAX_PREVIOUS:
+        return ("error", 4, "limit"), None
+    total = row["candidate"].length
+    for index in range(row["previous"].length):
+        item = row["previous"].get(index)
+        if not isinstance(item, ByteView) or not 1 <= item.length <= MAX_TRANSACTION:
+            return ("error", 4, "limit"), None
+        total += item.length
+        if total > MAX_TRANSACTION_BYTES:
+            return ("error", 4, "limit"), None
+    if not strict_byte_order(row["previous"]):
+        return ("error", 3, "encoding"), None
+    return ("ok", 0, "-"), (row["previous"].length, total)
+
+
 def evaluate_source_state(state: dict, kind: str, boundary: dict[str, str] | None, frames: dict[str, bytes]) -> tuple[str, int, str]:
     if kind == "request-from-frame": return evaluate_request(state["request"], frames)
     if kind == "funding-row-from-frame":
-        row = state["row"]
-        if row["candidate"] is None or row["previous"] is None:
-            if row["candidate"] is None and isinstance(row["previous"], ListView) and row["previous"].length > MAX_PREVIOUS: return "error", 1, "null-before-limit"
-            if row["candidate"] is None and isinstance(row["previous"], ListView) and not strict_byte_order(row["previous"]): return "error", 1, "null-before-encoding"
-            return "error", 1, "invalid-argument"
-        if any(row["previous"].get(index) is None for index in range(row["previous"].length)): return "error", 1, "invalid-argument"
-        if not 1 <= row["candidate"].length <= MAX_TRANSACTION or row["previous"].length > MAX_PREVIOUS: return "error", 4, "limit"
-        total = row["candidate"].length
-        for index in range(row["previous"].length):
-            item = row["previous"].get(index)
-            if not 1 <= item.length <= MAX_TRANSACTION: return "error", 4, "limit"
-            total += item.length
-        if total > MAX_TRANSACTION_BYTES: return "error", 4, "limit"
-        if not strict_byte_order(row["previous"]): return "error", 3, "encoding"
-        return "ok", 0, "-"
+        outcome, _ = evaluate_funding_row(state["row"])
+        return outcome
     if kind == "funding-batch-from-frame":
         batch = state["batch"]
         if batch["plan"] is None or batch["rows"] is None: return "error", 1, "invalid-argument"
@@ -1743,11 +1774,18 @@ def evaluate_source_state(state: dict, kind: str, boundary: dict[str, str] | Non
             return "error", 1, "null-before-lifecycle" if disposed_present else "invalid-argument"
         if any(batch["rows"].get(index)["lifecycle"] == "disposed" for index in range(batch["rows"].length)): return "lifecycle", 0, "object-disposed"
         if batch["rows"].length != batch["plan"]["request"]["selected"].length: return "error", 1, "invalid-argument"
-        count = total = 0
+        shapes = []
         for index in range(batch["rows"].length):
-            row = batch["rows"].get(index); count += row["previous"].length; total += row["candidate"].length
-            total += sum(row["previous"].get(item).length for item in range(row["previous"].length))
-        return ("error", 4, "limit") if count > MAX_PREVIOUS or total > MAX_TRANSACTION_BYTES else ("ok", 0, "-")
+            outcome, shape = evaluate_funding_row(batch["rows"].get(index))
+            if outcome != ("ok", 0, "-"):
+                reject("funding batch source contains an invalid funding row")
+            assert shape is not None
+            shapes.append(shape)
+        count = sum(shape[0] for shape in shapes)
+        if count > MAX_PREVIOUS:
+            return "error", 4, "limit"
+        total = sum(shape[1] for shape in shapes)
+        return ("error", 4, "limit") if total > MAX_TRANSACTION_BYTES else ("ok", 0, "-")
     if kind == "encoder-call-from-frame":
         call = state["call"]
         if call["plan"] is None or call["batch"] is None: return "error", 1, "null-before-lifecycle" if call["batch"] is not None and call["batch"]["lifecycle"] == "disposed" else "invalid-argument"
@@ -1808,7 +1846,7 @@ def validate_virtual_frame(value: dict) -> None:
     if counts != MAX_PREVIOUS or 100 + payload != MAX_TRANSACTION_BYTES: reject("virtual reachable-frame distribution mismatch")
 
 
-def validate_source_objects_v1(root: Path, rows: list[dict[str, str]], cases: list[dict[str, str]], boundaries: list[dict[str, str]], frames: dict[str, bytes], fixtures: dict[str, bytes]) -> dict[str, str]:
+def validate_source_objects(root: Path, rows: list[dict[str, str]], cases: list[dict[str, str]], boundaries: list[dict[str, str]], frames: dict[str, bytes], fixtures: dict[str, bytes]) -> dict[str, str]:
     models = {row["source_model_id"]: row for row in rows}
     consumers = [row["source_model_id"] for row in cases if row["source_model_id"] != "-"] + [row["source_model_id"] for row in boundaries]
     if len(consumers) != len(set(consumers)) or set(consumers) != set(models): reject("source object topology is not one-to-one and closed")
@@ -1817,9 +1855,10 @@ def validate_source_objects_v1(root: Path, rows: list[dict[str, str]], cases: li
     for model_id, row in models.items():
         value = canonical_model_object(root, row)
         exact_keys(value, {"schema", "root", "operations"}, "source object")
-        if value["schema"] != "wlpq-source-object-v1": reject("source object schema identifier mismatch")
+        expected_schema = "wlpq-source-object-v2" if model_id == "model-managed-batch-expanded-count-plus-one" else "wlpq-source-object-v1"
+        if value["schema"] != expected_schema: reject("source object schema identifier mismatch")
         state, kind = build_source_state(value["root"], frames)
-        apply_source_operations(state, value["operations"], fixtures)
+        apply_source_operations(state, value["operations"], fixtures, value["schema"], model_id)
         boundary = boundary_by_model.get(model_id)
         outcome = evaluate_source_state(state, kind, boundary, frames)
         if row["partition"] == "shared-encoder":
@@ -1915,6 +1954,9 @@ def validate_documents(root: Path) -> None:
     required_nonclaims = ("opening-provider", "node", "PSET", "CoinJoin", "sponsor", "USDt CoinJoin", "production-readiness")
     if not all(term in corpus for term in required_nonclaims):
         reject("corpus document omits deferred boundaries")
+    required_source_schema = ("exact closed, versioned schema union", "wlpq-source-object-v1", "wlpq-source-object-v2", "indexed-u32be")
+    if not all(term in corpus for term in required_source_schema):
+        reject("corpus document omits source schema authority")
 
 
 def run(root: Path, *, enforce_reviewed_roots: bool = True) -> None:
@@ -1951,7 +1993,7 @@ def run(root: Path, *, enforce_reviewed_roots: bool = True) -> None:
         tables["vectors/FRAMES_V1.tsv"],
         tables["CATALOG_FIXTURES_V1.tsv"],
     )
-    source_outputs = validate_source_objects_v1(root, tables["vectors/SOURCE_MODELS_V1.tsv"], tables["vectors/CASES_V1.tsv"], tables["vectors/BOUNDARIES_V1.tsv"], frames, fixtures)
+    source_outputs = validate_source_objects(root, tables["vectors/SOURCE_MODELS_V1.tsv"], tables["vectors/CASES_V1.tsv"], tables["vectors/BOUNDARIES_V1.tsv"], frames, fixtures)
     validate_prepare_expectations(tables["vectors/CASES_V1.tsv"], frames, tables["CATALOG_FIXTURES_V1.tsv"], tables["vectors/CATALOG_OUTPUT_SCRIPTS_V1.tsv"])
     validate_case_bindings(tables["vectors/CASES_V1.tsv"], frames, tables["CATALOG_FIXTURES_V1.tsv"], tables["vectors/SOURCE_MODELS_V1.tsv"], source_outputs)
     if digest((root / VECTORS / "CASES_V1.tsv").read_bytes()) != CASE_TABLE_SHA256:

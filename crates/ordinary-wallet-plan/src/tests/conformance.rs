@@ -13,10 +13,10 @@ use crate::{
     decode_request, encode_request, encode_view,
 };
 
-const CORPUS_ID: &str = "ordinary-wallet-plan-wire-v1-conformance-1";
-const PARENT_ROOT_SHA256: &str = "45265732edffe658cb7925ad536c4c8372219cc415d4b185d67f8230dde113c7";
-const NESTED_ROOT_SHA256: &str = "c0cdf0e1353b32a941fb7fa34ceb5ab682c76c1f5d01e892578ea8a800a25014";
-const CASES_SHA256: &str = "2cf40a89f2c4fc50306a309f16c36899aca1827bb74a475a5122b49aa22d520c";
+const CORPUS_ID: &str = "ordinary-wallet-plan-wire-v1-conformance-2";
+const PARENT_ROOT_SHA256: &str = "a1e1db8cba234d5154e947a32539c0ac461ddbaa812a0dd4e7c4e007a9541600";
+const NESTED_ROOT_SHA256: &str = "a4aaa0e0b13b5544fd8e53f703a685fc56f4ec95f1e1c052f19bf50365ce2f6c";
+const CASES_SHA256: &str = "a7759a0a0650f7729bc02f4e978cf12f7aadf7b166758f2e762bcde0e7018110";
 const OUTER_LIMIT_PLUS_ONE: usize = 268_435_457;
 
 const CASES_HEADER: &[&str] = &[
