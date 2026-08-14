@@ -2987,7 +2987,31 @@ fn require_linux_mount_boundary() {}'''
             '    --capture-stdin "$plan_diagnostic_output"'
         ),
         "ordinary pset import": (
-            "use wasabi_liquid_native_ordinary_pset::{BlindedOrdinaryPset, ConfidentialOutput, ExplicitFee};"
+            "expected_plan_ordinary_pset_import='use wasabi_liquid_native_ordinary_pset::{\n"
+            "    BlindedOrdinaryPset, ConfidentialOutput, ExplicitFee, FinalizedOrdinaryTransaction,\n"
+            "    OrdinaryP2wpkhSigner,\n"
+            "};'"
+        ),
+        "ordinary wallet pset import": (
+            "expected_plan_wallet_pset_import='use wasabi_liquid_native_ordinary_wallet_pset::{\n"
+            "    OrdinaryWalletPsetError, OrdinaryWalletTransactionFailure, build_blinded_ordinary_wallet_pset,\n"
+            "    build_sign_and_finalize_ordinary_wallet_transaction,\n"
+            "};'"
+        ),
+        "finalized transaction inventory": (
+            'grep -o \'FinalizedOrdinaryTransaction\' | awk \'END { print NR + 0 }\')" -ne 2'
+        ),
+        "external signer inventory": (
+            'grep -o \'OrdinaryP2wpkhSigner\' | awk \'END { print NR + 0 }\')" -ne 2'
+        ),
+        "finalization failure inventory": (
+            'grep -o \'OrdinaryWalletTransactionFailure\' | awk \'END { print NR + 0 }\')" -ne 2'
+        ),
+        "finalization builder inventory": (
+            'grep -o \'build_sign_and_finalize_ordinary_wallet_transaction\' | awk \'END { print NR + 0 }\')" -ne 2'
+        ),
+        "finalization builder call": (
+            "    'build_sign_and_finalize_ordinary_wallet_transaction(' \\\n"
         ),
         "ordinary pset API rejection": (
             "ordinary-wallet plan ordinary-pset capability escaped its boundary"

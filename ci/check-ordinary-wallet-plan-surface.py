@@ -30,10 +30,13 @@ EXPECTED_FILES = {
 }
 PRODUCTION_FILES = {"src/lib.rs", "src/reader.rs", "src/writer.rs"}
 EXPECTED_TEST_MODULE_SHA256 = (
-    "958066d688fbea7c83021e2b0fb2d00c0bb5f36f25065913af5a1fa3fac6ec4c"
+    "5960460818fb83e174ec1e124c60cfc63a94247b8774264e792c6de34e7cac39"
 )
 EXPECTED_CONFORMANCE_TEST_SHA256 = (
     "68922bc580767bfc39202a4cd4fb5952512979a86842f3e12aece084ae532bd0"
+)
+EXPECTED_PREPARATION_TEST_SHA256 = (
+    "c4af1d3828c92c99236c9f24aa1a40ef6ae477745d914eb8099c7c9f4c01d99e"
 )
 PIN_REVIEW_BOUNDARY = (
     "pins are drift alarms; updating pins/checker requires fresh review"
@@ -41,18 +44,20 @@ PIN_REVIEW_BOUNDARY = (
 # These pins bind the exact compiler-reported production closure. They detect
 # drift only; changing a pin never substitutes for reviewing the changed bytes.
 EXPECTED_PRODUCTION_SOURCE_SHA256 = {
-    "src/lib.rs": "1f683e24e049c42a02c499564c0201f6c6437355b89af993609fc5715bd0bf58",
+    "src/lib.rs": "5fd3de09252c686b744f4ff94b85f15314787965e17f38b248e72f970c34dee3",
     "src/reader.rs": "6024994d1209a40a59b8ee8f49b4ccb237be46cffc2e4f5f7d39e74cde3325ac",
     "src/writer.rs": "bfa55038ff8dea778f6b2ce3ff83d2ab79a7cae11303f07776d0b25495c49c01",
 }
 # This is the complete local production-source authority reached by WLPQ v1's
-# currently approved prepared-plan-to-blinded-PSET composition call graph,
+# currently approved prepared-plan-to-blinded-PSET and finalized-transaction
+# composition call graph,
 # excluding WLPQ's own three production files pinned above. Whole-file pins
 # make every byte in each authority source review-sensitive, including helpers
 # outside the narrower semantic regions below.
 EXPECTED_RUNTIME_AUTHORITY_SOURCE_SHA256 = {
     "crates/address/src/lib.rs": "e6544c20fb1d93b473bdac7bd42aaedc68edf46b2cee0f72a28f093d5e3e6014",
     "crates/ordinary-pset/src/lib.rs": "645ea8fc7dc0f370275c571f4b622db28c8cc8ddf626175b4cc4ad0ddd9ad384",
+    "crates/ordinary-pset/src/signing.rs": "448ac5a2f0791f9c18602a8587f45ecf1ca68b2642dc6d52b13ef6e9871172d9",
     "crates/ordinary-wallet-pset/src/lib.rs": "80c4afba958edbd0cf87a839e188a30265b24afe27fed7be13a77c282e4a3b0e",
     "crates/output-opening/src/lib.rs": "5a01bbfd207be93e8e8112c89baa51e3d247cbf8795b3366d72ddc70ac877acc",
     "crates/transaction-validation/src/lib.rs": "b31cd9785ff204aea300ddafe5bc7e9158377c2746d80df6f2afd942b98f4750",
@@ -66,6 +71,18 @@ EXPECTED_RUNTIME_AUTHORITY_CALL_EDGES = (
         "crates/ordinary-wallet-plan/src/lib.rs",
         "crates/ordinary-wallet-pset/src/lib.rs",
         "build_blinded_ordinary_wallet_pset(",
+        1,
+    ),
+    (
+        "crates/ordinary-wallet-plan/src/lib.rs",
+        "crates/ordinary-wallet-pset/src/lib.rs",
+        "build_sign_and_finalize_ordinary_wallet_transaction(",
+        1,
+    ),
+    (
+        "crates/ordinary-wallet-pset/src/lib.rs",
+        "crates/ordinary-pset/src/signing.rs",
+        "blinded.sign_and_finalize(&secp, signer)",
         1,
     ),
     (
@@ -189,16 +206,10 @@ EXPECTED_RUNTIME_AUTHORITY_CALL_EDGES = (
         1,
     ),
 )
-# Signing remains outside the exact prepared-plan to blinded-PSET runtime call
-# graph. A future edge to it, or any other runtime-authority source-set drift,
-# must fail this gate and restart review.
-NOT_CURRENT_WLPQ_RUNTIME_AUTHORITY = (
-    "crates/ordinary-pset/src/signing.rs",
-)
-# Returning the existing blinded-PSET owner preserves its already-reviewed
-# sensitive serialization, borrow-only inspection, and consuming signing
-# surface. This is capability-surface authority, not a claim that signing is
-# invoked by the prepared-plan composition call graph above.
+# The returned blinded-PSET failure capability and finalized-transaction
+# capability preserve their existing reviewed surfaces. This pin is duplicated
+# deliberately with runtime authority so either capability or reachability
+# drift restarts review.
 EXPECTED_RETURNED_CAPABILITY_SOURCE_SHA256 = {
     "crates/ordinary-pset/src/signing.rs": (
         "448ac5a2f0791f9c18602a8587f45ecf1ca68b2642dc6d52b13ef6e9871172d9"
@@ -219,8 +230,18 @@ EXPECTED_AUTHORITY_REGION_SHA256 = {
     "ordinary pset explicit fee new": "04d5f0c2c81cff3dd0585e48f3dfe35fbc3e30430ab5289830cbd9421d3655b9",
     "ordinary pset explicit fee struct": "0580d6134a9063337e451585b45e3c19bad60a1234237397ac76e29a59eb02c7",
     "ordinary pset explicit fee zeroize": "9112c13aaf907460aadfb8898ca1712efba7ab37b03860c1e26ce6e1d5aa831d",
+    "ordinary pset finalized impl": "5fa8a094733bd0f0ce60fec53fcc4579b1f564e79c06e600febd57569ea515cd",
+    "ordinary pset finalized struct": "330d97f81733bbfaae7c2c713435bc292a5fa72c6134caf6ac19e6073d5f642c",
+    "ordinary pset sign and finalize": "22a7c567b6ceb398661341df7e51fdd6d7bf3bf0ce7db1f459c71a651f57509a",
+    "ordinary pset signer trait": "5a9520a156fc948053c4594853fca25ff696163609729a06dafcbccd4af27ec7",
+    "ordinary pset signing failure impl": "11d2d5b80063c3ab414acb29d5d0f553e0765dff90e2df731f0084a1409f8dee",
+    "ordinary pset signing failure struct": "b06e6932d2ea84118a3e833ef53aa23828a5dcdc713a7fe9931a84dfc18bb3c7",
     "ordinary wallet pset builder": "14bbd037c98267ac28af15184492f3ca593a791cf057fe4185c8cdd617092fe1",
     "ordinary wallet pset error": "951969dfbb6f93a0df52d7c39c1688de7763e10f8cd431a1b96a6b977342a174",
+    "ordinary wallet transaction builder": "dba0fbf6b331e8dc4fbf51ed62aa479f3782777092754008523e75ba77fd2cac",
+    "ordinary wallet transaction failure impl": "69bb1491373afc53b1209c022eb6b7be250cb2c544ea915dee1759d380b784df",
+    "ordinary wallet transaction failure struct": "9b7f298949f38d0f1ca00481be120b653cbddb1b53f1094c33eb7f5da4f44c57",
+    "ordinary wallet transaction reason": "69f8d6e64ca7501fb446a0a11c25a3e970354d125c296ce6824e7f04f2243f7c",
     "output opening opened output impl": "cf98d5a97241af7bde4022cc0c041060c5b855c5caafe3e390996f3c3b4a644f",
     "output opening opened output struct": "b5a3f5cfe756487d483e1a8c00db70b3d442c617a336cf53266062957999df48",
     "wallet facts descriptor catalog drop": "9c2f4dd3efc894f73e71d5af68dfa63955a89f107e6d9d47550e1312199d70cc",
@@ -246,6 +267,18 @@ EXPECTED_INHERENT_METHODS = {
     "DescriptorCatalog": ("derive", "last_index", "network", "script_count"),
     "ExplicitFee": ("asset", "new", "value"),
     "LiquidAddressProfile": ("params",),
+    "FinalizedOrdinaryTransaction": (
+        "serialize_for_broadcast",
+        "transaction",
+        "txid",
+        "wtxid",
+    ),
+    "OrdinaryWalletTransactionFailure": (
+        "into_retryable_blinded",
+        "preparation",
+        "reason",
+        "signing",
+    ),
     "ParsedLiquidAddress": (
         "blinding_pubkey",
         "canonical_address",
@@ -273,6 +306,7 @@ PUBLIC_API = Counter(
         "fn decode_request": 1,
         "fn encode_request": 1,
         "fn into_blinded_ordinary_wallet_pset": 1,
+        "fn into_finalized_ordinary_wallet_transaction": 1,
         "fn new": 3,
         "fn prepare": 1,
         "fn reencode": 1,
@@ -299,6 +333,7 @@ EXPECTED_VISIBILITY_SYNTAX = Counter(
         "src/lib.rs:pub const fn confidential_destination_count(&self) -> usize {": 1,
         "src/lib.rs:pub fn encode_request(": 1,
         "src/lib.rs:pub fn into_blinded_ordinary_wallet_pset<R, P>(": 1,
+        "src/lib.rs:pub fn into_finalized_ordinary_wallet_transaction<R, P, S>(": 1,
         "src/lib.rs:pub fn decode_request(": 1,
         "src/reader.rs:pub(crate) struct Reader<'frame> {": 1,
         "src/reader.rs:pub(crate) const fn new(bytes: &'frame [u8]) -> Self {": 1,
@@ -324,8 +359,11 @@ EXPECTED_EXPLICIT_FEE_ZEROIZE_SHA256 = (
 EXPECTED_PLAN_FEE_LIFECYCLE_SHA256 = (
     "6b924e0a631c43ce58865c294d2d6810a13b94a9b43922257d2923a4ec58e100"
 )
-EXPECTED_PREPARED_COMPOSITION_SHA256 = (
+EXPECTED_PREPARED_BLINDED_COMPOSITION_SHA256 = (
     "8d141ae45aa76907a9056f905fc179a453af858c215364994e881f5e34ffc874"
+)
+EXPECTED_PREPARED_FINALIZED_COMPOSITION_SHA256 = (
+    "60bc9ae07ecbe1e09764d6dd62bb0f1ff1beb8af92bb7eb8a09367b89a65f26d"
 )
 EXPECTED_ERROR_ENUM_SHA256 = (
     "96fc6b799065fde8183fe3da031cee193771951fcf8082883bbede9c1ecc7c28"
@@ -333,9 +371,9 @@ EXPECTED_ERROR_ENUM_SHA256 = (
 EXPECTED_ERROR_BEHAVIOR_SHA256 = (
     "952c40948e8f87eac4bea42cb9ec93e2ba853ed8ae58b1062926134ed7c74d73"
 )
-EXPECTED_PUBLIC_SIGNATURE_COUNT = 26
+EXPECTED_PUBLIC_SIGNATURE_COUNT = 27
 EXPECTED_PUBLIC_SIGNATURES_SHA256 = (
-    "b19af4dce86d963bbeada2fc10a7ffc263098659d6cdc1c80d6cd53716212930"
+    "3398688860aaeeabc0891e95391b3b1faa62fe547af46878bf118e9b70ee2c98"
 )
 EXPECTED_TRAIT_IMPL_COUNT = 42
 EXPECTED_TRAIT_IMPLS_SHA256 = (
@@ -347,24 +385,31 @@ EXPECTED_MODULE_DECLARATIONS = (
     "src/lib.rs:mod writer;",
     "src/lib.rs:#[cfg(test)]\nmod tests;",
 )
-EXPECTED_OUTER_ATTRIBUTE_COUNT = 63
+EXPECTED_OUTER_ATTRIBUTE_COUNT = 64
 EXPECTED_OUTER_ATTRIBUTES_SHA256 = (
-    "73c98d6e7622623c4902c65b239e1a8990307a354ad2a6752027ee362c340cf0"
+    "dc2df62c71bf9dabffba2cf9a184ddef53ff14d68454f9e6308bf5a6bcb53cb1"
 )
-EXPECTED_PUBLIC_ITEM_ATTRIBUTE_COUNT = 35
+EXPECTED_PUBLIC_ITEM_ATTRIBUTE_COUNT = 36
 EXPECTED_PUBLIC_ITEM_ATTRIBUTES_SHA256 = (
-    "3ffe10fac2a6a4727c97698dfc4d1b42dc04677e59275d76624084ab2ed3f47f"
+    "5b116ba89df3e3b7dd4dea8a2a9d397dd3ba0bdd626ff2fb2b0ddf8a33665bed"
 )
-EXPECTED_TOKEN_ATTRIBUTE_COUNT = 65
+EXPECTED_TOKEN_ATTRIBUTE_COUNT = 66
 EXPECTED_TOKEN_ATTRIBUTES_SHA256 = (
-    "d29e2f34b566db5e59f3b9e723f3e5c72e729fe7efdbedff6bb28a838c947b18"
+    "49b2b3c267e54808edd692170cfabafb5cf9e086226f084dda266b20540d5020"
 )
 EXPECTED_COMPILED_SOURCE_FILES = tuple(sorted(PRODUCTION_FILES))
-EXPECTED_ORDINARY_PSET_IMPORT = (
-    "use wasabi_liquid_native_ordinary_pset::{BlindedOrdinaryPset, ConfidentialOutput, ExplicitFee};"
-)
+EXPECTED_ORDINARY_PSET_IMPORT = """use wasabi_liquid_native_ordinary_pset::{
+    BlindedOrdinaryPset, ConfidentialOutput, ExplicitFee, FinalizedOrdinaryTransaction,
+    OrdinaryP2wpkhSigner,
+};"""
 EXPECTED_ORDINARY_PSET_ITEMS = Counter(
-    {"BlindedOrdinaryPset": 2, "ConfidentialOutput": 6, "ExplicitFee": 9}
+    {
+        "BlindedOrdinaryPset": 2,
+        "ConfidentialOutput": 6,
+        "ExplicitFee": 9,
+        "FinalizedOrdinaryTransaction": 2,
+        "OrdinaryP2wpkhSigner": 2,
+    }
 )
 EXPECTED_ORDINARY_PSET_ASSOCIATED_CALLS = Counter(
     {"ConfidentialOutput::from_address": 2, "ExplicitFee::new": 2}
@@ -384,8 +429,8 @@ EXPECTED_DEPENDENCY_USES = {
             "use elements :: secp256k1_zkp :: rand :: { CryptoRng , RngCore } ;": 1,
             "use elements :: { AssetId , OutPoint , Txid } ;": 1,
             "use wasabi_liquid_native_address :: { ConfidentialLiquidAddress , LiquidAddressProfile } ;": 1,
-            "use wasabi_liquid_native_ordinary_pset :: { BlindedOrdinaryPset , ConfidentialOutput , ExplicitFee } ;": 1,
-            "use wasabi_liquid_native_ordinary_wallet_pset :: { OrdinaryWalletPsetError , build_blinded_ordinary_wallet_pset , } ;": 1,
+            "use wasabi_liquid_native_ordinary_pset :: { BlindedOrdinaryPset , ConfidentialOutput , ExplicitFee , FinalizedOrdinaryTransaction , OrdinaryP2wpkhSigner , } ;": 1,
+            "use wasabi_liquid_native_ordinary_wallet_pset :: { OrdinaryWalletPsetError , OrdinaryWalletTransactionFailure , build_blinded_ordinary_wallet_pset , build_sign_and_finalize_ordinary_wallet_transaction , } ;": 1,
             "use wasabi_liquid_native_wallet_facts :: { BorrowedSelectedOutput , DescriptorCatalog , DescriptorNetwork , SelectedOutputBatch , SelectedOutputOpeningProvider , prepare_selected_owned_inputs , } ;": 1,
             "use zeroize :: Zeroize ;": 1,
         }
@@ -399,23 +444,27 @@ EXPECTED_DEPENDENCY_ITEMS = Counter(
         "AssetId": 10,
         "BlindedOrdinaryPset": 2,
         "BorrowedSelectedOutput": 3,
-        "CryptoRng": 2,
+        "CryptoRng": 3,
         "ConfidentialLiquidAddress": 3,
         "ConfidentialOutput": 6,
         "DescriptorCatalog": 4,
         "DescriptorNetwork": 4,
         "ExplicitFee": 9,
+        "FinalizedOrdinaryTransaction": 2,
         "LiquidAddressProfile": 4,
         "OutPoint": 4,
         "OrdinaryWalletPsetError": 4,
-        "RngCore": 2,
+        "OrdinaryP2wpkhSigner": 2,
+        "OrdinaryWalletTransactionFailure": 2,
+        "RngCore": 3,
         "Secp256k1": 2,
         "SelectedOutputBatch": 5,
-        "SelectedOutputOpeningProvider": 2,
+        "SelectedOutputOpeningProvider": 3,
         "Txid": 3,
         "Zeroize": 3,
         "prepare_selected_owned_inputs": 2,
         "build_blinded_ordinary_wallet_pset": 2,
+        "build_sign_and_finalize_ordinary_wallet_transaction": 2,
     }
 )
 EXPECTED_DEPENDENCY_ASSOCIATED_REFERENCES = Counter(
@@ -435,9 +484,9 @@ EXPECTED_DEPENDENCY_ASSOCIATED_REFERENCES = Counter(
         "Txid::from_byte_array": 2,
     }
 )
-EXPECTED_MEMBER_REFERENCE_COUNT = 692
+EXPECTED_MEMBER_REFERENCE_COUNT = 701
 EXPECTED_MEMBER_REFERENCES_SHA256 = (
-    "21c4e9f7e70835631e78ae0310a33cf69c68dac9d27e45b0bd6702dfd2885c16"
+    "94f854a679543726993425cc3997e9520ba50e7bbb92629c674ff610b0ab83ec"
 )
 FUNCTION_LIKE_MACRO = re.compile(
     r"(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)\s*!\s*[({\[]"
@@ -457,8 +506,7 @@ FORBIDDEN = re.compile(
 FORBIDDEN_ORDINARY_PSET_API = re.compile(
     r"\b(?:prepare_ordinary_pset|SpendableInput|PreparedOrdinaryPset|"
     r"PsetConstructionError|OrdinaryPsetBlindingError|"
-    r"OrdinaryP2wpkhSigner|SignedOrdinaryPset|OrdinarySigningFailure|"
-    r"FinalizedOrdinaryTransaction|PartiallySignedTransaction|"
+    r"SignedOrdinaryPset|OrdinarySigningFailure|PartiallySignedTransaction|"
     r"sign_and_finalize|serialize_for_broadcast|serialize_sensitive|as_pset|blind)\b"
 )
 FORBIDDEN_WALLET_FACTS_API = re.compile(
@@ -966,7 +1014,8 @@ def validate_dependency_authority_surface(source: str) -> None:
         reject("ordinary-wallet plan ordinary-pset import boundary changed")
     ordinary_pset_items = Counter(
         re.findall(
-            r"\b(?:BlindedOrdinaryPset|ConfidentialOutput|ExplicitFee)\b",
+            r"\b(?:BlindedOrdinaryPset|ConfidentialOutput|ExplicitFee|"
+            r"FinalizedOrdinaryTransaction|OrdinaryP2wpkhSigner)\b",
             lexical_source,
         )
     )
@@ -1262,12 +1311,6 @@ def validate_runtime_authority_sources_and_edges() -> None:
             "ordinary-wallet plan runtime-authority source inventory changed; "
             f"{PIN_REVIEW_BOUNDARY}"
         )
-    if set(authority_sources).intersection(NOT_CURRENT_WLPQ_RUNTIME_AUTHORITY):
-        reject(
-            "ordinary-wallet plan excluded runtime-authority source became reachable; "
-            f"{PIN_REVIEW_BOUNDARY}"
-        )
-
     allowed_callers = set(authority_sources) | {
         f"crates/ordinary-wallet-plan/{relative}" for relative in PRODUCTION_FILES
     }
@@ -1370,6 +1413,36 @@ def validate_authority_regions() -> None:
             "impl Zeroize for ExplicitFee",
             "ordinary pset explicit fee zeroize",
         ),
+        "ordinary pset finalized impl": authority_item(
+            ordinary_pset_signing,
+            "impl FinalizedOrdinaryTransaction",
+            "ordinary pset finalized impl",
+        ),
+        "ordinary pset finalized struct": authority_item(
+            ordinary_pset_signing,
+            "pub struct FinalizedOrdinaryTransaction",
+            "ordinary pset finalized struct",
+        ),
+        "ordinary pset sign and finalize": authority_item(
+            ordinary_pset_signing,
+            "pub fn sign_and_finalize",
+            "ordinary pset sign and finalize",
+        ),
+        "ordinary pset signer trait": authority_item(
+            ordinary_pset_signing,
+            "pub trait OrdinaryP2wpkhSigner",
+            "ordinary pset signer trait",
+        ),
+        "ordinary pset signing failure impl": authority_item(
+            ordinary_pset_signing,
+            "impl OrdinarySigningFailure",
+            "ordinary pset signing failure impl",
+        ),
+        "ordinary pset signing failure struct": authority_item(
+            ordinary_pset_signing,
+            "pub struct OrdinarySigningFailure",
+            "ordinary pset signing failure struct",
+        ),
         "ordinary wallet pset builder": authority_item(
             ordinary_wallet_pset,
             "pub fn build_blinded_ordinary_wallet_pset",
@@ -1379,6 +1452,26 @@ def validate_authority_regions() -> None:
             ordinary_wallet_pset,
             "pub enum OrdinaryWalletPsetError",
             "ordinary wallet pset error",
+        ),
+        "ordinary wallet transaction builder": authority_item(
+            ordinary_wallet_pset,
+            "pub fn build_sign_and_finalize_ordinary_wallet_transaction",
+            "ordinary wallet transaction builder",
+        ),
+        "ordinary wallet transaction failure impl": authority_item(
+            ordinary_wallet_pset,
+            "impl OrdinaryWalletTransactionFailure",
+            "ordinary wallet transaction failure impl",
+        ),
+        "ordinary wallet transaction failure struct": authority_item(
+            ordinary_wallet_pset,
+            "pub struct OrdinaryWalletTransactionFailure",
+            "ordinary wallet transaction failure struct",
+        ),
+        "ordinary wallet transaction reason": authority_item(
+            ordinary_wallet_pset,
+            "pub enum OrdinaryWalletTransactionReason",
+            "ordinary wallet transaction reason",
         ),
         "output opening opened output impl": authority_item(
             output_opening,
@@ -1457,6 +1550,12 @@ def validate_authority_regions() -> None:
         "DescriptorCatalog": inherent_method_inventory(wallet_facts, "DescriptorCatalog"),
         "ExplicitFee": inherent_method_inventory(ordinary_pset, "ExplicitFee"),
         "LiquidAddressProfile": inherent_method_inventory(address, "LiquidAddressProfile"),
+        "FinalizedOrdinaryTransaction": inherent_method_inventory(
+            ordinary_pset_signing, "FinalizedOrdinaryTransaction"
+        ),
+        "OrdinaryWalletTransactionFailure": inherent_method_inventory(
+            ordinary_wallet_pset, "OrdinaryWalletTransactionFailure"
+        ),
         "ParsedLiquidAddress": inherent_method_inventory(address, "ParsedLiquidAddress"),
         "SelectedOutputBatch": inherent_method_inventory(wallet_facts, "SelectedOutputBatch"),
     }
@@ -1487,6 +1586,11 @@ def validate_with_compiled_source_files(compiled_files: tuple[str, ...]) -> None
         != EXPECTED_CONFORMANCE_TEST_SHA256
     ):
         reject("ordinary-wallet plan conformance test source changed")
+    if (
+        sha256_bytes((CRATE / "tests/preparation.rs").read_bytes())
+        != EXPECTED_PREPARATION_TEST_SHA256
+    ):
+        reject("ordinary-wallet plan integration test source changed")
 
     validate_manifest_targets()
 
@@ -1609,6 +1713,8 @@ def validate_with_compiled_source_files(compiled_files: tuple[str, ...]) -> None
         reject("ordinary-wallet plan provider-free preparation call manifest mismatch")
     if source.count("build_blinded_ordinary_wallet_pset(") != 1:
         reject("ordinary-wallet plan consuming composition call manifest mismatch")
+    if source.count("build_sign_and_finalize_ordinary_wallet_transaction(") != 1:
+        reject("ordinary-wallet plan finalized composition call manifest mismatch")
     if source.count("SelectedOutputBatch::new(") != 1:
         reject("ordinary-wallet plan selected-batch call manifest mismatch")
     if public_api(source) != PUBLIC_API:
@@ -1667,13 +1773,26 @@ def validate_with_compiled_source_files(compiled_files: tuple[str, ...]) -> None
         reject("ordinary-wallet plan staged/prepared fee lifecycle changed")
     if ".take()" in fee_lifecycle or "Option<ExplicitFee>" in fee_lifecycle:
         reject("ordinary-wallet plan fee cleanup may not rely on Option take")
-    prepared_composition = braced_item(
+    prepared_blinded_composition = braced_item(
         lib_source,
         "pub fn into_blinded_ordinary_wallet_pset<R, P>(",
-        "prepared composition",
+        "prepared blinded composition",
     )
-    if sha256_text(prepared_composition) != EXPECTED_PREPARED_COMPOSITION_SHA256:
-        reject("ordinary-wallet plan exact consuming composition transfer changed")
+    if (
+        sha256_text(prepared_blinded_composition)
+        != EXPECTED_PREPARED_BLINDED_COMPOSITION_SHA256
+    ):
+        reject("ordinary-wallet plan exact consuming blinded transfer changed")
+    prepared_finalized_composition = braced_item(
+        lib_source,
+        "pub fn into_finalized_ordinary_wallet_transaction<R, P, S>(",
+        "prepared finalized composition",
+    )
+    if (
+        sha256_text(prepared_finalized_composition)
+        != EXPECTED_PREPARED_FINALIZED_COMPOSITION_SHA256
+    ):
+        reject("ordinary-wallet plan exact consuming finalized transfer changed")
 
     context = re.search(
         r"fn reviewed_context\(.*?\n\}\n\nfn encode_view",

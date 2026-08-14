@@ -63,6 +63,18 @@ def replace_once(root: Path, relative: str, old: str, new: str) -> None:
     path.write_text(text.replace(old, new, 1))
 
 
+def replace_exact_count(
+    root: Path, relative: str, old: str, new: str, expected_count: int
+) -> None:
+    path = root / relative
+    text = path.read_text()
+    if text.count(old) != expected_count:
+        raise AssertionError(
+            f"mutation target mismatch: {relative}: expected {expected_count}: {old}"
+        )
+    path.write_text(text.replace(old, new))
+
+
 def add_ninth_error(root: Path) -> None:
     relative = "crates/ordinary-wallet-plan/src/lib.rs"
     replace_once(
@@ -154,10 +166,8 @@ def add_ordinary_pset_capability(root: Path, item: str, source: str) -> None:
     replace_once(
         root,
         "crates/ordinary-wallet-plan/src/lib.rs",
-        "use wasabi_liquid_native_ordinary_pset::{BlindedOrdinaryPset, ConfidentialOutput, ExplicitFee};",
-        "use wasabi_liquid_native_ordinary_pset::{"
-        f"BlindedOrdinaryPset, ConfidentialOutput, ExplicitFee, {item}"
-        "};",
+        "    OrdinaryP2wpkhSigner,\n};",
+        f"    OrdinaryP2wpkhSigner, {item},\n}};",
     )
     append_lib(root, source)
 
@@ -451,6 +461,18 @@ def main() -> None:
                 + "\n"
             ),
             contains="ordinary-wallet plan conformance test source changed",
+        )
+        mutate_compiling(
+            scratch,
+            "finalized-integration-test-renamed",
+            lambda root: replace_once(
+                root,
+                "crates/ordinary-wallet-plan/tests/preparation.rs",
+                "fn prepared_multiasset_request_consumes_into_a_finalized_transaction() {\n",
+                "fn renamed_multiasset_request_consumes_into_a_finalized_transaction() {\n",
+            ),
+            integration_test=True,
+            contains="ordinary-wallet plan integration test source changed",
         )
         for name, attribute in (
             ("conformance-module-cfg-disabled", "#[cfg(any())]"),
@@ -1278,9 +1300,9 @@ def main() -> None:
                 "\nfn leaked() { let _ = prepare_ordinary_pset; }\n",
             ),
             (
-                "pset-signing-trait",
-                "OrdinaryP2wpkhSigner",
-                "\nfn leaked<T: OrdinaryP2wpkhSigner>() {}\n",
+                "pset-signed-owner",
+                "SignedOrdinaryPset",
+                "\nfn leaked(_: Option<SignedOrdinaryPset>) {}\n",
             ),
             (
                 "pset-public-map-access",
@@ -1320,14 +1342,32 @@ def main() -> None:
                 replace_once(
                     root,
                     "crates/ordinary-wallet-plan/src/lib.rs",
-                    "    OrdinaryWalletPsetError, build_blinded_ordinary_wallet_pset,\n",
-                    "    OrdinaryWalletPsetError, build_blinded_ordinary_wallet_pset as compose_pset,\n",
+                    "    OrdinaryWalletPsetError, OrdinaryWalletTransactionFailure, build_blinded_ordinary_wallet_pset,\n",
+                    "    OrdinaryWalletPsetError, OrdinaryWalletTransactionFailure, build_blinded_ordinary_wallet_pset as compose_pset,\n",
                 ),
                 replace_once(
                     root,
                     "crates/ordinary-wallet-plan/src/lib.rs",
                     "        build_blinded_ordinary_wallet_pset(\n",
                     "        compose_pset(\n",
+                ),
+            ),
+        )
+        mutate_compiling(
+            scratch,
+            "finalized-composition-call-aliased",
+            lambda root: (
+                replace_once(
+                    root,
+                    "crates/ordinary-wallet-plan/src/lib.rs",
+                    "    build_sign_and_finalize_ordinary_wallet_transaction,\n",
+                    "    build_sign_and_finalize_ordinary_wallet_transaction as finalize_transaction,\n",
+                ),
+                replace_once(
+                    root,
+                    "crates/ordinary-wallet-plan/src/lib.rs",
+                    "        build_sign_and_finalize_ordinary_wallet_transaction(\n",
+                    "        finalize_transaction(\n",
                 ),
             ),
         )
@@ -1348,6 +1388,64 @@ def main() -> None:
                     "crates/ordinary-wallet-plan/src/lib.rs",
                     ") -> Result<BlindedOrdinaryPset, OrdinaryWalletPsetError>\n",
                     ") -> Result<ComposedOrdinaryWalletPset, OrdinaryWalletPsetError>\n",
+                ),
+            ),
+        )
+        mutate_compiling(
+            scratch,
+            "finalized-composition-return-type-aliased",
+            lambda root: (
+                replace_once(
+                    root,
+                    "crates/ordinary-wallet-plan/src/lib.rs",
+                    "/// A linear request that completed all public preparation.\n",
+                    "/// Test-only mutation replacing the exact finalized result type.\n"
+                    "pub type ComposedFinalizedTransaction = FinalizedOrdinaryTransaction;\n\n"
+                    "/// A linear request that completed all public preparation.\n",
+                ),
+                replace_once(
+                    root,
+                    "crates/ordinary-wallet-plan/src/lib.rs",
+                    ") -> Result<FinalizedOrdinaryTransaction, OrdinaryWalletTransactionFailure>\n",
+                    ") -> Result<ComposedFinalizedTransaction, OrdinaryWalletTransactionFailure>\n",
+                ),
+            ),
+        )
+        mutate_compiling(
+            scratch,
+            "signer-trait-extra-use",
+            lambda root: append_lib(
+                root,
+                "\n#[allow(dead_code)]\nfn leaked_signer_use<S: OrdinaryP2wpkhSigner>() {}\n",
+            ),
+        )
+        mutate_compiling(
+            scratch,
+            "direct-signing-bypasses-finalized-orchestration",
+            lambda root: append_lib(
+                root,
+                "\n#[allow(dead_code)]\n"
+                "fn leaked_direct_sign<S: OrdinaryP2wpkhSigner>(\n"
+                "    value: BlindedOrdinaryPset,\n"
+                "    signer: &mut S,\n"
+                ") {\n"
+                "    let _ = value.sign_and_finalize(&Secp256k1::new(), signer);\n"
+                "}\n",
+            ),
+        )
+        mutate_compiling(
+            scratch,
+            "raw-signing-key-capability",
+            lambda root: (
+                replace_once(
+                    root,
+                    "crates/ordinary-wallet-plan/src/lib.rs",
+                    "use elements::secp256k1_zkp::{All, Secp256k1};",
+                    "use elements::secp256k1_zkp::{All, Secp256k1, SecretKey};",
+                ),
+                append_lib(
+                    root,
+                    "\n#[allow(dead_code)]\nfn leaked_raw_key(_: Option<SecretKey>) {}\n",
                 ),
             ),
         )
@@ -1398,11 +1496,12 @@ def main() -> None:
                     "    SelectedOutputOpeningProvider, prepare_selected_owned_inputs,\n",
                     "    SelectedOutputOpeningProvider as OpeningProvider, prepare_selected_owned_inputs,\n",
                 ),
-                replace_once(
+                replace_exact_count(
                     root,
                     "crates/ordinary-wallet-plan/src/lib.rs",
                     "        P: SelectedOutputOpeningProvider + ?Sized,\n",
                     "        P: OpeningProvider + ?Sized,\n",
+                    2,
                 ),
             ),
         )
@@ -1669,6 +1768,31 @@ impl core::borrow::Borrow<[u8]> for EncodedOrdinaryWalletPlanRequest {
         )
         mutate(
             scratch,
+            "finalized-transfer-hook-before-fee-clear",
+            lambda root: replace_once(
+                root,
+                "crates/ordinary-wallet-plan/src/lib.rs",
+                "        let fee = self.fee.transfer();\n"
+                "        #[cfg(test)]\n"
+                "        maybe_panic_at(StagingPoint::PreparedFinalizationTransfer);\n",
+                "        #[cfg(test)]\n"
+                "        maybe_panic_at(StagingPoint::PreparedFinalizationTransfer);\n"
+                "        let fee = self.fee.transfer();\n",
+            ),
+        )
+        mutate_compiling(
+            scratch,
+            "signing-failure-drops-retry-capability",
+            lambda root: replace_once(
+                root,
+                "crates/ordinary-wallet-pset/src/lib.rs",
+                "            retryable_blinded: Some(Box::new(blinded)),",
+                "            retryable_blinded: { core::mem::drop(blinded); None },",
+            ),
+            contains="ordinary-wallet plan reviewed authority-critical dependency region changed",
+        )
+        mutate(
+            scratch,
             "blinded-pset-borrow-surface-expanded",
             lambda root: replace_once(
                 root,
@@ -1694,6 +1818,21 @@ impl core::borrow::Borrow<[u8]> for EncodedOrdinaryWalletPlanRequest {
                 "    pub const fn leaked_signing_surface(&self) {}\n\n",
             ),
             contains="ordinary-wallet plan authority-critical inherent method inventory changed",
+        )
+        mutate(
+            scratch,
+            "finalized-transaction-surface-expanded",
+            lambda root: replace_once(
+                root,
+                "crates/ordinary-pset/src/signing.rs",
+                "impl FinalizedOrdinaryTransaction {\n",
+                "impl FinalizedOrdinaryTransaction {\n"
+                "    /// Test-only mutation expanding finalized transaction access.\n"
+                "    pub fn leaked_serialization(&self) -> Vec<u8> {\n"
+                "        self.serialize_for_broadcast()\n"
+                "    }\n\n",
+            ),
+            contains="ordinary-wallet plan reviewed authority-critical dependency region changed",
         )
         mutate(
             scratch,

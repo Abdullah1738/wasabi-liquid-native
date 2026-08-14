@@ -1080,6 +1080,46 @@ fn prepared_composition_transfer_unwind_destroys_the_completed_owner() {
     assert_eq!(audit.prepared, 1);
     assert_eq!(audit.prepared_fee_transfer_clear, 1);
     assert_eq!(audit.prepared_fee, 1);
+
+    let selected = SelectedOutputBatch::new(&borrowed).unwrap();
+    let address =
+        ConfidentialLiquidAddress::parse(TESTNET_ADDRESS, LiquidAddressProfile::LiquidTestnet)
+            .unwrap();
+    let outputs = vec![ConfidentialOutput::from_address(asset, 9, &address).unwrap()];
+    let fee = PreparedFee {
+        value: ExplicitFee::new(asset, 1).unwrap(),
+    };
+    let prepared = assemble_prepared(
+        &catalog,
+        selected,
+        outputs,
+        fee,
+        ScopedU64(7),
+        ScopedArray(TESTNET_MANIFEST),
+        ScopedArray(TESTNET_PEGGED_ASSET),
+        ScopedUsize(1),
+        ScopedUsize(1),
+    )
+    .unwrap();
+
+    reset_drop_audit();
+    configure_panic(StagingPoint::PreparedFinalizationTransfer, 0);
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = prepared.into_finalized_ordinary_wallet_transaction(
+                &mut NeverOpeningProvider,
+                &mut NoRandomnessExpected,
+                &mut NeverSigner,
+            );
+        }))
+        .is_err()
+    );
+    clear_panic();
+    let audit = DROP_AUDIT.with(|audit| *audit.borrow());
+    assert!(audit.all_zeroized);
+    assert_eq!(audit.prepared, 1);
+    assert_eq!(audit.prepared_fee_transfer_clear, 1);
+    assert_eq!(audit.prepared_fee, 1);
 }
 
 struct NeverOpeningProvider;
@@ -1091,6 +1131,24 @@ impl SelectedOutputOpeningProvider for NeverOpeningProvider {
         _: &elements::TxOut,
     ) -> Option<OpenedOutput> {
         panic!("prepared composition transfer invoked its provider")
+    }
+}
+
+struct NeverSigner;
+
+impl OrdinaryP2wpkhSigner for NeverSigner {
+    fn public_key(&mut self, _: usize, _: &OutPoint) -> Option<elements::bitcoin::PublicKey> {
+        panic!("prepared composition transfer invoked its signer")
+    }
+
+    fn sign_digest(
+        &mut self,
+        _: usize,
+        _: &OutPoint,
+        _: [u8; 32],
+        _: elements::EcdsaSighashType,
+    ) -> Option<elements::secp256k1_zkp::ecdsa::Signature> {
+        panic!("prepared composition transfer invoked its signer")
     }
 }
 

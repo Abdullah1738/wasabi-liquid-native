@@ -1364,22 +1364,42 @@ if [ "$plan_function_macro_count" -ne 9 ] || [ "$plan_test_thread_local_count" -
     echo "ordinary-wallet plan function-like macro surface is not the exact test-only hook" >&2
     exit 1
 fi
-if [ "$(printf '%s\n' "$plan_lexical_source" | grep -o 'wasabi_liquid_native_ordinary_pset' | awk 'END { print NR + 0 }')" -ne 1 ] ||
-    [ "$(printf '%s\n' "$plan_lexical_source" | grep -F -c 'use wasabi_liquid_native_ordinary_pset::{BlindedOrdinaryPset, ConfidentialOutput, ExplicitFee};')" -ne 1 ] ||
+plan_ordinary_pset_import="$(
+    sed -n '/^use wasabi_liquid_native_ordinary_pset::{/,/^};/p' crates/ordinary-wallet-plan/src/lib.rs
+)"
+expected_plan_ordinary_pset_import='use wasabi_liquid_native_ordinary_pset::{
+    BlindedOrdinaryPset, ConfidentialOutput, ExplicitFee, FinalizedOrdinaryTransaction,
+    OrdinaryP2wpkhSigner,
+};'
+plan_wallet_pset_import="$(
+    sed -n '/^use wasabi_liquid_native_ordinary_wallet_pset::{/,/^};/p' crates/ordinary-wallet-plan/src/lib.rs
+)"
+expected_plan_wallet_pset_import='use wasabi_liquid_native_ordinary_wallet_pset::{
+    OrdinaryWalletPsetError, OrdinaryWalletTransactionFailure, build_blinded_ordinary_wallet_pset,
+    build_sign_and_finalize_ordinary_wallet_transaction,
+};'
+if [ "$plan_ordinary_pset_import" != "$expected_plan_ordinary_pset_import" ] ||
+    [ "$plan_wallet_pset_import" != "$expected_plan_wallet_pset_import" ] ||
+    [ "$(printf '%s\n' "$plan_lexical_source" | grep -o 'wasabi_liquid_native_ordinary_pset' | awk 'END { print NR + 0 }')" -ne 1 ] ||
     [ "$(printf '%s\n' "$plan_lexical_source" | grep -o 'BlindedOrdinaryPset' | awk 'END { print NR + 0 }')" -ne 2 ] ||
     [ "$(printf '%s\n' "$plan_lexical_source" | grep -o 'ConfidentialOutput' | awk 'END { print NR + 0 }')" -ne 6 ] ||
     [ "$(printf '%s\n' "$plan_lexical_source" | grep -o 'ExplicitFee' | awk 'END { print NR + 0 }')" -ne 9 ] ||
+    [ "$(printf '%s\n' "$plan_lexical_source" | grep -o 'FinalizedOrdinaryTransaction' | awk 'END { print NR + 0 }')" -ne 2 ] ||
+    [ "$(printf '%s\n' "$plan_lexical_source" | grep -o 'OrdinaryP2wpkhSigner' | awk 'END { print NR + 0 }')" -ne 2 ] ||
+    [ "$(printf '%s\n' "$plan_lexical_source" | grep -o 'OrdinaryWalletTransactionFailure' | awk 'END { print NR + 0 }')" -ne 2 ] ||
+    [ "$(printf '%s\n' "$plan_lexical_source" | grep -o 'build_sign_and_finalize_ordinary_wallet_transaction' | awk 'END { print NR + 0 }')" -ne 2 ] ||
     [ "$(printf '%s\n' "$plan_lexical_source" | grep -F -c 'ConfidentialOutput::from_address')" -ne 2 ] ||
     [ "$(printf '%s\n' "$plan_lexical_source" | grep -F -c 'ExplicitFee::new')" -ne 2 ]; then
     echo "ordinary-wallet plan ordinary-pset exact API inventory changed" >&2
     exit 1
 fi
-if printf '%s\n' "$plan_lexical_source" | grep -En '(^|[^[:alnum:]_])(prepare_ordinary_pset|SpendableInput|PreparedOrdinaryPset|PsetConstructionError|OrdinaryPsetBlindingError|OrdinaryP2wpkhSigner|SignedOrdinaryPset|OrdinarySigningFailure|FinalizedOrdinaryTransaction|PartiallySignedTransaction|sign_and_finalize|serialize_for_broadcast|serialize_sensitive|as_pset|blind)([^[:alnum:]_]|$)'; then
+if printf '%s\n' "$plan_lexical_source" | grep -En '(^|[^[:alnum:]_])(prepare_ordinary_pset|SpendableInput|PreparedOrdinaryPset|PsetConstructionError|OrdinaryPsetBlindingError|SignedOrdinaryPset|OrdinarySigningFailure|PartiallySignedTransaction|sign_and_finalize|serialize_for_broadcast|serialize_sensitive|as_pset|blind)([^[:alnum:]_]|$)'; then
     echo "ordinary-wallet plan ordinary-pset capability escaped its boundary" >&2
     exit 1
 fi
 for required_call in \
     'build_blinded_ordinary_wallet_pset(' \
+    'build_sign_and_finalize_ordinary_wallet_transaction(' \
     'prepare_selected_owned_inputs(' \
     'SelectedOutputBatch::new(' \
     'ConfidentialOutput::from_address(' \

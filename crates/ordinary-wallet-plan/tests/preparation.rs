@@ -1,24 +1,33 @@
+use std::collections::{HashMap, VecDeque};
 use std::str::FromStr;
 
+use elements::bitcoin::PublicKey as BitcoinPublicKey;
 use elements::confidential::{Asset, AssetBlindingFactor, Nonce, Value, ValueBlindingFactor};
 use elements::encode::serialize;
 use elements::hashes::sha256;
-use elements::secp256k1_zkp::{All, Secp256k1, SecretKey};
+use elements::secp256k1_zkp::{All, Message, Secp256k1, SecretKey, ecdsa};
 use elements::{
-    Address, AddressParams, AssetId, LockTime, OutPoint, Script, Sequence, Transaction, TxIn,
-    TxOut, TxOutSecrets, TxOutWitness,
+    Address, AddressParams, AssetId, EcdsaSighashType, LockTime, OutPoint, Script, Sequence,
+    Transaction, TxIn, TxOut, TxOutSecrets, TxOutWitness,
 };
 use miniscript::Descriptor;
+use miniscript::bitcoin::NetworkKind;
+use miniscript::bitcoin::bip32::{ChildNumber, DerivationPath, Xpriv, Xpub};
 use miniscript::descriptor::DescriptorPublicKey;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use sha2::{Digest, Sha256};
+use wasabi_liquid_native_ordinary_pset::{
+    FinalizedOrdinaryTransaction, OrdinaryP2wpkhSigner, OrdinarySigningError,
+};
 use wasabi_liquid_native_ordinary_wallet_plan::{
     OrdinaryWalletPlanDestinationRef, OrdinaryWalletPlanRequestRef, OrdinaryWalletPlanSelectedRef,
     OrdinaryWalletPlanWireError, PubliclyPreparedOrdinaryWalletPlanRequest, decode_request,
     encode_request,
 };
-use wasabi_liquid_native_ordinary_wallet_pset::OrdinaryWalletPsetError;
+use wasabi_liquid_native_ordinary_wallet_pset::{
+    OrdinaryWalletPsetError, OrdinaryWalletTransactionFailure, OrdinaryWalletTransactionReason,
+};
 use wasabi_liquid_native_output_opening::{OpenedOutput, open_confidential_output};
 use wasabi_liquid_native_wallet_facts::{
     DescriptorCatalog, DescriptorNetwork, SelectedOutputOpeningProvider,
@@ -108,6 +117,157 @@ fn prepared_request_consumes_into_a_blinded_pset() {
     assert_eq!(blinded.confidential_output_indices(), &[0]);
     assert_eq!(blinded.fee_output_index(), 1);
     assert!(blinded.as_pset().outputs()[1].script_pubkey.is_empty());
+}
+
+#[test]
+fn prepared_multiasset_request_consumes_into_a_finalized_transaction() {
+    let fixture = signable_multiasset_fixture();
+    let prepared = prepare_signable_multiasset(&fixture);
+    let mut provider = FixtureOpeningProvider::opening(fixture.slip77);
+    let mut rng =
+        ScriptedLayoutRng::new(b"ordinary wallet plan finalized multiasset layout", [0, 0]);
+    let mut signer = FixtureSigner::accepting(&fixture);
+
+    let finalized = expect_finalized(prepared.into_finalized_ordinary_wallet_transaction(
+        &mut provider,
+        &mut rng,
+        &mut signer,
+    ));
+
+    assert_eq!(provider.calls(), 2);
+    assert_eq!(provider.opened(), 2);
+    assert_eq!(rng.layout_draws_consumed, 2);
+    assert_all_public_keys_precede_signatures(&signer.events);
+    assert_finalized_transaction_valid(&finalized, &fixture.funding.transaction);
+}
+
+#[test]
+fn finalized_signer_refusal_returns_the_exact_blinded_retry_capability() {
+    let fixture = signable_multiasset_fixture();
+    let seed = synthetic_material(b"ordinary wallet plan finalized retry layout");
+
+    let baseline_prepared = prepare_signable_multiasset(&fixture);
+    let mut baseline_provider = FixtureOpeningProvider::opening(fixture.slip77);
+    let baseline = baseline_prepared
+        .into_blinded_ordinary_wallet_pset(&mut baseline_provider, &mut StdRng::from_seed(seed))
+        .unwrap();
+    let baseline_bytes = baseline.serialize_sensitive();
+    drop(baseline);
+
+    let prepared = prepare_signable_multiasset(&fixture);
+    let mut provider = FixtureOpeningProvider::opening(fixture.slip77);
+    let mut signer = FixtureSigner::refusing_signature(&fixture, 1);
+    let failure = expect_transaction_failure(prepared.into_finalized_ordinary_wallet_transaction(
+        &mut provider,
+        &mut StdRng::from_seed(seed),
+        &mut signer,
+    ));
+
+    assert_eq!(
+        failure.reason(),
+        &OrdinaryWalletTransactionReason::Signing(OrdinarySigningError::SignatureUnavailable)
+    );
+    assert_eq!(provider.calls(), 2);
+    assert_eq!(signer.signature_request_count(), 2);
+    let retryable = failure.into_retryable_blinded().unwrap();
+    assert_eq!(retryable.serialize_sensitive(), baseline_bytes);
+
+    let provider_calls_before_retry = provider.calls();
+    let mut retry_signer = FixtureSigner::accepting(&fixture);
+    let signed = match retryable.sign_and_finalize(&Secp256k1::new(), &mut retry_signer) {
+        Ok(signed) => signed,
+        Err(_) => panic!("retry unexpectedly failed"),
+    };
+    assert_eq!(provider.calls(), provider_calls_before_retry);
+    assert!(matches!(
+        retry_signer.events.first(),
+        Some(SignerEvent::PublicKey(0, _))
+    ));
+    assert_finalized_transaction_valid(
+        &signed.into_finalized_transaction(),
+        &fixture.funding.transaction,
+    );
+}
+
+#[test]
+fn finalized_preparation_and_signing_failures_preserve_the_existing_boundary() {
+    let fixture = signable_multiasset_fixture();
+    let prepared = prepare_signable_multiasset(&fixture);
+    let mut provider = FixtureOpeningProvider::refusing_at(fixture.slip77, 1);
+    let mut signer = FixtureSigner::accepting(&fixture);
+    let failure = expect_transaction_failure(prepared.into_finalized_ordinary_wallet_transaction(
+        &mut provider,
+        &mut StdRng::from_seed(synthetic_material(
+            b"ordinary wallet plan finalized provider refusal",
+        )),
+        &mut signer,
+    ));
+    assert_eq!(
+        failure.reason(),
+        &OrdinaryWalletTransactionReason::Preparation(
+            OrdinaryWalletPsetError::InvalidSelectedOutput
+        )
+    );
+    assert_eq!(provider.calls(), 2);
+    assert!(signer.events.is_empty());
+    assert!(failure.into_retryable_blinded().is_none());
+
+    let prepared = prepare_signable_multiasset(&fixture);
+    let mut provider = FixtureOpeningProvider::opening(fixture.slip77);
+    let mut signer = FixtureSigner::invalid_signature(&fixture, 0);
+    let failure = expect_transaction_failure(prepared.into_finalized_ordinary_wallet_transaction(
+        &mut provider,
+        &mut StdRng::from_seed(synthetic_material(
+            b"ordinary wallet plan finalized invalid signature",
+        )),
+        &mut signer,
+    ));
+    assert_eq!(
+        failure.reason(),
+        &OrdinaryWalletTransactionReason::Signing(OrdinarySigningError::InvalidSignature)
+    );
+    assert_eq!(provider.calls(), 2);
+    assert!(failure.into_retryable_blinded().is_some());
+}
+
+#[test]
+fn finalized_provider_and_signer_panics_unwind_after_owned_transfer() {
+    let fixture = signable_multiasset_fixture();
+    let prepared = prepare_signable_multiasset(&fixture);
+    let mut provider = FixtureOpeningProvider::panicking(fixture.slip77);
+    let mut signer = FixtureSigner::accepting(&fixture);
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = prepared.into_finalized_ordinary_wallet_transaction(
+                &mut provider,
+                &mut StdRng::from_seed(synthetic_material(
+                    b"ordinary wallet plan finalized provider panic",
+                )),
+                &mut signer,
+            );
+        }))
+        .is_err()
+    );
+    assert_eq!(provider.calls(), 1);
+    assert!(signer.events.is_empty());
+
+    let prepared = prepare_signable_multiasset(&fixture);
+    let mut provider = FixtureOpeningProvider::opening(fixture.slip77);
+    let mut signer = FixtureSigner::panicking_signature(&fixture, 0);
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = prepared.into_finalized_ordinary_wallet_transaction(
+                &mut provider,
+                &mut StdRng::from_seed(synthetic_material(
+                    b"ordinary wallet plan finalized signer panic",
+                )),
+                &mut signer,
+            );
+        }))
+        .is_err()
+    );
+    assert_eq!(provider.calls(), 2);
+    assert_eq!(signer.signature_request_count(), 1);
 }
 
 #[test]
@@ -586,6 +746,417 @@ struct FundingFixture {
     previous_bytes: Vec<u8>,
     asset: AssetId,
 }
+
+struct SignableMultiassetFixture {
+    catalog: DescriptorCatalog,
+    funding: FundingFixture,
+    second_asset: AssetId,
+    slip77: [u8; 32],
+    signing_keys: [SecretKey; 2],
+}
+
+fn signable_multiasset_fixture() -> SignableMultiassetFixture {
+    let mut seed = synthetic_material(b"ordinary wallet plan signing descriptor seed");
+    let mut root = Xpriv::new_master(NetworkKind::Test, &seed).unwrap();
+    seed.fill(0);
+    let descriptor_secp = miniscript::bitcoin::secp256k1::Secp256k1::new();
+    let public = Xpub::from_priv(&descriptor_secp, &root);
+    let descriptor = format!("elwpkh({public}/<0;1>/*)");
+    let catalog = DescriptorCatalog::derive(&descriptor, DescriptorNetwork::Test, 1).unwrap();
+    let mut external = root
+        .derive_priv(
+            &descriptor_secp,
+            &DerivationPath::from(vec![
+                ChildNumber::Normal { index: 0 },
+                ChildNumber::Normal { index: 0 },
+            ]),
+        )
+        .unwrap();
+    let mut internal = root
+        .derive_priv(
+            &descriptor_secp,
+            &DerivationPath::from(vec![
+                ChildNumber::Normal { index: 1 },
+                ChildNumber::Normal { index: 1 },
+            ]),
+        )
+        .unwrap();
+    let signing_keys = [
+        SecretKey::from_slice(&external.private_key.secret_bytes()).unwrap(),
+        SecretKey::from_slice(&internal.private_key.secret_bytes()).unwrap(),
+    ];
+    external.private_key.non_secure_erase();
+    internal.private_key.non_secure_erase();
+    root.private_key.non_secure_erase();
+
+    let secp = Secp256k1::new();
+    let scripts = signing_keys.each_ref().map(|key| {
+        let public_key = BitcoinPublicKey::new(key.public_key(&secp));
+        Script::new_v0_wpkh(&public_key.wpubkey_hash().unwrap())
+    });
+    let slip77 = synthetic_material(b"ordinary wallet plan signing SLIP77 material");
+    let fee_asset = AssetId::LIQUIDTESTNET_BTC;
+    let second_asset = AssetId::from_byte_array([0x82; 32]);
+    let previous = Transaction {
+        version: 2,
+        lock_time: LockTime::ZERO,
+        input: vec![],
+        output: vec![
+            explicit_output(fee_asset, 1_000, Script::from(vec![0x51])),
+            explicit_output(second_asset, 2_000, Script::from(vec![0x51])),
+        ],
+    };
+    let spent_secrets = [
+        TxOutSecrets::new(
+            fee_asset,
+            AssetBlindingFactor::zero(),
+            1_000,
+            ValueBlindingFactor::zero(),
+        ),
+        TxOutSecrets::new(
+            second_asset,
+            AssetBlindingFactor::zero(),
+            2_000,
+            ValueBlindingFactor::zero(),
+        ),
+    ];
+    let external_key = slip77_key(&slip77, scripts[0].as_bytes());
+    let internal_key = slip77_key(&slip77, scripts[1].as_bytes());
+    let external_address = Address::from_script(
+        &scripts[0],
+        Some(external_key.public_key(&secp)),
+        &AddressParams::LIQUID_TESTNET,
+    )
+    .unwrap();
+    let mut rng = StdRng::from_seed(synthetic_material(
+        b"ordinary wallet plan signing funding randomness",
+    ));
+    let (first_output, first_abf, first_vbf, _) = TxOut::new_not_last_confidential(
+        &mut rng,
+        &secp,
+        900,
+        &external_address,
+        fee_asset,
+        &spent_secrets,
+    )
+    .unwrap();
+    let first_secrets = TxOutSecrets::new(fee_asset, first_abf, 900, first_vbf);
+    let fee_secrets = TxOutSecrets::new(
+        fee_asset,
+        AssetBlindingFactor::zero(),
+        100,
+        ValueBlindingFactor::zero(),
+    );
+    let (second_output, _, _, _) = TxOut::new_last_confidential(
+        &mut rng,
+        &secp,
+        2_000,
+        second_asset,
+        scripts[1].clone(),
+        internal_key.public_key(&secp),
+        &spent_secrets,
+        &[&first_secrets, &fee_secrets],
+    )
+    .unwrap();
+    let transaction = Transaction {
+        version: 2,
+        lock_time: LockTime::ZERO,
+        input: vec![
+            transaction_input(OutPoint::new(previous.txid(), 0)),
+            transaction_input(OutPoint::new(previous.txid(), 1)),
+        ],
+        output: vec![first_output, second_output, TxOut::new_fee(100, fee_asset)],
+    };
+    let funding = FundingFixture {
+        transaction_bytes: serialize(&transaction),
+        previous_bytes: serialize(&previous),
+        transaction,
+        previous,
+        asset: fee_asset,
+    };
+
+    SignableMultiassetFixture {
+        catalog,
+        funding,
+        second_asset,
+        slip77,
+        signing_keys,
+    }
+}
+
+fn prepare_signable_multiasset<'catalog>(
+    fixture: &'catalog SignableMultiassetFixture,
+) -> PubliclyPreparedOrdinaryWalletPlanRequest<'catalog> {
+    let transaction_id = fixture.funding.transaction.txid().to_byte_array();
+    let fee_asset = fixture.funding.asset.to_byte_array();
+    let second_asset = fixture.second_asset.to_byte_array();
+    let previous_transactions = vec![fixture.funding.previous_bytes.clone()];
+    let selected = [
+        OrdinaryWalletPlanSelectedRef::new(
+            &transaction_id,
+            0,
+            &fee_asset,
+            900,
+            &fixture.funding.transaction_bytes,
+            &previous_transactions,
+        ),
+        OrdinaryWalletPlanSelectedRef::new(
+            &transaction_id,
+            1,
+            &second_asset,
+            2_000,
+            &fixture.funding.transaction_bytes,
+            &previous_transactions,
+        ),
+    ];
+    let destinations = [
+        OrdinaryWalletPlanDestinationRef::new(&fee_asset, 800, TESTNET_ADDRESS),
+        OrdinaryWalletPlanDestinationRef::new(&second_asset, 2_000, TESTNET_ADDRESS),
+    ];
+    let source_epoch = [0x71; 32];
+    let request = OrdinaryWalletPlanRequestRef::new(
+        &source_epoch,
+        31,
+        &TESTNET_MANIFEST,
+        &fee_asset,
+        &selected,
+        &destinations,
+        100,
+    );
+    let encoded = encode_request(&request).unwrap();
+    decode_request(encoded.as_bytes(), &source_epoch)
+        .unwrap()
+        .prepare(&fixture.catalog, &Secp256k1::new())
+        .unwrap()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SignerEvent {
+    PublicKey(usize, OutPoint),
+    Signature(usize, OutPoint),
+}
+
+#[derive(Clone, Copy)]
+enum SignatureBehavior {
+    Accept,
+    RefuseAt(usize),
+    InvalidAt(usize),
+    PanicAt(usize),
+}
+
+struct FixtureSigner {
+    keys: HashMap<OutPoint, SecretKey>,
+    behavior: SignatureBehavior,
+    events: Vec<SignerEvent>,
+}
+
+impl FixtureSigner {
+    fn accepting(fixture: &SignableMultiassetFixture) -> Self {
+        Self::new(fixture, SignatureBehavior::Accept)
+    }
+
+    fn refusing_signature(fixture: &SignableMultiassetFixture, request: usize) -> Self {
+        Self::new(fixture, SignatureBehavior::RefuseAt(request))
+    }
+
+    fn invalid_signature(fixture: &SignableMultiassetFixture, request: usize) -> Self {
+        Self::new(fixture, SignatureBehavior::InvalidAt(request))
+    }
+
+    fn panicking_signature(fixture: &SignableMultiassetFixture, request: usize) -> Self {
+        Self::new(fixture, SignatureBehavior::PanicAt(request))
+    }
+
+    fn new(fixture: &SignableMultiassetFixture, behavior: SignatureBehavior) -> Self {
+        Self {
+            keys: HashMap::from([
+                (
+                    OutPoint::new(fixture.funding.transaction.txid(), 0),
+                    fixture.signing_keys[0],
+                ),
+                (
+                    OutPoint::new(fixture.funding.transaction.txid(), 1),
+                    fixture.signing_keys[1],
+                ),
+            ]),
+            behavior,
+            events: Vec::new(),
+        }
+    }
+
+    fn signature_request_count(&self) -> usize {
+        self.events
+            .iter()
+            .filter(|event| matches!(event, SignerEvent::Signature(_, _)))
+            .count()
+    }
+}
+
+impl OrdinaryP2wpkhSigner for FixtureSigner {
+    fn public_key(&mut self, input_index: usize, outpoint: &OutPoint) -> Option<BitcoinPublicKey> {
+        self.events
+            .push(SignerEvent::PublicKey(input_index, *outpoint));
+        self.keys.get(outpoint).map(|key| {
+            let secp = Secp256k1::new();
+            BitcoinPublicKey::new(key.public_key(&secp))
+        })
+    }
+
+    fn sign_digest(
+        &mut self,
+        input_index: usize,
+        outpoint: &OutPoint,
+        digest: [u8; 32],
+        sighash_type: EcdsaSighashType,
+    ) -> Option<ecdsa::Signature> {
+        assert_eq!(sighash_type, EcdsaSighashType::AllPlusRangeproof);
+        let request = self.signature_request_count();
+        self.events
+            .push(SignerEvent::Signature(input_index, *outpoint));
+        match self.behavior {
+            SignatureBehavior::RefuseAt(index) if index == request => return None,
+            SignatureBehavior::PanicAt(index) if index == request => {
+                panic!("test-only external signer unwind")
+            }
+            _ => {}
+        }
+        let key = if matches!(self.behavior, SignatureBehavior::InvalidAt(index) if index == request)
+        {
+            SecretKey::from_slice(&[0x55; 32]).unwrap()
+        } else {
+            *self.keys.get(outpoint)?
+        };
+        Some(Secp256k1::new().sign_ecdsa(&Message::from_digest(digest), &key))
+    }
+}
+
+fn assert_all_public_keys_precede_signatures(events: &[SignerEvent]) {
+    assert_eq!(events.len(), 4);
+    for input_index in 0..2 {
+        assert!(matches!(
+            events[input_index],
+            SignerEvent::PublicKey(index, _) if index == input_index
+        ));
+        assert!(matches!(
+            events[2 + input_index],
+            SignerEvent::Signature(index, _) if index == input_index
+        ));
+    }
+}
+
+fn assert_finalized_transaction_valid(
+    finalized: &FinalizedOrdinaryTransaction,
+    funding_transaction: &Transaction,
+) {
+    let secp = Secp256k1::new();
+    let transaction = finalized.transaction();
+    assert_eq!(transaction.input.len(), 2);
+    assert_eq!(transaction.output.len(), 3);
+    for input in &transaction.input {
+        assert!(input.script_sig.is_empty());
+        assert_eq!(input.witness.script_witness.to_vec().len(), 2);
+    }
+    for output in &transaction.output[..2] {
+        assert!(output.asset.is_confidential());
+        assert!(output.value.is_confidential());
+        assert!(output.nonce.is_confidential());
+        assert!(!output.witness.rangeproof.is_empty());
+        assert!(!output.witness.surjection_proof.is_empty());
+    }
+    let fee = transaction.output.last().unwrap();
+    assert!(fee.script_pubkey.is_empty());
+    assert_eq!(fee.asset, Asset::Explicit(AssetId::LIQUIDTESTNET_BTC));
+    assert_eq!(fee.value, Value::Explicit(100));
+    let previous_outputs = transaction
+        .input
+        .iter()
+        .map(|input| {
+            assert_eq!(input.previous_output.txid, funding_transaction.txid());
+            funding_transaction.output[input.previous_output.vout as usize].clone()
+        })
+        .collect::<Vec<_>>();
+    transaction
+        .verify_tx_amt_proofs(&secp, &previous_outputs)
+        .unwrap();
+    assert_eq!(finalized.txid(), transaction.txid());
+    assert_eq!(finalized.wtxid(), transaction.wtxid());
+    let broadcast = finalized.serialize_for_broadcast();
+    let decoded: Transaction = elements::encode::deserialize(&broadcast).unwrap();
+    assert_eq!(decoded, *transaction);
+    assert!(
+        elements::encode::deserialize::<elements::pset::PartiallySignedTransaction>(&broadcast)
+            .is_err()
+    );
+}
+
+fn expect_finalized(
+    result: Result<FinalizedOrdinaryTransaction, OrdinaryWalletTransactionFailure>,
+) -> FinalizedOrdinaryTransaction {
+    match result {
+        Ok(finalized) => finalized,
+        Err(_) => panic!("ordinary wallet transaction unexpectedly failed"),
+    }
+}
+
+fn expect_transaction_failure(
+    result: Result<FinalizedOrdinaryTransaction, OrdinaryWalletTransactionFailure>,
+) -> OrdinaryWalletTransactionFailure {
+    match result {
+        Ok(_) => panic!("ordinary wallet transaction unexpectedly succeeded"),
+        Err(failure) => failure,
+    }
+}
+
+struct ScriptedLayoutRng {
+    inner: StdRng,
+    context_seed_supplied: bool,
+    layout_draws: VecDeque<u64>,
+    layout_draws_consumed: usize,
+}
+
+impl ScriptedLayoutRng {
+    fn new(seed_label: &[u8], layout_draws: impl IntoIterator<Item = u64>) -> Self {
+        Self {
+            inner: StdRng::from_seed(synthetic_material(seed_label)),
+            context_seed_supplied: false,
+            layout_draws: layout_draws.into_iter().collect(),
+            layout_draws_consumed: 0,
+        }
+    }
+}
+
+impl rand::RngCore for ScriptedLayoutRng {
+    fn next_u32(&mut self) -> u32 {
+        panic!("orchestration used infallible randomness")
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        panic!("orchestration used infallible randomness")
+    }
+
+    fn fill_bytes(&mut self, _: &mut [u8]) {
+        panic!("orchestration used infallible randomness")
+    }
+
+    fn try_fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), rand::Error> {
+        if destination.len() == 8 {
+            let draw = self
+                .layout_draws
+                .pop_front()
+                .expect("layout draw available");
+            destination.copy_from_slice(&draw.to_le_bytes());
+            self.layout_draws_consumed += 1;
+            return Ok(());
+        }
+        if !self.context_seed_supplied {
+            assert_eq!(destination.len(), 32);
+            self.context_seed_supplied = true;
+        }
+        self.inner.try_fill_bytes(destination)
+    }
+}
+
+impl rand::CryptoRng for ScriptedLayoutRng {}
 
 fn funding_fixture() -> FundingFixture {
     funding_fixture_with_script(descriptor_script())

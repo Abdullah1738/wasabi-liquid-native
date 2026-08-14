@@ -5,14 +5,15 @@
 //!
 //! This internal Rust `rlib` accepts only caller-owned public plan declarations
 //! and exact funding transaction bytes. It performs no native loading, C ABI,
-//! node access, signing, persistence, reservation, or currentness check. The
+//! node access, signer custody, persistence, reservation, or currentness check. The
 //! caller must generate a fresh, unpredictable source epoch for each wallet
 //! session and must never reuse it: epoch reuse links otherwise separate
 //! requests. The frame is plaintext, unauthenticated, and provides no replay
 //! protection. Parsing and validation have variable timing. Public preparation
 //! leaves the selected confidential output's committed asset and value unopened;
-//! one consuming transition delegates to the existing provider-authorized,
-//! randomized ordinary-wallet PSET construction and blinding operation.
+//! consuming transitions delegate to the existing provider-authorized,
+//! randomized ordinary-wallet PSET construction and blinding operation, with
+//! optional caller-owned signing and local finalization.
 
 mod reader;
 mod writer;
@@ -28,9 +29,13 @@ use elements::secp256k1_zkp::rand::{CryptoRng, RngCore};
 use elements::secp256k1_zkp::{All, Secp256k1};
 use elements::{AssetId, OutPoint, Txid};
 use wasabi_liquid_native_address::{ConfidentialLiquidAddress, LiquidAddressProfile};
-use wasabi_liquid_native_ordinary_pset::{BlindedOrdinaryPset, ConfidentialOutput, ExplicitFee};
+use wasabi_liquid_native_ordinary_pset::{
+    BlindedOrdinaryPset, ConfidentialOutput, ExplicitFee, FinalizedOrdinaryTransaction,
+    OrdinaryP2wpkhSigner,
+};
 use wasabi_liquid_native_ordinary_wallet_pset::{
-    OrdinaryWalletPsetError, build_blinded_ordinary_wallet_pset,
+    OrdinaryWalletPsetError, OrdinaryWalletTransactionFailure, build_blinded_ordinary_wallet_pset,
+    build_sign_and_finalize_ordinary_wallet_transaction,
 };
 use wasabi_liquid_native_wallet_facts::{
     BorrowedSelectedOutput, DescriptorCatalog, DescriptorNetwork, SelectedOutputBatch,
@@ -576,6 +581,61 @@ impl PubliclyPreparedOrdinaryWalletPlanRequest<'_> {
             outputs,
             fee,
             rng,
+        )
+    }
+
+    /// Consumes this publicly prepared request into a locally finalized transaction.
+    ///
+    /// The exact retained catalog, selected-output batch, confidential
+    /// destinations, and explicit fee are transferred without exposing their
+    /// parts. The existing ordinary-wallet orchestration repeats public
+    /// validation, independently randomizes both layouts, opens every selected
+    /// commitment through the caller-owned provider, constructs and blinds the
+    /// PSET, and then requests only public keys and signatures from the
+    /// caller-owned [`OrdinaryP2wpkhSigner`]. This method never receives or
+    /// retains a secret key.
+    ///
+    /// Provider calls and signer requests are nontransactional. Preparation
+    /// failure invokes no signer and retains no retryable PSET. Signing failure
+    /// retains the exact randomized and blinded PSET in the returned failure;
+    /// directly retrying that capability invokes no provider and restarts signer
+    /// requests at input zero. A complete retry through this method requires a
+    /// newly prepared request and starts provider calls again at row zero.
+    ///
+    /// The caller must authenticate source-revision currentness and obtain any
+    /// required reservation before invoking this method. This transition does
+    /// not establish node or chain authenticity, current unspentness, fee
+    /// policy, reservation, broadcast acceptance, or confirmation authority.
+    pub fn into_finalized_ordinary_wallet_transaction<R, P, S>(
+        mut self,
+        provider: &mut P,
+        rng: &mut R,
+        signer: &mut S,
+    ) -> Result<FinalizedOrdinaryTransaction, OrdinaryWalletTransactionFailure>
+    where
+        R: RngCore + CryptoRng,
+        P: SelectedOutputOpeningProvider + ?Sized,
+        S: OrdinaryP2wpkhSigner,
+    {
+        let selected_inputs = self
+            .selected_inputs
+            .take()
+            .expect("publicly prepared selected inputs are present");
+        let outputs = self
+            .outputs
+            .take()
+            .expect("publicly prepared destinations are present");
+        let fee = self.fee.transfer();
+        #[cfg(test)]
+        maybe_panic_at(StagingPoint::PreparedFinalizationTransfer);
+        build_sign_and_finalize_ordinary_wallet_transaction(
+            self._catalog,
+            provider,
+            selected_inputs,
+            outputs,
+            fee,
+            rng,
+            signer,
         )
     }
 }
@@ -1748,6 +1808,7 @@ enum StagingPoint {
     FeeTransferCleared,
     FinalPreparedAssembly,
     PreparedCompositionTransfer,
+    PreparedFinalizationTransfer,
 }
 
 #[cfg(test)]
