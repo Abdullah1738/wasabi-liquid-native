@@ -3007,6 +3007,11 @@ fn require_linux_mount_boundary() {}'''
             "51ebc7d7bb8f19ef7c51c0f6614e23c4f950a3caaf8a652588206492ea2c02df"
         ),
         "trait implementation inventory": 'plan_trait_impl_count="$(',
+        "production source inventory": (
+            "plan_sources='crates/ordinary-wallet-plan/src/lib.rs\n"
+            "crates/ordinary-wallet-plan/src/reader.rs\n"
+            "crates/ordinary-wallet-plan/src/writer.rs'"
+        ),
         "compiled source closure": 'plan_compiled_sources="$(',
         "compiled source closure root": (
             "expected_plan_compiled_sources='crates/ordinary-wallet-plan/src/lib.rs"

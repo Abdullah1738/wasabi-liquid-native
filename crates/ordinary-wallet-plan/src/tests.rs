@@ -3,6 +3,8 @@ use wasabi_liquid_native_wallet_facts::{DescriptorCatalog, DescriptorNetwork};
 
 use super::*;
 
+mod conformance;
+
 const SOURCE_A: [u8; 32] = [0x41; 32];
 const SOURCE_B: [u8; 32] = [0x42; 32];
 const TXID: [u8; 32] = [0x31; 32];

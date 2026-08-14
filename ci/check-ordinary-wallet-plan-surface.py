@@ -23,11 +23,18 @@ EXPECTED_FILES = {
     "Cargo.toml",
     "src/lib.rs",
     "src/reader.rs",
+    "src/tests/conformance.rs",
     "src/tests.rs",
     "src/writer.rs",
     "tests/preparation.rs",
 }
 PRODUCTION_FILES = {"src/lib.rs", "src/reader.rs", "src/writer.rs"}
+EXPECTED_TEST_MODULE_SHA256 = (
+    "d43f53361a98090f0206db9711febb373d7ae8c9a8c7bcf864206a5b1c6d95a6"
+)
+EXPECTED_CONFORMANCE_TEST_SHA256 = (
+    "dc55a9ba1ac40e87e83889e9599b84d05e6ee06bcb90d2cf92877d518ff812ae"
+)
 PIN_REVIEW_BOUNDARY = (
     "pins are drift alarms; updating pins/checker requires fresh review"
 )
@@ -1339,6 +1346,19 @@ def validate_with_compiled_source_files(compiled_files: tuple[str, ...]) -> None
         reject("ordinary-wallet plan file inventory mismatch")
     if any(path.is_symlink() for path in CRATE.rglob("*")):
         reject("ordinary-wallet plan symlinks are forbidden")
+    tests_source = (CRATE / "src/tests.rs").read_text()
+    if (
+        tests_source.count("mod conformance;") != 1
+        or tests_source.splitlines().count("mod conformance;") != 1
+    ):
+        reject("ordinary-wallet plan conformance test module binding changed")
+    if sha256_bytes((CRATE / "src/tests.rs").read_bytes()) != EXPECTED_TEST_MODULE_SHA256:
+        reject("ordinary-wallet plan conformance test module source changed")
+    if (
+        sha256_bytes((CRATE / "src/tests/conformance.rs").read_bytes())
+        != EXPECTED_CONFORMANCE_TEST_SHA256
+    ):
+        reject("ordinary-wallet plan conformance test source changed")
 
     validate_manifest_targets()
 

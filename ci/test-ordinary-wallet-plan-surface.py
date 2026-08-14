@@ -428,6 +428,46 @@ def main() -> None:
         valid = copy_root(scratch, "valid")
         run_checker(valid, success=True)
 
+        mutate(
+            scratch,
+            "conformance-module-detached",
+            lambda root: replace_once(
+                root,
+                "crates/ordinary-wallet-plan/src/tests.rs",
+                "mod conformance;\n",
+                "",
+            ),
+            contains="ordinary-wallet plan conformance test module binding changed",
+        )
+        mutate(
+            scratch,
+            "conformance-source-byte-drift",
+            lambda root: (
+                root / "crates/ordinary-wallet-plan/src/tests/conformance.rs"
+            ).write_text(
+                (
+                    root / "crates/ordinary-wallet-plan/src/tests/conformance.rs"
+                ).read_text()
+                + "\n"
+            ),
+            contains="ordinary-wallet plan conformance test source changed",
+        )
+        for name, attribute in (
+            ("conformance-module-cfg-disabled", "#[cfg(any())]"),
+            ("conformance-module-path-redirected", '#[path = "ignored.rs"]'),
+        ):
+            mutate(
+                scratch,
+                name,
+                lambda root, attribute=attribute: replace_once(
+                    root,
+                    "crates/ordinary-wallet-plan/src/tests.rs",
+                    "mod conformance;\n",
+                    f"{attribute}\nmod conformance;\n",
+                ),
+                contains="ordinary-wallet plan conformance test module source changed",
+            )
+
         reviewed_source_drift_mutations = {
             "ordinary-stack-copy": (
                 "#[allow(dead_code)]\n"

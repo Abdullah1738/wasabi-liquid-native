@@ -1228,7 +1228,9 @@ fi
 python3 -I -c 'import importlib.util, pathlib; p = pathlib.Path("ci/check-ordinary-wallet-plan-surface.py"); s = importlib.util.spec_from_file_location("plan_surface", p); m = importlib.util.module_from_spec(s); s.loader.exec_module(m); m.validate_manifest_targets(); m.validate_dependency_authority_surface(m.production_text())'
 WLPQ_TEST_DARWIN_SDKROOT="$darwin_sdkroot" \
     python3 -I ci/test-ordinary-wallet-plan-surface.py
-plan_sources="$(find crates/ordinary-wallet-plan/src -type f -name '*.rs' ! -name 'tests.rs' -print | sort)"
+plan_sources='crates/ordinary-wallet-plan/src/lib.rs
+crates/ordinary-wallet-plan/src/reader.rs
+crates/ordinary-wallet-plan/src/writer.rs'
 plan_lexical_source="$(
     python3 -I -c 'import importlib.util, pathlib; p = pathlib.Path("ci/check-ordinary-wallet-plan-surface.py"); s = importlib.util.spec_from_file_location("plan_surface", p); m = importlib.util.module_from_spec(s); s.loader.exec_module(m); print(m.strip_rust_comments(m.production_text()), end="")'
 )"
