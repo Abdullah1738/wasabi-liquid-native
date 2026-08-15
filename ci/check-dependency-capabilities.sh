@@ -1267,7 +1267,7 @@ plan_outer_attribute_hash="$(
     grep -h -E '^[[:space:]]*#\[' $plan_sources |
         python3 -I -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'
 )"
-if [ "$plan_outer_attribute_hash" != "7ccc619aadfe05a781fc9d199b68fb58585e74cc5dd9e4938536d92397c70c36" ]; then
+if [ "$plan_outer_attribute_hash" != "ca090cdae5ab9fd46a9f1e89ec0f9d51e6f99657ca44c7d1c9832f9f6a02ad2e" ]; then
     echo "ordinary-wallet plan allowed outer attribute inventory changed" >&2
     exit 1
 fi

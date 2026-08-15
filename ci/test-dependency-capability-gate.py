@@ -14,6 +14,37 @@ GATE = ROOT / "ci" / "check-dependency-capabilities.sh"
 REAL_CARGO = shutil.which("cargo")
 CONFORMANCE_CHECKER = ROOT / "ci" / "check-wallet-facts-conformance.py"
 REFERENCE = Path("contracts/wallet-facts/v1/nonlinkable-reference")
+PLAN_PRODUCTION_SOURCES = (
+    Path("crates/ordinary-wallet-plan/src/lib.rs"),
+    Path("crates/ordinary-wallet-plan/src/reader.rs"),
+    Path("crates/ordinary-wallet-plan/src/writer.rs"),
+)
+PLAN_OUTER_ATTRIBUTE_SHA256 = (
+    "ca090cdae5ab9fd46a9f1e89ec0f9d51e6f99657ca44c7d1c9832f9f6a02ad2e"
+)
+
+
+def plan_outer_attribute_sha256(sources: tuple[bytes, ...]) -> str:
+    rows = bytearray()
+    for source in sources:
+        for line in source.split(b"\n"):
+            if re.match(rb"^[ \t\v\f\r]*#\[", line):
+                rows.extend(line)
+                rows.extend(b"\n")
+    return hashlib.sha256(rows).hexdigest()
+
+
+def plan_outer_attribute_authority_is_exact(
+    gate: str,
+    sources: tuple[bytes, ...],
+    expected_sha256: str = PLAN_OUTER_ATTRIBUTE_SHA256,
+) -> bool:
+    shell_pins = re.findall(
+        r'if \[ "\$plan_outer_attribute_hash" != "([0-9a-f]{64})" \]; then\n'
+        r'    echo "ordinary-wallet plan allowed outer attribute inventory changed" >&2',
+        gate,
+    )
+    return shell_pins == [expected_sha256] and plan_outer_attribute_sha256(sources) == expected_sha256
 
 
 def expect_conformance(root: Path, *, success: bool) -> None:
@@ -709,6 +740,33 @@ def test_public_proof_preflight_blocks_build_script(scratch: Path) -> None:
 
 def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
     gate = GATE.read_text()
+    plan_sources = tuple((ROOT / path).read_bytes() for path in PLAN_PRODUCTION_SOURCES)
+    if not plan_outer_attribute_authority_is_exact(gate, plan_sources):
+        raise AssertionError("ordinary-wallet plan outer attribute authority is not exact")
+    changed_outer_attribute_pin = "0" * 64
+    changed_outer_attribute_gate = gate.replace(
+        PLAN_OUTER_ATTRIBUTE_SHA256, changed_outer_attribute_pin, 1
+    )
+    if changed_outer_attribute_gate == gate or plan_outer_attribute_authority_is_exact(
+        changed_outer_attribute_gate, plan_sources
+    ):
+        raise AssertionError("ordinary-wallet plan outer attribute shell pin mutation was accepted")
+    if plan_outer_attribute_authority_is_exact(
+        changed_outer_attribute_gate,
+        plan_sources,
+        changed_outer_attribute_pin,
+    ):
+        raise AssertionError("ordinary-wallet plan coordinated outer attribute pin drift was accepted")
+    changed_outer_attribute_sources = (
+        plan_sources[0] + b"#[allow(dead_code)]\n",
+        *plan_sources[1:],
+    )
+    if (
+        plan_outer_attribute_sha256(changed_outer_attribute_sources)
+        == PLAN_OUTER_ATTRIBUTE_SHA256
+        or plan_outer_attribute_authority_is_exact(gate, changed_outer_attribute_sources)
+    ):
+        raise AssertionError("ordinary-wallet plan outer attribute source mutation was accepted")
     workflow = (ROOT / ".github/workflows/dependency-capabilities.yml").read_text(
         encoding="utf-8"
     )
@@ -3027,9 +3085,7 @@ fn require_linux_mount_boundary() {}'''
             "9bf302755ec28c38c79a36f3f7945a47fe8d736d267b8373981852afa6949272"
         ),
         "outer attribute inventory": 'plan_outer_attribute_hash="$(',
-        "outer attribute hash": (
-            "7ccc619aadfe05a781fc9d199b68fb58585e74cc5dd9e4938536d92397c70c36"
-        ),
+        "outer attribute hash": PLAN_OUTER_ATTRIBUTE_SHA256,
         "trait implementation inventory": 'plan_trait_impl_count="$(',
         "production source inventory": (
             "plan_sources='crates/ordinary-wallet-plan/src/lib.rs\n"
