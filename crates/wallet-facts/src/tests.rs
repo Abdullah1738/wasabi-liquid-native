@@ -200,6 +200,7 @@ static_assertions::assert_not_impl_any!(ScopedExpectedPlanAsset: Copy, Clone, st
 static_assertions::assert_not_impl_any!(PubliclyValidatedSelectedOutput: Copy, Clone, std::fmt::Debug);
 static_assertions::assert_not_impl_any!(ScopedSelectedRequestIndex: Copy, Clone, std::fmt::Debug);
 static_assertions::assert_not_impl_any!(ValidatedOwnedInput: Copy, Clone, std::fmt::Debug);
+static_assertions::assert_not_impl_any!(Slip77SelectedOutputOpeningProvider<'static>: Copy, Clone, std::fmt::Debug);
 static_assertions::assert_not_impl_any!(ObservedTransactionInput: Copy, Clone, std::fmt::Debug);
 static_assertions::assert_not_impl_any!(ObservedWalletTransaction: Copy, Clone, std::fmt::Debug);
 static_assertions::assert_not_impl_any!(ObservedOwnedOutput: Copy, Clone, std::fmt::Debug);
@@ -273,6 +274,108 @@ fn selected_output_provider_trait_is_object_safe() {
     let slip77 = synthetic_material(b"wallet-facts object-safe selected provider");
     let mut provider = SyntheticSelectedOpeningProvider::new(&slip77);
     borrow_object(&mut provider);
+    let mut adapter = Slip77SelectedOutputOpeningProvider::new(BorrowedSlip77::new(&slip77));
+    borrow_object(&mut adapter);
+}
+
+#[test]
+fn slip77_adapter_opens_selected_rows_in_request_order_without_retained_state() {
+    let catalog = test_catalog(1);
+    let slip77 = synthetic_material(b"wallet-facts slip77 adapter opening material");
+    let fixture = confidential_fixture(&catalog, &slip77);
+    let secp = Secp256k1::new();
+    let mut provider = Slip77SelectedOutputOpeningProvider::new(BorrowedSlip77::new(&slip77));
+
+    let derivations_before = derivation_call_count();
+    let first = provider
+        .open_selected_output(&secp, &fixture.transaction.output[0])
+        .unwrap();
+    assert_eq!(derivation_call_count() - derivations_before, 1);
+    assert_eq!(first.asset_id(), &fixture.first_asset.to_byte_array());
+    assert_eq!(first.value(), &900);
+    drop(first);
+
+    let second = provider
+        .open_selected_output(&secp, &fixture.transaction.output[1])
+        .unwrap();
+    assert_eq!(derivation_call_count() - derivations_before, 2);
+    assert_eq!(second.asset_id(), &fixture.second_asset.to_byte_array());
+    assert_eq!(second.value(), &2_000);
+}
+
+#[test]
+fn slip77_adapter_refuses_foreign_blinding_explicit_and_script_substituted_outputs() {
+    let catalog = test_catalog(1);
+    let slip77 = synthetic_material(b"wallet-facts slip77 adapter refusal material");
+    let foreign = synthetic_material(b"wallet-facts slip77 adapter foreign material");
+    let owned = confidential_fixture(&catalog, &slip77);
+    let mixed = confidential_fixture_with_second_blinder(&catalog, &slip77, &foreign);
+    let secp = Secp256k1::new();
+    let mut provider = Slip77SelectedOutputOpeningProvider::new(BorrowedSlip77::new(&slip77));
+
+    let derivations_before = derivation_call_count();
+    assert!(
+        provider
+            .open_selected_output(&secp, &mixed.transaction.output[0])
+            .is_some()
+    );
+    assert!(
+        provider
+            .open_selected_output(&secp, &mixed.transaction.output[1])
+            .is_none(),
+        "an output blinded to a different SLIP-77 master refuses with no distinct error"
+    );
+    let explicit = explicit_output(
+        mixed.first_asset,
+        900,
+        mixed.transaction.output[0].script_pubkey.clone(),
+    );
+    assert!(
+        provider.open_selected_output(&secp, &explicit).is_none(),
+        "an explicit chain output refuses with no distinct error"
+    );
+    let mut substituted = owned.transaction.output[0].clone();
+    substituted.script_pubkey = owned.transaction.output[1].script_pubkey.clone();
+    assert!(
+        provider.open_selected_output(&secp, &substituted).is_none(),
+        "a confidential output under a substituted catalog script refuses with no distinct error"
+    );
+    assert_eq!(derivation_call_count() - derivations_before, 4);
+}
+
+#[test]
+fn slip77_adapter_drives_the_reviewed_selected_opening_transition() {
+    let catalog = test_catalog(1);
+    let slip77 = synthetic_material(b"wallet-facts slip77 adapter transition material");
+    let foreign = synthetic_material(b"wallet-facts slip77 adapter transition foreign material");
+    let mut provider = Slip77SelectedOutputOpeningProvider::new(BorrowedSlip77::new(&slip77));
+    let mut secp = Secp256k1::new();
+    let mut rng = StdRng::from_seed(synthetic_material(
+        b"wallet-facts slip77 adapter transition randomness",
+    ));
+
+    let mixed = confidential_fixture_with_second_blinder(&catalog, &slip77, &foreign);
+    let mixed_expectations = [mixed.selected_expectation(0), mixed.selected_expectation(1)];
+    let mixed_requests = borrowed_selected_outputs(&mixed, &mixed_expectations);
+    let mixed_selected = SelectedOutputBatch::new(&mixed_requests).unwrap();
+    let mixed_prepared = prepare_selected_owned_inputs(&catalog, &mixed_selected, &secp).unwrap();
+    assert!(matches!(
+        open_prepared_selected_owned_inputs(mixed_prepared, &mut provider, &mut secp, &mut rng),
+        Err(WalletObservationError::OwnedOutputOpening)
+    ));
+
+    let owned = confidential_fixture(&catalog, &slip77);
+    let owned_expectations = [owned.selected_expectation(0), owned.selected_expectation(1)];
+    let owned_requests = borrowed_selected_outputs(&owned, &owned_expectations);
+    let owned_selected = SelectedOutputBatch::new(&owned_requests).unwrap();
+    let owned_prepared = prepare_selected_owned_inputs(&catalog, &owned_selected, &secp).unwrap();
+    let validated =
+        open_prepared_selected_owned_inputs(owned_prepared, &mut provider, &mut secp, &mut rng)
+            .unwrap();
+    assert_eq!(validated.len(), 2);
+    for input in validated {
+        let _ = input.into_spendable();
+    }
 }
 
 #[test]

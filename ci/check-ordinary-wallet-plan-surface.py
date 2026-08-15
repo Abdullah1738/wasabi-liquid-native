@@ -61,7 +61,7 @@ EXPECTED_RUNTIME_AUTHORITY_SOURCE_SHA256 = {
     "crates/ordinary-wallet-pset/src/lib.rs": "80c4afba958edbd0cf87a839e188a30265b24afe27fed7be13a77c282e4a3b0e",
     "crates/output-opening/src/lib.rs": "5a01bbfd207be93e8e8112c89baa51e3d247cbf8795b3366d72ddc70ac877acc",
     "crates/transaction-validation/src/lib.rs": "b31cd9785ff204aea300ddafe5bc7e9158377c2746d80df6f2afd942b98f4750",
-    "crates/wallet-facts/src/lib.rs": "77c91b3348b7ff876733cfba8720a354d784aba7b782add37e7bbccf1e1a11da",
+    "crates/wallet-facts/src/lib.rs": "eb38befd422d267450dcd68f7d670c6505b99baa8a6dacab543375772e45e9db",
 }
 # These exact local call edges define why the reviewed sources above are authority.
 # The syntax/count probes are semantic diagnostics layered on whole-file pins;

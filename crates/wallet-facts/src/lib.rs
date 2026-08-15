@@ -30,7 +30,7 @@ use sha2::{Digest, Sha256};
 use wasabi_liquid_native_ordinary_pset::{
     MAX_CONFIDENTIAL_OUTPUTS, MAX_ORDINARY_VALUE, SpendableInput,
 };
-use wasabi_liquid_native_output_opening::OpenedOutput;
+use wasabi_liquid_native_output_opening::{OpenedOutput, open_confidential_output};
 use wasabi_liquid_native_transaction_validation::{
     TransactionValidationError, ValidatedOutputOpenError, validate_transaction_amount_proofs,
 };
@@ -1129,6 +1129,46 @@ impl<'key> BorrowedSlip77<'key> {
     /// Creates a scoped borrow without copying the master key.
     pub const fn new(bytes: &'key [u8; 32]) -> Self {
         Self { bytes }
+    }
+}
+
+/// A caller-owned selected-output opening provider backed by a borrowed
+/// SLIP-77 master blinding key.
+///
+/// Each call derives the per-script blinding key from the borrowed master and
+/// the exact validated output's script through the same scoped-erasure
+/// helper already used by owned-output observation, then opens the output
+/// through the existing confidential-output opening path. The adapter derives
+/// no other key, retains no row or key state, and never copies or stores the
+/// borrowed master bytes. Every derivation or opening failure, including an
+/// output blinded to a different master, returns the same redacted `None`.
+///
+/// The adapter performs no descriptor-catalog lookup, transaction validation,
+/// or ownership check. It claims no chain inclusion, current unspentness,
+/// blinding-key provenance, node identity, fee policy, or signing authority.
+pub struct Slip77SelectedOutputOpeningProvider<'key> {
+    slip77_master_key: BorrowedSlip77<'key>,
+}
+
+impl<'key> Slip77SelectedOutputOpeningProvider<'key> {
+    /// Creates a stateless provider over one borrowed SLIP-77 master key.
+    pub const fn new(slip77_master_key: BorrowedSlip77<'key>) -> Self {
+        Self { slip77_master_key }
+    }
+}
+
+impl SelectedOutputOpeningProvider for Slip77SelectedOutputOpeningProvider<'_> {
+    fn open_selected_output(
+        &mut self,
+        secp: &Secp256k1<All>,
+        output: &TxOut,
+    ) -> Option<OpenedOutput> {
+        let blinding_key = derive_blinding_key(
+            self.slip77_master_key.bytes,
+            output.script_pubkey.as_bytes(),
+        )
+        .ok()?;
+        open_confidential_output(secp, output, &blinding_key.0).ok()
     }
 }
 
