@@ -151,6 +151,8 @@ if [ ! -x "$python_bin" ]; then
     exit 1
 fi
 "$python_bin" -I ci/check-ordinary-wallet-plan-public-proof-surface.py "$repository_root"
+"$python_bin" -I ci/check-wlpq-ffi-surface.py "$repository_root"
+"$python_bin" -I ci/test-wlpq-ffi-surface.py
 "$python_bin" -I ci/check-cargo-fetch-preflight.py "$repository_root"
 if ! compiler_toolchain_root="$("$python_bin" -I ci/check-pinned-rust-toolchain.py "${HOME:?}")"; then
     echo "dependency compiler and artifact gates require Cargo 1.96.0" >&2
@@ -295,7 +297,7 @@ workspace_cargo_home="$scratch/workspace-final-cargo-home"
 proof_cache_authority="$scratch/proof-cache-authority.jsonl"
 workspace_cache_authority="$scratch/workspace-cache-authority.jsonl"
 proof_lock_sha256=4ca45ca0dd27b2a545b0d93174e02487cc756b26a34d946de5dcb349ceea7aab
-workspace_lock_sha256=5a6a3fa2fbf890844009d1ff1ad40841977a0ffa32c0faba795fa211262f8678
+workspace_lock_sha256=06f55f2ef8d07368404477ad65cbcb104aa1998b2635d5ff9f6ef5a67cce584d
 python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py \
     --snapshot-only \
     "$repository_root" \
@@ -875,6 +877,7 @@ BEGIN {
     miniscript = 0
     rand_count = 0
     plan = 0
+    plan_ffi = 0
     plan_proof = 0
     secp = 0
     sha2 = 0
@@ -983,9 +986,16 @@ $1 ~ /^wasabi-liquid-native-ordinary-wallet-plan v/ {
     }
 }
 
+$1 ~ /^wasabi-liquid-native-ordinary-wallet-plan-ffi v/ {
+    plan_ffi++
+    if ($1 != "wasabi-liquid-native-ordinary-wallet-plan-ffi v0.1.0 (workspace)" || $2 != "") {
+        reject("unexpected WLPQ FFI capability: " $0)
+    }
+}
+
 END {
     if (bitcoin != 1 || digest != 1 || elements != 1 || miniscript != 1 ||
-        plan != 1 || rand_count != 1 || secp != 1 || sha2 != 1 || zkp != 1 || zkp_sys != 1 || wire != 1) {
+        plan != 1 || plan_ffi != 1 || rand_count != 1 || secp != 1 || sha2 != 1 || zkp != 1 || zkp_sys != 1 || wire != 1) {
         reject("required dependency capability count mismatch")
     }
     exit failed
@@ -1100,7 +1110,8 @@ baseline_hash = "544ad20b54fe2e279a3074a5cfdeec49bd13752f358ffd0d67c0573546af326
 wire_post_hash = "f30d4a8bfc6b43f61fb7eefdd0d86f866ebef815d5aa57cc2b5b3319023fcf25"
 provider_post_hash = "5d105ea8138170cac5501f42d148855b9b9141d38b3c2b9532a246a4d5dc9ade"
 plan_base_hash = "3287e329ab3d1b9868cb5eb3c39b1713a0d660b0dcd35100688bfb7c7a867178"
-current_hash = "5a6a3fa2fbf890844009d1ff1ad40841977a0ffa32c0faba795fa211262f8678"
+ffi_base_hash = "5a6a3fa2fbf890844009d1ff1ad40841977a0ffa32c0faba795fa211262f8678"
+current_hash = "06f55f2ef8d07368404477ad65cbcb104aa1998b2635d5ff9f6ef5a67cce584d"
 if baseline_text != baseline_hash + "\n":
     raise SystemExit("wallet-facts conformance lock baseline pin mismatch")
 if hashlib.sha256(lock_bytes).hexdigest() != current_hash:
@@ -1108,6 +1119,23 @@ if hashlib.sha256(lock_bytes).hexdigest() != current_hash:
 
 text = lock_bytes.decode("utf-8")
 blocks = text.split("[[package]]\n")
+ffi_marker = 'name = "wasabi-liquid-native-ordinary-wallet-plan-ffi"\n'
+ffi_indexes = [index for index, block in enumerate(blocks) if ffi_marker in block]
+ffi_block = """name = "wasabi-liquid-native-ordinary-wallet-plan-ffi"
+version = "0.1.0"
+dependencies = [
+ "wasabi-liquid-native-ordinary-wallet-plan",
+ "zeroize",
+]
+
+"""
+if len(ffi_indexes) != 1 or blocks[ffi_indexes[0]] != ffi_block:
+    raise SystemExit("WLPQ FFI lock package mismatch")
+del blocks[ffi_indexes[0]]
+ffi_base_bytes = "[[package]]\n".join(blocks).encode("utf-8")
+if hashlib.sha256(ffi_base_bytes).hexdigest() != ffi_base_hash:
+    raise SystemExit("WLPQ FFI lock reverse transform mismatch")
+
 plan_marker = 'name = "wasabi-liquid-native-ordinary-wallet-plan"\n'
 plan_indexes = [index for index, block in enumerate(blocks) if plan_marker in block]
 plan_block = """name = "wasabi-liquid-native-ordinary-wallet-plan"
@@ -1661,18 +1689,30 @@ $decoder_uniqueness_mir"
             --release \
             --locked \
             --offline
+        run_sealed "$compiler_cargo_bin" build \
+            --quiet \
+            -p wasabi-liquid-native-ordinary-wallet-plan-ffi \
+            --lib \
+            --release \
+            --locked \
+            --offline
         target_directory="$(
             python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["target_directory"])' \
                 "$gate_output/metadata.json"
         )"
         wire_archive="$target_directory/release/libwasabi_liquid_native_wallet_facts_wire.rlib"
         plan_archive="$target_directory/release/libwasabi_liquid_native_ordinary_wallet_plan.rlib"
+        ffi_archive="$target_directory/release/libwasabi_liquid_native_ordinary_wallet_plan_ffi.a"
         if [ ! -f "$wire_archive" ]; then
             echo "wallet-facts wire release archive is missing" >&2
             exit 1
         fi
         if [ ! -f "$plan_archive" ]; then
             echo "ordinary-wallet plan release archive is missing" >&2
+            exit 1
+        fi
+        if [ ! -f "$ffi_archive" ]; then
+            echo "WLPQ FFI release archive is missing" >&2
             exit 1
         fi
         if ! command -v ar >/dev/null 2>&1 || ! command -v nm >/dev/null 2>&1; then
@@ -1714,6 +1754,39 @@ $decoder_uniqueness_mir"
             echo "ordinary-wallet plan release archive exposes an unmangled global symbol" >&2
             exit 1
         fi
+        c++ -x c++ -std=c++17 -fsyntax-only -Wall -Wextra -Werror \
+            crates/ordinary-wallet-plan-ffi/src/shim.c
+        ffi_output="$workspace_target/wlpq-ffi-library"
+        mkdir "$ffi_output"
+        ffi_library="$(
+            ci/build-wlpq-ffi-library.sh \
+                "$repository_root" \
+                "$target_directory" \
+                "$ffi_output"
+        )"
+        case "$host_system" in
+            Darwin)
+                if [ "$ffi_library" != "$ffi_output/libwasabi_liquid_wlpq_v1.dylib" ]; then
+                    echo "WLPQ FFI macOS artifact path changed" >&2
+                    exit 1
+                fi
+                nm -gjU "$ffi_library" >"$gate_output/wlpq-ffi.symbols"
+                ;;
+            Linux)
+                if [ "$ffi_library" != "$ffi_output/libwasabi_liquid_wlpq_v1.so" ]; then
+                    echo "WLPQ FFI Linux artifact path changed" >&2
+                    exit 1
+                fi
+                nm -D --defined-only "$ffi_library" | awk '{ print $3 }' \
+                    >"$gate_output/wlpq-ffi.symbols"
+                ;;
+        esac
+        python3 -I ci/check-wlpq-ffi-surface.py \
+            "$repository_root" \
+            --symbols \
+            "$host_system" \
+            "$gate_output/wlpq-ffi.symbols"
+        python3 -I ci/test-wlpq-ffi-dynamic.py "$repository_root" "$ffi_library"
         if ! dynamic_artifacts="$(
             find "$target_directory/release" "$target_directory/debug" -type f \
                 \( -name 'libwasabi_liquid_native_wallet_facts_wire*.dylib' \

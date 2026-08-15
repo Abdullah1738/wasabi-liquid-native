@@ -460,6 +460,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasabi-liquid-native-ordinary-wallet-plan-ffi"
+version = "0.1.0"
+dependencies = [
+ "wasabi-liquid-native-ordinary-wallet-plan",
+ "zeroize",
+]
+
+[[package]]
 name = "wasabi-liquid-native-ordinary-wallet-pset"
 version = "0.1.0"
 dependencies = [

@@ -1014,6 +1014,8 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
         if re.search(environment_pattern, assignment, re.IGNORECASE) is None:
             raise AssertionError(f"dynamic-loader override pattern was accepted: {assignment}")
     proof_preflight = '"$python_bin" -I ci/check-ordinary-wallet-plan-public-proof-surface.py "$repository_root"'
+    ffi_preflight = '"$python_bin" -I ci/check-wlpq-ffi-surface.py "$repository_root"'
+    ffi_surface_mutations = '"$python_bin" -I ci/test-wlpq-ffi-surface.py'
     proof_surface_mutations = "python3 -I ci/test-ordinary-wallet-plan-public-proof-surface.py"
     proof_snapshot_mutations = (
         'WLPQ_TEST_DARWIN_SDKROOT="$darwin_sdkroot" \\\n'
@@ -1021,6 +1023,8 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
     )
     if (
         gate.count(proof_preflight) != 1
+        or gate.count(ffi_preflight) != 1
+        or gate.count(ffi_surface_mutations) != 1
         or gate.count(proof_surface_mutations) != 1
         or gate.count(proof_snapshot_mutations) != 1
     ):
@@ -1028,6 +1032,44 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
     first_cargo_invocation = gate.index('"$compiler_cargo_bin" fetch \\')
     if gate.index(proof_preflight) > first_cargo_invocation:
         raise AssertionError("ordinary-wallet plan public proof preflight does not precede Cargo")
+    if gate.index(ffi_preflight) > first_cargo_invocation:
+        raise AssertionError("WLPQ FFI surface preflight does not precede Cargo")
+    if gate.index(ffi_surface_mutations) > first_cargo_invocation:
+        raise AssertionError("WLPQ FFI surface mutations do not precede Cargo")
+    ffi_release_build = '''        run_sealed "$compiler_cargo_bin" build \\
+            --quiet \\
+            -p wasabi-liquid-native-ordinary-wallet-plan-ffi \\
+            --lib \\
+            --release \\
+            --locked \\
+            --offline'''
+    ffi_builder = '''            ci/build-wlpq-ffi-library.sh \\
+                "$repository_root" \\
+                "$target_directory" \\
+                "$ffi_output"'''
+    ffi_symbol_check = '''        python3 -I ci/check-wlpq-ffi-surface.py \\
+            "$repository_root" \\
+            --symbols \\
+            "$host_system" \\
+            "$gate_output/wlpq-ffi.symbols"'''
+    ffi_dynamic_test = (
+        '        python3 -I ci/test-wlpq-ffi-dynamic.py "$repository_root" "$ffi_library"'
+    )
+    ffi_artifact_tokens = (
+        ffi_release_build,
+        '        ffi_archive="$target_directory/release/libwasabi_liquid_native_ordinary_wallet_plan_ffi.a"',
+        '        c++ -x c++ -std=c++17 -fsyntax-only -Wall -Wextra -Werror \\',
+        ffi_builder,
+        '                nm -gjU "$ffi_library" >"$gate_output/wlpq-ffi.symbols"',
+        '                nm -D --defined-only "$ffi_library" | awk \'{ print $3 }\' \\',
+        ffi_symbol_check,
+        ffi_dynamic_test,
+    )
+    if any(gate.count(token) != 1 for token in ffi_artifact_tokens):
+        raise AssertionError("WLPQ FFI artifact gate is not exact and singular")
+    ffi_positions = [gate.index(token) for token in ffi_artifact_tokens]
+    if ffi_positions != sorted(ffi_positions):
+        raise AssertionError("WLPQ FFI artifact gate order changed")
     first_build_capable_cargo = gate.index('tree_raw="$(')
     if gate.index(proof_surface_mutations) > first_build_capable_cargo:
         raise AssertionError("public proof surface mutations do not precede build-capable Cargo")
@@ -3704,6 +3746,22 @@ if __name__ == "__main__":
     )
     expect_lock_snippet(snippet, composer_provider_edge, success=False)
 
+    ffi_plan_edge = lock_root("lock-ffi-plan-edge")
+    remove_lock_dependency(
+        ffi_plan_edge,
+        "wasabi-liquid-native-ordinary-wallet-plan-ffi",
+        "wasabi-liquid-native-ordinary-wallet-plan",
+    )
+    expect_lock_snippet(snippet, ffi_plan_edge, success=False)
+
+    ffi_zeroize_edge = lock_root("lock-ffi-zeroize-edge")
+    remove_lock_dependency(
+        ffi_zeroize_edge,
+        "wasabi-liquid-native-ordinary-wallet-plan-ffi",
+        "zeroize",
+    )
+    expect_lock_snippet(snippet, ffi_zeroize_edge, success=False)
+
     baseline = lock_root("lock-baseline")
     (baseline / "ci/expected-wallet-facts-conformance-lock-baseline.txt").write_text("0" * 64 + "\n")
     expect_lock_snippet(snippet, baseline, success=False)
@@ -3726,6 +3784,18 @@ if __name__ == "__main__":
         1,
     )
     expect_lock_snippet(changed_plan_pin, valid, success=False)
+    changed_ffi_base_pin = snippet.replace(
+        "5a6a3fa2fbf890844009d1ff1ad40841977a0ffa32c0faba795fa211262f8678",
+        "0" * 64,
+        1,
+    )
+    expect_lock_snippet(changed_ffi_base_pin, valid, success=False)
+    changed_current_pin = snippet.replace(
+        "06f55f2ef8d07368404477ad65cbcb104aa1998b2635d5ff9f6ef5a67cce584d",
+        "0" * 64,
+        1,
+    )
+    expect_lock_snippet(changed_current_pin, valid, success=False)
 
 
 def main() -> None:

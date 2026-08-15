@@ -1,0 +1,15 @@
+[package]
+name = "wasabi-liquid-native-ordinary-wallet-plan-ffi"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT"
+publish = false
+description = "Minimal C ABI for canonical WLPQ v1 frame validation"
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+wasabi-liquid-native-ordinary-wallet-plan = { path = "../ordinary-wallet-plan" }
+zeroize = { version = "1.8", default-features = false }
