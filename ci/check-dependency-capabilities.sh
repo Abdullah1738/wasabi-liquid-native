@@ -1759,6 +1759,7 @@ $decoder_uniqueness_mir"
         ffi_output="$gate_output/wlpq-ffi-library"
         mkdir "$ffi_output"
         ffi_library="$(
+            SDKROOT="$darwin_sdkroot" \
             ci/build-wlpq-ffi-library.sh \
                 "$repository_root" \
                 "$target_directory" \

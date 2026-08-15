@@ -1043,7 +1043,8 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
             --release \\
             --locked \\
             --offline'''
-    ffi_builder = '''            ci/build-wlpq-ffi-library.sh \\
+    ffi_builder = '''            SDKROOT="$darwin_sdkroot" \\
+            ci/build-wlpq-ffi-library.sh \\
                 "$repository_root" \\
                 "$target_directory" \\
                 "$ffi_output"'''
