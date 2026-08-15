@@ -1756,7 +1756,7 @@ $decoder_uniqueness_mir"
         fi
         c++ -x c++ -std=c++17 -fsyntax-only -Wall -Wextra -Werror \
             crates/ordinary-wallet-plan-ffi/src/shim.c
-        ffi_output="$workspace_target/wlpq-ffi-library"
+        ffi_output="$gate_output/wlpq-ffi-library"
         mkdir "$ffi_output"
         ffi_library="$(
             ci/build-wlpq-ffi-library.sh \

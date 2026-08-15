@@ -1059,6 +1059,7 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
         ffi_release_build,
         '        ffi_archive="$target_directory/release/libwasabi_liquid_native_ordinary_wallet_plan_ffi.a"',
         '        c++ -x c++ -std=c++17 -fsyntax-only -Wall -Wextra -Werror \\',
+        '        ffi_output="$gate_output/wlpq-ffi-library"',
         ffi_builder,
         '                nm -gjU "$ffi_library" >"$gate_output/wlpq-ffi.symbols"',
         '                nm -D --defined-only "$ffi_library" | awk \'{ print $3 }\' \\',
