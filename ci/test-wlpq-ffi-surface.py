@@ -226,6 +226,26 @@ def main() -> None:
         root = Path(directory)
         copy_fixture(root)
         symbols = root / "symbols.txt"
+        symbols.write_text("wln_wlpq_validate_v1\n", encoding="utf-8")
+        shutil.rmtree(root / "crates")
+        subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                str(root / CHECKER),
+                str(root),
+                "--symbols",
+                "Linux",
+                str(symbols),
+            ],
+            cwd=root,
+            check=True,
+        )
+
+    with tempfile.TemporaryDirectory(prefix="wlpq-ffi-symbols-extra-") as directory:
+        root = Path(directory)
+        copy_fixture(root)
+        symbols = root / "symbols.txt"
         symbols.write_text(
             "0000000000000000 T wln_wlpq_validate_v1\n"
             "0000000000000010 T wln_wlpq_bypass_v1\n",

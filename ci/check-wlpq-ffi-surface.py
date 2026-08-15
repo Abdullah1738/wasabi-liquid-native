@@ -381,7 +381,6 @@ def main() -> None:
         validate(Path(sys.argv[1]).resolve())
         return
     if len(sys.argv) == 5 and sys.argv[2] == "--symbols":
-        validate(Path(sys.argv[1]).resolve())
         validate_symbols(sys.argv[3], Path(sys.argv[4]).resolve())
         return
     reject("usage: check-wlpq-ffi-surface.py ROOT [--symbols PLATFORM FILE]")
