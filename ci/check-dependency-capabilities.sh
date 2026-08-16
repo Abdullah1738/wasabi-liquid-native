@@ -297,7 +297,7 @@ workspace_cargo_home="$scratch/workspace-final-cargo-home"
 proof_cache_authority="$scratch/proof-cache-authority.jsonl"
 workspace_cache_authority="$scratch/workspace-cache-authority.jsonl"
 proof_lock_sha256=4ca45ca0dd27b2a545b0d93174e02487cc756b26a34d946de5dcb349ceea7aab
-workspace_lock_sha256=06f55f2ef8d07368404477ad65cbcb104aa1998b2635d5ff9f6ef5a67cce584d
+workspace_lock_sha256=c12c61b0848647ad550dd5d63e9283559809f12e56d86646328bd99566cf7064
 python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py \
     --snapshot-only \
     "$repository_root" \
