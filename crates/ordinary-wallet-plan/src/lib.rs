@@ -851,6 +851,59 @@ pub fn decode_request(
     parse_owned(frame, header)
 }
 
+/// A borrow-free structural snapshot of one accepted WLPQ v1 frame.
+///
+/// This snapshot carries only the frame's declared managed observation
+/// revision and its selected-input and confidential-destination counts. It is
+/// plaintext metadata carried by the frame: it is not authenticated, does not
+/// establish source currentness, live unspentness, reservation, or chain
+/// authenticity, and exposes no selected input, destination, asset, value,
+/// address, opening, or key.
+pub struct InspectedOrdinaryWalletPlanRequest {
+    source_revision: u64,
+    selected_input_count: usize,
+    confidential_destination_count: usize,
+}
+
+impl InspectedOrdinaryWalletPlanRequest {
+    /// Returns the exact managed observation revision carried by the request.
+    pub const fn source_revision(&self) -> u64 {
+        self.source_revision
+    }
+
+    /// Returns the number of selected inputs declared by the request.
+    pub const fn selected_input_count(&self) -> usize {
+        self.selected_input_count
+    }
+
+    /// Returns the number of confidential destinations declared by the request.
+    pub const fn confidential_destination_count(&self) -> usize {
+        self.confidential_destination_count
+    }
+}
+
+/// Structurally decodes one frame and returns its declared revision and shape.
+///
+/// This performs exactly the same structural decode and source-epoch binding
+/// as [`decode_request`] and applies the identical frozen error precedence,
+/// then returns only the declared revision and row counts. It runs no catalog
+/// lookup, address parsing, amount-proof validation, descriptor ownership
+/// check, opening, signing, or randomness call, and it neither prepares nor
+/// authorizes any later transition.
+pub fn inspect_request(
+    frame: &[u8],
+    expected_source_epoch: &[u8; 32],
+) -> Result<InspectedOrdinaryWalletPlanRequest, OrdinaryWalletPlanWireError> {
+    let parsed = decode_request(frame, expected_source_epoch)?;
+    let inspected = InspectedOrdinaryWalletPlanRequest {
+        source_revision: parsed.source_revision,
+        selected_input_count: parsed.selected_inputs.len(),
+        confidential_destination_count: parsed.destinations.len(),
+    };
+    drop(parsed);
+    Ok(inspected)
+}
+
 trait SelectedView {
     fn transaction_id(&self) -> &[u8; 32];
     fn output_index(&self) -> &u32;

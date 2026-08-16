@@ -20,6 +20,7 @@ assert_not_impl_any!(OrdinaryWalletPlanRequestRef<'static>: std::fmt::Debug, Clo
 assert_not_impl_any!(EncodedOrdinaryWalletPlanRequest: std::fmt::Debug, Clone, Copy, std::fmt::Display, Eq, std::hash::Hash, IntoIterator);
 assert_not_impl_any!(ParsedOrdinaryWalletPlanRequest: std::fmt::Debug, Clone, Copy, std::fmt::Display, Eq, std::hash::Hash, IntoIterator);
 assert_not_impl_any!(PubliclyPreparedOrdinaryWalletPlanRequest<'static>: std::fmt::Debug, Clone, Copy, std::fmt::Display, Eq, std::hash::Hash, IntoIterator);
+assert_not_impl_any!(InspectedOrdinaryWalletPlanRequest: std::fmt::Debug, Clone, Copy, std::fmt::Display, Eq, std::hash::Hash, IntoIterator);
 const _: () = assert!(MAX_REACHABLE_REQUEST_BYTES < MAX_REQUEST_FRAME_BYTES);
 
 fn base_frame() -> Vec<u8> {
@@ -1173,3 +1174,80 @@ impl RngCore for NoRandomnessExpected {
 }
 
 impl CryptoRng for NoRandomnessExpected {}
+
+#[test]
+fn inspect_request_reports_the_declared_revision_and_shape() {
+    let catalog = DescriptorCatalog::derive(TEST_DESCRIPTOR, DescriptorNetwork::Test, 0).unwrap();
+    let frame = base_frame();
+    let inspected = inspect_request(&frame, &SOURCE_A).unwrap();
+    assert_eq!(inspected.source_revision(), 7);
+    assert_eq!(inspected.selected_input_count(), 1);
+    assert_eq!(inspected.confidential_destination_count(), 1);
+
+    let prepared = decode_request(&frame, &SOURCE_A)
+        .unwrap()
+        .prepare(&catalog, &Secp256k1::new());
+    // The base frame's candidate is a one-byte non-transaction, so public
+    // preparation rejects funding; the structural snapshot still agrees with
+    // the decoded owner's declared shape.
+    assert!(prepared.is_err());
+    let parsed = decode_request(&frame, &SOURCE_A).unwrap();
+    assert_eq!(inspected.source_revision(), 7);
+    drop(parsed);
+
+    let multi = multi_row_frame();
+    let inspected = inspect_request(&multi, &SOURCE_A).unwrap();
+    assert_eq!(inspected.source_revision(), 7);
+    assert_eq!(inspected.selected_input_count(), 2);
+    assert_eq!(inspected.confidential_destination_count(), 2);
+}
+
+#[test]
+fn inspect_request_applies_the_frozen_error_precedence() {
+    let frame = base_frame();
+    assert_eq!(
+        inspect_request(&frame, &[0; 32]).err().unwrap(),
+        OrdinaryWalletPlanWireError::InvalidArgument
+    );
+    assert_eq!(
+        inspect_request(&frame[..7], &SOURCE_A).err().unwrap(),
+        OrdinaryWalletPlanWireError::InvalidEncoding
+    );
+
+    let mut wrong_magic = frame.clone();
+    wrong_magic[0] ^= 1;
+    assert_eq!(
+        inspect_request(&wrong_magic, &SOURCE_A).err().unwrap(),
+        OrdinaryWalletPlanWireError::VersionMismatch
+    );
+
+    let mut combined = frame.clone();
+    combined[HEADER_BYTES..HEADER_BYTES + 32].fill(0);
+    combined[HEADER_BYTES + 76..HEADER_BYTES + 80].fill(0);
+    assert_eq!(
+        inspect_request(&combined, &SOURCE_B).err().unwrap(),
+        OrdinaryWalletPlanWireError::SourceBindingMismatch
+    );
+    assert_eq!(
+        inspect_request(&combined, &SOURCE_A).err().unwrap(),
+        OrdinaryWalletPlanWireError::LimitExceeded
+    );
+
+    for mutated in [frame.clone(), wrong_magic, combined] {
+        assert_eq!(
+            inspect_request(&mutated.clone(), &SOURCE_A).err(),
+            decode_request(&mutated, &SOURCE_A).err(),
+            "inspection and full decode share the frozen refusal"
+        );
+    }
+}
+
+#[test]
+fn inspect_request_performs_no_catalog_opening_signing_or_randomness() {
+    let frame = base_frame();
+    reset_drop_audit();
+    let inspected = inspect_request(&frame, &SOURCE_A).unwrap();
+    assert_eq!(inspected.source_revision(), 7);
+    let audit = DROP_AUDIT.with(|audit| *audit.borrow());
+    assert!(audit.all_zeroized);
+}

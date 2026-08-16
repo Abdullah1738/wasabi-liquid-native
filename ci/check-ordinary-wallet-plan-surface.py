@@ -30,7 +30,7 @@ EXPECTED_FILES = {
 }
 PRODUCTION_FILES = {"src/lib.rs", "src/reader.rs", "src/writer.rs"}
 EXPECTED_TEST_MODULE_SHA256 = (
-    "5960460818fb83e174ec1e124c60cfc63a94247b8774264e792c6de34e7cac39"
+    "f1997c1c5f386b1f6760db44b05ec2762975e6130283d5424306a461bec390cf"
 )
 EXPECTED_CONFORMANCE_TEST_SHA256 = (
     "68922bc580767bfc39202a4cd4fb5952512979a86842f3e12aece084ae532bd0"
@@ -44,7 +44,7 @@ PIN_REVIEW_BOUNDARY = (
 # These pins bind the exact compiler-reported production closure. They detect
 # drift only; changing a pin never substitutes for reviewing the changed bytes.
 EXPECTED_PRODUCTION_SOURCE_SHA256 = {
-    "src/lib.rs": "5fd3de09252c686b744f4ff94b85f15314787965e17f38b248e72f970c34dee3",
+    "src/lib.rs": "c5e4ab157078081af461f1ed4d925b36c30a858932c117a9a42b1deee0ecd604",
     "src/reader.rs": "6024994d1209a40a59b8ee8f49b4ccb237be46cffc2e4f5f7d39e74cde3325ac",
     "src/writer.rs": "bfa55038ff8dea778f6b2ce3ff83d2ab79a7cae11303f07776d0b25495c49c01",
 }
@@ -295,6 +295,7 @@ PUBLIC_API = Counter(
     {
         "enum OrdinaryWalletPlanWireError": 1,
         "struct EncodedOrdinaryWalletPlanRequest": 1,
+        "struct InspectedOrdinaryWalletPlanRequest": 1,
         "struct OrdinaryWalletPlanDestinationRef": 1,
         "struct OrdinaryWalletPlanRequestRef": 1,
         "struct OrdinaryWalletPlanSelectedRef": 1,
@@ -302,16 +303,17 @@ PUBLIC_API = Counter(
         "struct PubliclyPreparedOrdinaryWalletPlanRequest": 1,
         "fn as_bytes": 1,
         "fn code": 1,
-        "fn confidential_destination_count": 1,
+        "fn confidential_destination_count": 2,
         "fn decode_request": 1,
         "fn encode_request": 1,
+        "fn inspect_request": 1,
         "fn into_blinded_ordinary_wallet_pset": 1,
         "fn into_finalized_ordinary_wallet_transaction": 1,
         "fn new": 3,
         "fn prepare": 1,
         "fn reencode": 1,
-        "fn selected_input_count": 1,
-        "fn source_revision": 1,
+        "fn selected_input_count": 2,
+        "fn source_revision": 2,
     }
 )
 EXPECTED_VISIBILITY_SYNTAX = Counter(
@@ -328,13 +330,15 @@ EXPECTED_VISIBILITY_SYNTAX = Counter(
         "src/lib.rs:pub fn reencode(": 1,
         "src/lib.rs:pub fn prepare<'catalog>(": 1,
         "src/lib.rs:pub struct PubliclyPreparedOrdinaryWalletPlanRequest<'catalog> {": 1,
-        "src/lib.rs:pub const fn source_revision(&self) -> u64 {": 1,
-        "src/lib.rs:pub const fn selected_input_count(&self) -> usize {": 1,
-        "src/lib.rs:pub const fn confidential_destination_count(&self) -> usize {": 1,
+        "src/lib.rs:pub const fn source_revision(&self) -> u64 {": 2,
+        "src/lib.rs:pub const fn selected_input_count(&self) -> usize {": 2,
+        "src/lib.rs:pub const fn confidential_destination_count(&self) -> usize {": 2,
         "src/lib.rs:pub fn encode_request(": 1,
         "src/lib.rs:pub fn into_blinded_ordinary_wallet_pset<R, P>(": 1,
         "src/lib.rs:pub fn into_finalized_ordinary_wallet_transaction<R, P, S>(": 1,
         "src/lib.rs:pub fn decode_request(": 1,
+        "src/lib.rs:pub struct InspectedOrdinaryWalletPlanRequest {": 1,
+        "src/lib.rs:pub fn inspect_request(": 1,
         "src/reader.rs:pub(crate) struct Reader<'frame> {": 1,
         "src/reader.rs:pub(crate) const fn new(bytes: &'frame [u8]) -> Self {": 1,
         "src/reader.rs:pub(crate) fn take(": 1,
@@ -371,9 +375,9 @@ EXPECTED_ERROR_ENUM_SHA256 = (
 EXPECTED_ERROR_BEHAVIOR_SHA256 = (
     "952c40948e8f87eac4bea42cb9ec93e2ba853ed8ae58b1062926134ed7c74d73"
 )
-EXPECTED_PUBLIC_SIGNATURE_COUNT = 27
+EXPECTED_PUBLIC_SIGNATURE_COUNT = 31
 EXPECTED_PUBLIC_SIGNATURES_SHA256 = (
-    "3398688860aaeeabc0891e95391b3b1faa62fe547af46878bf118e9b70ee2c98"
+    "778b7b577525b5673afb59ba87d7017b9a59a7c07e16ce411b56d864cfb2b103"
 )
 EXPECTED_TRAIT_IMPL_COUNT = 42
 EXPECTED_TRAIT_IMPLS_SHA256 = (
@@ -389,9 +393,9 @@ EXPECTED_OUTER_ATTRIBUTE_COUNT = 64
 EXPECTED_OUTER_ATTRIBUTES_SHA256 = (
     "dc2df62c71bf9dabffba2cf9a184ddef53ff14d68454f9e6308bf5a6bcb53cb1"
 )
-EXPECTED_PUBLIC_ITEM_ATTRIBUTE_COUNT = 36
+EXPECTED_PUBLIC_ITEM_ATTRIBUTE_COUNT = 41
 EXPECTED_PUBLIC_ITEM_ATTRIBUTES_SHA256 = (
-    "5b116ba89df3e3b7dd4dea8a2a9d397dd3ba0bdd626ff2fb2b0ddf8a33665bed"
+    "4418bc028e20731d2bd8b6bd5eeaa39a7332cfa0df6231ba0476ef2a23a432f9"
 )
 EXPECTED_TOKEN_ATTRIBUTE_COUNT = 66
 EXPECTED_TOKEN_ATTRIBUTES_SHA256 = (
@@ -484,9 +488,9 @@ EXPECTED_DEPENDENCY_ASSOCIATED_REFERENCES = Counter(
         "Txid::from_byte_array": 2,
     }
 )
-EXPECTED_MEMBER_REFERENCE_COUNT = 701
+EXPECTED_MEMBER_REFERENCE_COUNT = 709
 EXPECTED_MEMBER_REFERENCES_SHA256 = (
-    "94f854a679543726993425cc3997e9520ba50e7bbb92629c674ff610b0ab83ec"
+    "cd029e56933e621603508ea139caa01d670643a357a9d82e88939549f85ec38a"
 )
 FUNCTION_LIKE_MACRO = re.compile(
     r"(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)\s*!\s*[({\[]"

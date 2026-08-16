@@ -1111,7 +1111,7 @@ wire_post_hash = "f30d4a8bfc6b43f61fb7eefdd0d86f866ebef815d5aa57cc2b5b3319023fcf
 provider_post_hash = "5d105ea8138170cac5501f42d148855b9b9141d38b3c2b9532a246a4d5dc9ade"
 plan_base_hash = "3287e329ab3d1b9868cb5eb3c39b1713a0d660b0dcd35100688bfb7c7a867178"
 ffi_base_hash = "5a6a3fa2fbf890844009d1ff1ad40841977a0ffa32c0faba795fa211262f8678"
-current_hash = "06f55f2ef8d07368404477ad65cbcb104aa1998b2635d5ff9f6ef5a67cce584d"
+current_hash = "c12c61b0848647ad550dd5d63e9283559809f12e56d86646328bd99566cf7064"
 if baseline_text != baseline_hash + "\n":
     raise SystemExit("wallet-facts conformance lock baseline pin mismatch")
 if hashlib.sha256(lock_bytes).hexdigest() != current_hash:
@@ -1124,7 +1124,14 @@ ffi_indexes = [index for index, block in enumerate(blocks) if ffi_marker in bloc
 ffi_block = """name = "wasabi-liquid-native-ordinary-wallet-plan-ffi"
 version = "0.1.0"
 dependencies = [
+ "elements",
+ "miniscript",
+ "rand",
+ "sha2",
+ "wasabi-liquid-native-ordinary-pset",
  "wasabi-liquid-native-ordinary-wallet-plan",
+ "wasabi-liquid-native-ordinary-wallet-pset",
+ "wasabi-liquid-native-wallet-facts",
  "zeroize",
 ]
 

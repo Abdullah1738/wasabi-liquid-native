@@ -9,12 +9,12 @@ from pathlib import Path
 
 
 EXPECTED_FILES = {
-    "Cargo.toml": "ec79f310167a45133c7058a799b8a5eb290cc907daf7c08f310d1245d855e861",
+    "Cargo.toml": "78369528cf889c4a1640efdccdcacdf839c5f370a2453a920fc04e811f691a55",
     "exports/linux.map": "2855cc79662ee0a23c83bc64e59ce2cb8d8c8a63532cbe0924ace9027f65e5d4",
     "exports/macos.txt": "502da036c01931221b206f5fa95e0d22e7090c7ee263986ff8b45a4864141d51",
     "exports/windows.def": "7a624e3dea8ed20e8d6ce74cea39539562ba1dc9dbe3ad9f7114294b93ddd85b",
     "include/wasabi_liquid_wlpq_v1.h": "3700e15e5cffb0cee947f5c0a4f05ce701ea7173b8e6b2dc1a406c1d4926e88c",
-    "src/lib.rs": "5218622baa22583ed78213ff43ee38e167239d38794301162e01fb1dcd8f3a91",
+    "src/lib.rs": "ff4a9efcb140f2070c1d3250220805280db4b82e21ed91765393925543a42b5e",
     "src/shim.c": "6d40dbe1ea71c8bf579c86d43dfad71c344eac86325e9993ea5515b0d34ee608",
 }
 
@@ -48,6 +48,8 @@ TEST_NAMES = {
     "ffi_rejects_every_structural_boundary_without_diagnostics",
     "pointer_and_length_checks_precede_every_borrow",
     "panic_is_contained_as_a_redacted_internal_error",
+    "ffi_validated_frame_drives_the_complete_product_adapter_caller_path",
+    "ffi_validated_frame_wrong_key_recovers_the_retryable_blinded_pset",
 }
 
 
@@ -82,7 +84,7 @@ def read_exact_file(path: Path, relative: str, expected_mode: int = 0o644) -> by
 
 def validate_manifest(root: Path, manifest_text: str) -> None:
     manifest = tomllib.loads(manifest_text)
-    if set(manifest) != {"package", "lib", "dependencies"}:
+    if set(manifest) != {"package", "lib", "dependencies", "dev-dependencies"}:
         reject("WLPQ FFI manifest section inventory changed")
     if manifest["package"] != {
         "name": "wasabi-liquid-native-ordinary-wallet-plan-ffi",
@@ -103,6 +105,26 @@ def validate_manifest(root: Path, manifest_text: str) -> None:
         "zeroize": {"version": "1.8", "default-features": False},
     }:
         reject("WLPQ FFI dependency surface changed")
+    if manifest["dev-dependencies"] != {
+        "elements": {
+            "git": "https://github.com/Abdullah1738/rust-elements.git",
+            "rev": "5b8865f8061459f82dcb8a1cf476b7ba17b14193",
+            "default-features": False,
+        },
+        "miniscript": {
+            "version": "=12.3.7",
+            "default-features": False,
+            "features": ["no-std"],
+        },
+        "rand": "0.8",
+        "sha2": {"version": "=0.11.0", "default-features": False},
+        "wasabi-liquid-native-ordinary-pset": {"path": "../ordinary-pset"},
+        "wasabi-liquid-native-ordinary-wallet-pset": {
+            "path": "../ordinary-wallet-pset"
+        },
+        "wasabi-liquid-native-wallet-facts": {"path": "../wallet-facts"},
+    }:
+        reject("WLPQ FFI dev-dependency surface changed")
 
     workspace = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))
     member = "crates/ordinary-wallet-plan-ffi"
@@ -122,7 +144,14 @@ def validate_manifest(root: Path, manifest_text: str) -> None:
             "name": "wasabi-liquid-native-ordinary-wallet-plan-ffi",
             "version": "0.1.0",
             "dependencies": [
+                "elements",
+                "miniscript",
+                "rand",
+                "sha2",
+                "wasabi-liquid-native-ordinary-pset",
                 "wasabi-liquid-native-ordinary-wallet-plan",
+                "wasabi-liquid-native-ordinary-wallet-pset",
+                "wasabi-liquid-native-wallet-facts",
                 "zeroize",
             ],
         }

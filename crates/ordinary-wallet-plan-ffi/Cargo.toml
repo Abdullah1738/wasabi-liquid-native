@@ -13,3 +13,12 @@ crate-type = ["rlib", "staticlib"]
 [dependencies]
 wasabi-liquid-native-ordinary-wallet-plan = { path = "../ordinary-wallet-plan" }
 zeroize = { version = "1.8", default-features = false }
+
+[dev-dependencies]
+elements = { git = "https://github.com/Abdullah1738/rust-elements.git", rev = "5b8865f8061459f82dcb8a1cf476b7ba17b14193", default-features = false }
+miniscript = { version = "=12.3.7", default-features = false, features = ["no-std"] }
+rand = "0.8"
+sha2 = { version = "=0.11.0", default-features = false }
+wasabi-liquid-native-ordinary-pset = { path = "../ordinary-pset" }
+wasabi-liquid-native-ordinary-wallet-pset = { path = "../ordinary-wallet-pset" }
+wasabi-liquid-native-wallet-facts = { path = "../wallet-facts" }
