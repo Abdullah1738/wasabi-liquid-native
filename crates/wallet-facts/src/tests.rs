@@ -201,6 +201,8 @@ static_assertions::assert_not_impl_any!(PubliclyValidatedSelectedOutput: Copy, C
 static_assertions::assert_not_impl_any!(ScopedSelectedRequestIndex: Copy, Clone, std::fmt::Debug);
 static_assertions::assert_not_impl_any!(ValidatedOwnedInput: Copy, Clone, std::fmt::Debug);
 static_assertions::assert_not_impl_any!(Slip77SelectedOutputOpeningProvider<'static>: Copy, Clone, std::fmt::Debug);
+static_assertions::assert_not_impl_any!(BorrowedOrdinarySpendKey<'static>: Copy, Clone, std::fmt::Debug);
+static_assertions::assert_not_impl_any!(BorrowedOrdinaryP2wpkhSigner<'static>: Copy, Clone, std::fmt::Debug);
 static_assertions::assert_not_impl_any!(ObservedTransactionInput: Copy, Clone, std::fmt::Debug);
 static_assertions::assert_not_impl_any!(ObservedWalletTransaction: Copy, Clone, std::fmt::Debug);
 static_assertions::assert_not_impl_any!(ObservedOwnedOutput: Copy, Clone, std::fmt::Debug);

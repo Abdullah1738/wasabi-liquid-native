@@ -20,15 +20,16 @@ use std::str::FromStr;
 use elements::encode::{deserialize, serialize};
 use elements::hashes::{hash160, sha256};
 use elements::secp256k1_zkp::rand::{CryptoRng, RngCore};
-use elements::secp256k1_zkp::{All, PublicKey, Secp256k1, SecretKey};
-use elements::{AssetId, OutPoint, Sequence, Transaction, TxOut, Txid};
+use elements::secp256k1_zkp::{All, Message, PublicKey, Secp256k1, SecretKey, ecdsa};
+use elements::{AssetId, EcdsaSighashType, OutPoint, Sequence, Transaction, TxOut, Txid};
+use miniscript::bitcoin::PublicKey as BitcoinPublicKey;
 use miniscript::bitcoin::bip32::ChildNumber;
 use miniscript::descriptor::{DescriptorPublicKey, Wildcard};
 use miniscript::{Descriptor, ForEachKey};
 use sha2::digest::Output;
 use sha2::{Digest, Sha256};
 use wasabi_liquid_native_ordinary_pset::{
-    MAX_CONFIDENTIAL_OUTPUTS, MAX_ORDINARY_VALUE, SpendableInput,
+    MAX_CONFIDENTIAL_OUTPUTS, MAX_ORDINARY_VALUE, OrdinaryP2wpkhSigner, SpendableInput,
 };
 use wasabi_liquid_native_output_opening::{OpenedOutput, open_confidential_output};
 use wasabi_liquid_native_transaction_validation::{
@@ -1169,6 +1170,76 @@ impl SelectedOutputOpeningProvider for Slip77SelectedOutputOpeningProvider<'_> {
         )
         .ok()?;
         open_confidential_output(secp, output, &blinding_key.0).ok()
+    }
+}
+
+/// A scoped borrow of one ordinary-wallet spend secret key.
+///
+/// This wrapper deliberately implements neither `Debug`, `Clone`, nor `Copy`
+/// and never owns, copies, retains, logs, or compares the borrowed key.
+pub struct BorrowedOrdinarySpendKey<'key> {
+    secret_key: &'key SecretKey,
+}
+
+impl<'key> BorrowedOrdinarySpendKey<'key> {
+    /// Creates a scoped borrow without copying the secret key.
+    pub const fn new(secret_key: &'key SecretKey) -> Self {
+        Self { secret_key }
+    }
+}
+
+/// A caller-owned [`OrdinaryP2wpkhSigner`] backed by one borrowed ordinary
+/// spend secret key.
+///
+/// Each `public_key` call derives the compressed public key from the borrowed
+/// secret key through the dependency's reviewed `PublicKey::from_secret_key`
+/// on one fresh `Secp256k1<All>` context. Each `sign_digest` call accepts only
+/// the pinned `EcdsaSighashType::AllPlusRangeproof`, wraps the exact
+/// caller-supplied digest in `Message::from_digest`, and signs through the
+/// dependency's reviewed deterministic RFC 6979 `sign_ecdsa` on one fresh
+/// context. Every refusal or failure returns the same redacted `None`.
+///
+/// The adapter is stateless apart from the borrowed key reference. It ignores
+/// `input_index` and `outpoint`, which exist for signers holding multiple
+/// keys; the reviewed call site binds every returned public key to the exact
+/// previous-output script before any signing request and verifies every
+/// returned signature. The adapter performs no descriptor-catalog lookup,
+/// address or script parsing, transaction validation, RNG call, sighash
+/// computation, witness construction, ownership or provenance check, and
+/// claims no chain inclusion, current unspentness, key custody, or erasure of
+/// caller-held key material.
+pub struct BorrowedOrdinaryP2wpkhSigner<'key> {
+    spend_key: BorrowedOrdinarySpendKey<'key>,
+}
+
+impl<'key> BorrowedOrdinaryP2wpkhSigner<'key> {
+    /// Creates a stateless signer over one borrowed spend secret key.
+    pub const fn new(spend_key: BorrowedOrdinarySpendKey<'key>) -> Self {
+        Self { spend_key }
+    }
+}
+
+impl OrdinaryP2wpkhSigner for BorrowedOrdinaryP2wpkhSigner<'_> {
+    fn public_key(&mut self, _: usize, _: &OutPoint) -> Option<BitcoinPublicKey> {
+        let secp = Secp256k1::<All>::new();
+        Some(BitcoinPublicKey::from(PublicKey::from_secret_key(
+            &secp,
+            self.spend_key.secret_key,
+        )))
+    }
+
+    fn sign_digest(
+        &mut self,
+        _: usize,
+        _: &OutPoint,
+        digest: [u8; 32],
+        sighash_type: EcdsaSighashType,
+    ) -> Option<ecdsa::Signature> {
+        if sighash_type != EcdsaSighashType::AllPlusRangeproof {
+            return None;
+        }
+        let secp = Secp256k1::<All>::new();
+        Some(secp.sign_ecdsa(&Message::from_digest(digest), self.spend_key.secret_key))
     }
 }
 
