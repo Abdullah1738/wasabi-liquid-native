@@ -1,2 +1,3 @@
 EXPORTS
     wln_wlpq_validate_v1
+    wln_wlpq_sign_finalize_v1

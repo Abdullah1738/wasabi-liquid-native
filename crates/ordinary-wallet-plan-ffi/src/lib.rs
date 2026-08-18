@@ -1,16 +1,29 @@
 #![deny(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
-//! Minimal C ABI for canonical WLPQ v1 frame validation.
+//! Minimal C ABI for canonical WLPQ v1 frame validation and caller-owned
+//! signing.
 //!
-//! This crate deliberately exposes one stateless operation. It has no handle,
-//! callback, allocator, provider, signer, PSET, transaction, node, reservation,
-//! currentness, broadcast, or release authority.
+//! This crate deliberately exposes two stateless operations. It has no handle,
+//! allocator, provider, PSET, transaction, node, reservation, currentness,
+//! broadcast, or release authority. The signer stays caller-owned: only
+//! compressed public keys and digest signatures cross the callback boundary
+//! and this crate never receives, copies, or stores a secret key.
 
 use core::{ptr, slice};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
+use elements::bitcoin::PublicKey as BitcoinPublicKey;
+use elements::encode::serialize;
+use elements::secp256k1_zkp::ecdsa;
+use elements::{EcdsaSighashType, OutPoint};
+use rand::thread_rng;
+use wasabi_liquid_native_ordinary_pset::{OrdinaryP2wpkhSigner, OrdinarySigningError};
 use wasabi_liquid_native_ordinary_wallet_plan::{OrdinaryWalletPlanWireError, decode_request};
+use wasabi_liquid_native_ordinary_wallet_pset::OrdinaryWalletTransactionReason;
+use wasabi_liquid_native_wallet_facts::{
+    BorrowedSlip77, DescriptorCatalog, DescriptorNetwork, Slip77SelectedOutputOpeningProvider,
+};
 use zeroize::Zeroize;
 
 /// The frozen WLPQ FFI version.
@@ -38,6 +51,16 @@ pub const WLN_WLPQ_STATUS_PLAN_REJECTED_V1: i32 = -7;
 pub const WLN_WLPQ_STATUS_FUNDING_REJECTED_V1: i32 = -8;
 /// Native validation panicked or violated its decode/re-encode invariant.
 pub const WLN_WLPQ_STATUS_INTERNAL_ERROR_V1: i32 = -9;
+/// A caller-owned signer callback returned the refusal code.
+pub const WLN_WLPQ_STATUS_SIGNER_REFUSED_V1: i32 = -10;
+/// The canonical ordinary-PSET transition rejected a public key or signature.
+pub const WLN_WLPQ_STATUS_SIGNING_REJECTED_V1: i32 = -11;
+/// The output buffer capacity was too small; the required length is reported.
+pub const WLN_WLPQ_STATUS_OUTPUT_CAPACITY_V1: i32 = -12;
+
+const OUTPOINT_BYTES_V1: usize = 36;
+const PUBLIC_KEY_BYTES_V1: usize = 33;
+const SIGNATURE_CAPACITY_V1: usize = 73;
 
 struct ScopedFrame(Vec<u8>);
 
@@ -50,6 +73,14 @@ impl Drop for ScopedFrame {
 struct ScopedEpoch([u8; 32]);
 
 impl Drop for ScopedEpoch {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+struct ScopedBroadcast(Vec<u8>);
+
+impl Drop for ScopedBroadcast {
     fn drop(&mut self) {
         self.0.zeroize();
     }
@@ -111,6 +142,271 @@ pub unsafe extern "C" fn wln_wlpq_validate_impl_v1(
     }
 }
 
+/// Signs and finalizes one canonical WLPQ v1 frame through caller-owned
+/// signing callbacks.
+///
+/// The frame is decoded and prepared exactly as
+/// `wln_wlpq_validate_impl_v1` decodes it, then driven through the landed
+/// build-blind-sign-finalize composition. The two callbacks are the C ABI
+/// projection of the `OrdinaryP2wpkhSigner` trait: `public_key_callback`
+/// receives the opaque `signer_context`, one borrowed 36-byte
+/// consensus-serialized outpoint with its explicit length, and a caller output
+/// buffer of capacity at least 33, and on success writes the 33-byte
+/// compressed public key and returns zero; `sign_digest_callback` additionally
+/// receives the natively computed 32-byte sighash-with-rangeproof digest and
+/// on success writes the strict-DER low-S signature including the trailing
+/// sighash byte (at most 73 bytes) and returns zero. Any nonzero callback
+/// return is a fail-closed refusal. The signer stays caller-owned: only
+/// compressed public keys and digest signatures cross this boundary and the
+/// native side never receives, copies, or stores a secret key. On success the
+/// finalized confidential transaction serialization is written to
+/// `out_transaction` and its byte length to `*out_transaction_length`; when
+/// the capacity is too small the required length is still reported.
+///
+/// # Safety
+///
+/// `frame` must reference `frame_length` readable bytes,
+/// `expected_source_epoch` must reference 32 readable bytes, `out_transaction`
+/// must reference `out_transaction_capacity` writable bytes, and
+/// `out_transaction_length` must reference one writable `u64`. The callbacks
+/// must honor their frozen contracts and must not retain any borrowed buffer.
+/// Null pointers and null callbacks are rejected before dereference, but no C
+/// ABI can validate arbitrary non-null pointer provenance.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn wln_wlpq_sign_finalize_impl_v1(
+    frame: *const u8,
+    frame_length: u64,
+    expected_source_epoch: *const u8,
+    signer_context: *const u8,
+    public_key_callback: unsafe extern "C" fn(*const u8, *const u8, u64, *mut u8, u64) -> i32,
+    sign_digest_callback: unsafe extern "C" fn(
+        *const u8,
+        *const u8,
+        u64,
+        *const u8,
+        *mut u8,
+        u64,
+    ) -> i32,
+    out_transaction: *mut u8,
+    out_transaction_capacity: u64,
+    out_transaction_length: *mut u64,
+    descriptor: *const u8,
+    descriptor_length: u64,
+    last_index: u64,
+    slip77_master_key: *const u8,
+) -> i32 {
+    if frame.is_null() || expected_source_epoch.is_null() || frame_length == 0 {
+        return WLN_WLPQ_STATUS_INVALID_ARGUMENT_V1;
+    }
+    if frame_length > WLN_WLPQ_MAX_FRAME_BYTES_V1 {
+        return WLN_WLPQ_STATUS_LIMIT_EXCEEDED_V1;
+    }
+    let Ok(frame_length) = usize::try_from(frame_length) else {
+        return WLN_WLPQ_STATUS_INVALID_ARGUMENT_V1;
+    };
+    if out_transaction.is_null()
+        || out_transaction_length.is_null()
+        || descriptor.is_null()
+        || descriptor_length == 0
+        || slip77_master_key.is_null()
+    {
+        return WLN_WLPQ_STATUS_INVALID_ARGUMENT_V1;
+    }
+    let Ok(descriptor_length) = usize::try_from(descriptor_length) else {
+        return WLN_WLPQ_STATUS_INVALID_ARGUMENT_V1;
+    };
+    let Ok(out_transaction_capacity) = usize::try_from(out_transaction_capacity) else {
+        return WLN_WLPQ_STATUS_INVALID_ARGUMENT_V1;
+    };
+    let Ok(last_index) = u32::try_from(last_index) else {
+        return WLN_WLPQ_STATUS_INVALID_ARGUMENT_V1;
+    };
+
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        let mut epoch = ScopedEpoch([0; 32]);
+        // SAFETY: The caller contract requires a readable 32-byte epoch for
+        // the duration of this call; null was rejected before this copy.
+        unsafe {
+            ptr::copy_nonoverlapping(expected_source_epoch, epoch.0.as_mut_ptr(), epoch.0.len());
+        }
+        // SAFETY: The caller contract requires `frame_length` readable bytes
+        // for the duration of this call; null and the outer cap were checked.
+        let frame = ScopedFrame(unsafe { slice::from_raw_parts(frame, frame_length) }.to_vec());
+        maybe_inject_test_panic();
+
+        let decoded = decode_request(&frame.0, &epoch.0).map_err(wire_status)?;
+
+        let mut slip77 = ScopedEpoch([0; 32]);
+        // SAFETY: The caller contract requires a readable 32-byte SLIP-77
+        // master key for the duration of this call; null was rejected.
+        unsafe {
+            ptr::copy_nonoverlapping(slip77_master_key, slip77.0.as_mut_ptr(), slip77.0.len());
+        }
+        // SAFETY: The caller contract requires `descriptor_length` readable
+        // bytes for the duration of this call; null was rejected.
+        let descriptor_bytes =
+            unsafe { slice::from_raw_parts(descriptor, descriptor_length) }.to_vec();
+        let descriptor_text = core::str::from_utf8(&descriptor_bytes)
+            .map_err(|_| WLN_WLPQ_STATUS_INVALID_ARGUMENT_V1)?;
+        let catalog = derive_catalog_for_frame(descriptor_text, last_index)?;
+        let secp = elements::secp256k1_zkp::Secp256k1::new();
+        let prepared = decoded.prepare(&catalog, &secp).map_err(wire_status)?;
+
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            let mut provider =
+                Slip77SelectedOutputOpeningProvider::new(BorrowedSlip77::new(&slip77.0));
+            let mut rng = thread_rng();
+            let mut signer = CallbackOrdinaryP2wpkhSigner {
+                context: signer_context,
+                public_key_callback,
+                sign_digest_callback,
+            };
+            prepared
+                .into_finalized_ordinary_wallet_transaction(&mut provider, &mut rng, &mut signer)
+                .map_err(|failure| match failure.reason() {
+                    OrdinaryWalletTransactionReason::Preparation(_) => {
+                        WLN_WLPQ_STATUS_INTERNAL_ERROR_V1
+                    }
+                    OrdinaryWalletTransactionReason::Signing(reason) => match reason {
+                        OrdinarySigningError::PublicKeyUnavailable
+                        | OrdinarySigningError::SignatureUnavailable => {
+                            WLN_WLPQ_STATUS_SIGNER_REFUSED_V1
+                        }
+                        _ => WLN_WLPQ_STATUS_SIGNING_REJECTED_V1,
+                    },
+                    _ => WLN_WLPQ_STATUS_INTERNAL_ERROR_V1,
+                })
+        }));
+        let finalized = match outcome {
+            Ok(Ok(finalized)) => finalized,
+            Ok(Err(status)) => return Err(status),
+            Err(_) => return Err(WLN_WLPQ_STATUS_INTERNAL_ERROR_V1),
+        };
+        let broadcast = ScopedBroadcast(finalized.serialize_for_broadcast());
+        // SAFETY: The caller contract requires one writable u64 here; null was
+        // rejected before the closure.
+        unsafe {
+            ptr::write(out_transaction_length, broadcast.0.len() as u64);
+        }
+        if broadcast.0.len() > out_transaction_capacity {
+            return Err(WLN_WLPQ_STATUS_OUTPUT_CAPACITY_V1);
+        }
+        // SAFETY: The caller contract requires `out_transaction_capacity`
+        // writable bytes and the capacity covers the broadcast length.
+        unsafe {
+            ptr::copy_nonoverlapping(broadcast.0.as_ptr(), out_transaction, broadcast.0.len());
+        }
+        Ok(WLN_WLPQ_STATUS_OK_V1)
+    }));
+
+    match outcome {
+        Ok(Ok(status)) | Ok(Err(status)) => status,
+        Err(_) => WLN_WLPQ_STATUS_INTERNAL_ERROR_V1,
+    }
+}
+
+fn derive_catalog_for_frame(
+    descriptor_text: &str,
+    last_index: u32,
+) -> Result<DescriptorCatalog, i32> {
+    DescriptorCatalog::derive(descriptor_text, DescriptorNetwork::Test, last_index)
+        .or_else(|_| {
+            DescriptorCatalog::derive(descriptor_text, DescriptorNetwork::Mainnet, last_index)
+        })
+        .map_err(|_| WLN_WLPQ_STATUS_CONTEXT_REJECTED_V1)
+}
+
+struct CallbackOrdinaryP2wpkhSigner {
+    context: *const u8,
+    public_key_callback: unsafe extern "C" fn(*const u8, *const u8, u64, *mut u8, u64) -> i32,
+    sign_digest_callback:
+        unsafe extern "C" fn(*const u8, *const u8, u64, *const u8, *mut u8, u64) -> i32,
+}
+
+impl OrdinaryP2wpkhSigner for CallbackOrdinaryP2wpkhSigner {
+    fn public_key(&mut self, _input_index: usize, outpoint: &OutPoint) -> Option<BitcoinPublicKey> {
+        let outpoint_bytes = serialize(outpoint);
+        debug_assert_eq!(outpoint_bytes.len(), OUTPOINT_BYTES_V1);
+        let mut output = [0u8; PUBLIC_KEY_BYTES_V1];
+        // SAFETY: `output` is a writable 33-byte stack buffer and
+        // `outpoint_bytes` is the readable 36-byte consensus serialization;
+        // both outlive the call. The callback contract forbids retaining the
+        // borrowed buffers.
+        let status = unsafe {
+            (self.public_key_callback)(
+                self.context,
+                outpoint_bytes.as_ptr(),
+                outpoint_bytes.len() as u64,
+                output.as_mut_ptr(),
+                output.len() as u64,
+            )
+        };
+        if status != WLN_WLPQ_STATUS_OK_V1 {
+            return None;
+        }
+        BitcoinPublicKey::from_slice(&output).ok()
+    }
+
+    fn sign_digest(
+        &mut self,
+        _input_index: usize,
+        outpoint: &OutPoint,
+        digest: [u8; 32],
+        sighash_type: EcdsaSighashType,
+    ) -> Option<ecdsa::Signature> {
+        if sighash_type != EcdsaSighashType::AllPlusRangeproof {
+            return None;
+        }
+        let outpoint_bytes = serialize(outpoint);
+        debug_assert_eq!(outpoint_bytes.len(), OUTPOINT_BYTES_V1);
+        let mut output = [0u8; SIGNATURE_CAPACITY_V1];
+        // SAFETY: `output` is a writable 73-byte stack buffer, `digest` is a
+        // readable 32-byte stack buffer, and `outpoint_bytes` is the readable
+        // 36-byte consensus serialization; all outlive the call. The callback
+        // contract forbids retaining the borrowed buffers.
+        let status = unsafe {
+            (self.sign_digest_callback)(
+                self.context,
+                outpoint_bytes.as_ptr(),
+                outpoint_bytes.len() as u64,
+                digest.as_ptr(),
+                output.as_mut_ptr(),
+                output.len() as u64,
+            )
+        };
+        if status != WLN_WLPQ_STATUS_OK_V1 {
+            return None;
+        }
+        // The output buffer is exactly 73 bytes: a strict-DER signature
+        // followed by one sighash byte. The DER sequence self-delimits its
+        // total length at byte 1, so the signature occupies
+        // `2 + der_total_length` bytes and the sighash byte immediately
+        // follows it. Any trailing capacity after the sighash byte is zero
+        // padding the callback leaves unwritten.
+        if output[0] != 0x30 {
+            return None;
+        }
+        let der_total_length = usize::from(output[1]);
+        if !(8..=71).contains(&der_total_length) {
+            return None;
+        }
+        let signature_end = 2 + der_total_length;
+        let der = &output[..signature_end];
+        let sighash_byte = output[signature_end];
+        if sighash_byte != sighash_type.as_u32() as u8 {
+            return None;
+        }
+        let signature = ecdsa::Signature::from_der(der).ok()?;
+        let mut normalized = signature;
+        normalized.normalize_s();
+        if normalized != signature {
+            return None;
+        }
+        Some(signature)
+    }
+}
+
 fn wire_status(error: OrdinaryWalletPlanWireError) -> i32 {
     -(error.code() as i32)
 }
@@ -140,7 +436,7 @@ mod tests {
     use elements::confidential::{Asset, AssetBlindingFactor, Value, ValueBlindingFactor};
     use elements::encode::{deserialize, serialize};
     use elements::hashes::sha256;
-    use elements::secp256k1_zkp::{Secp256k1, SecretKey};
+    use elements::secp256k1_zkp::{Message, Secp256k1, SecretKey};
     use elements::{
         Address, AddressParams, AssetId, LockTime, OutPoint, Script, Transaction, TxOut,
         TxOutSecrets,
@@ -433,8 +729,400 @@ mod tests {
         assert_eq!(decoded, *finalized.transaction());
     }
 
+    struct CallbackSignerState {
+        spend_key: SecretKey,
+        refuse_public_key: bool,
+        refuse_sign_digest: bool,
+        wrong_digest: bool,
+    }
+
+    unsafe extern "C" fn callback_public_key(
+        context: *const u8,
+        outpoint: *const u8,
+        outpoint_length: u64,
+        out_public_key: *mut u8,
+        public_key_capacity: u64,
+    ) -> i32 {
+        // SAFETY: The native adapter contract supplies a readable context and
+        // a writable output buffer for the duration of this call.
+        unsafe {
+            if context.is_null()
+                || outpoint.is_null()
+                || outpoint_length != 36
+                || out_public_key.is_null()
+                || public_key_capacity < 33
+            {
+                return WLN_WLPQ_STATUS_INVALID_ARGUMENT_V1;
+            }
+            let state = &*(context as *const CallbackSignerState);
+            if state.refuse_public_key {
+                return WLN_WLPQ_STATUS_SIGNER_REFUSED_V1;
+            }
+            let secp = Secp256k1::new();
+            let public_key = BitcoinPublicKey::from(
+                elements::secp256k1_zkp::PublicKey::from_secret_key(&secp, &state.spend_key),
+            );
+            ptr::copy_nonoverlapping(public_key.to_bytes().as_ptr(), out_public_key, 33);
+            WLN_WLPQ_STATUS_OK_V1
+        }
+    }
+
+    unsafe extern "C" fn callback_sign_digest(
+        context: *const u8,
+        outpoint: *const u8,
+        outpoint_length: u64,
+        digest: *const u8,
+        out_signature: *mut u8,
+        signature_capacity: u64,
+    ) -> i32 {
+        // SAFETY: The native adapter contract supplies a readable context,
+        // outpoint, and digest, and a writable output buffer for the duration
+        // of this call.
+        unsafe {
+            if context.is_null()
+                || outpoint.is_null()
+                || outpoint_length != 36
+                || digest.is_null()
+                || out_signature.is_null()
+                || signature_capacity < 73
+            {
+                return WLN_WLPQ_STATUS_INVALID_ARGUMENT_V1;
+            }
+            let state = &*(context as *const CallbackSignerState);
+            if state.refuse_sign_digest {
+                return WLN_WLPQ_STATUS_SIGNER_REFUSED_V1;
+            }
+            let mut digest_bytes = [0u8; 32];
+            ptr::copy_nonoverlapping(digest, digest_bytes.as_mut_ptr(), 32);
+            if state.wrong_digest {
+                digest_bytes[0] ^= 0xff;
+            }
+            let secp = Secp256k1::new();
+            let signature = secp.sign_ecdsa(&Message::from_digest(digest_bytes), &state.spend_key);
+            let mut bytes = signature.serialize_der().to_vec();
+            bytes.push(elements::EcdsaSighashType::AllPlusRangeproof.as_u32() as u8);
+            ptr::copy_nonoverlapping(bytes.as_ptr(), out_signature, bytes.len());
+            WLN_WLPQ_STATUS_OK_V1
+        }
+    }
+
+    #[test]
+    fn ffi_sign_finalize_signable_fixture_produces_a_finalized_transaction() {
+        let fixture = SignableFixture::new();
+        let frame = fixture.frame();
+        let state = CallbackSignerState {
+            spend_key: fixture.spend_key,
+            refuse_public_key: false,
+            refuse_sign_digest: false,
+            wrong_digest: false,
+        };
+        let mut out_transaction = [0u8; 65536];
+        let mut out_transaction_length = 0u64;
+        // SAFETY: All borrowed buffers remain valid for the call and the
+        // callbacks honor the frozen contract.
+        let status = unsafe {
+            wln_wlpq_sign_finalize_impl_v1(
+                frame.as_ptr(),
+                frame.len() as u64,
+                fixture.source_epoch.as_ptr(),
+                (&state as *const CallbackSignerState) as *const u8,
+                callback_public_key,
+                callback_sign_digest,
+                out_transaction.as_mut_ptr(),
+                out_transaction.len() as u64,
+                &mut out_transaction_length,
+                fixture.descriptor.as_ptr(),
+                fixture.descriptor.len() as u64,
+                1,
+                fixture.slip77.as_ptr(),
+            )
+        };
+        assert_eq!(status, WLN_WLPQ_STATUS_OK_V1);
+        assert!(out_transaction_length > 0);
+        let broadcast = &out_transaction[..out_transaction_length as usize];
+        let decoded: Transaction = deserialize(broadcast).unwrap();
+        assert_eq!(decoded.input.len(), 2);
+        assert_eq!(decoded.output.len(), 3);
+        let expected_public_key =
+            BitcoinPublicKey::from(elements::secp256k1_zkp::PublicKey::from_secret_key(
+                &Secp256k1::new(),
+                &fixture.spend_key,
+            ));
+        for input in &decoded.input {
+            assert!(input.script_sig.is_empty());
+            let witness = input.witness.script_witness.to_vec();
+            assert_eq!(witness.len(), 2);
+            assert_eq!(witness[1], expected_public_key.to_bytes());
+        }
+        let txid = decoded.txid();
+        let wtxid = decoded.wtxid();
+        assert_eq!(txid, decoded.txid());
+        assert_eq!(wtxid, decoded.wtxid());
+    }
+
+    #[test]
+    fn ffi_sign_finalize_wrong_key_fails_closed_as_signing_rejected() {
+        let fixture = SignableFixture::new();
+        let frame = fixture.frame();
+        let wrong_key_bytes = synthetic_material(b"WLPQ FFI callback wrong spend key");
+        let wrong_key = SecretKey::from_slice(&wrong_key_bytes).unwrap();
+        let state = CallbackSignerState {
+            spend_key: wrong_key,
+            refuse_public_key: false,
+            refuse_sign_digest: false,
+            wrong_digest: false,
+        };
+        let mut out_transaction = [0u8; 65536];
+        let mut out_transaction_length = 0u64;
+        // SAFETY: All borrowed buffers remain valid for the call.
+        let status = unsafe {
+            wln_wlpq_sign_finalize_impl_v1(
+                frame.as_ptr(),
+                frame.len() as u64,
+                fixture.source_epoch.as_ptr(),
+                (&state as *const CallbackSignerState) as *const u8,
+                callback_public_key,
+                callback_sign_digest,
+                out_transaction.as_mut_ptr(),
+                out_transaction.len() as u64,
+                &mut out_transaction_length,
+                fixture.descriptor.as_ptr(),
+                fixture.descriptor.len() as u64,
+                1,
+                fixture.slip77.as_ptr(),
+            )
+        };
+        assert_eq!(status, WLN_WLPQ_STATUS_SIGNING_REJECTED_V1);
+    }
+
+    #[test]
+    fn ffi_sign_finalize_mismatched_digest_fails_closed_as_signing_rejected() {
+        let fixture = SignableFixture::new();
+        let frame = fixture.frame();
+        let state = CallbackSignerState {
+            spend_key: fixture.spend_key,
+            refuse_public_key: false,
+            refuse_sign_digest: false,
+            wrong_digest: true,
+        };
+        let mut out_transaction = [0u8; 65536];
+        let mut out_transaction_length = 0u64;
+        // SAFETY: All borrowed buffers remain valid for the call.
+        let status = unsafe {
+            wln_wlpq_sign_finalize_impl_v1(
+                frame.as_ptr(),
+                frame.len() as u64,
+                fixture.source_epoch.as_ptr(),
+                (&state as *const CallbackSignerState) as *const u8,
+                callback_public_key,
+                callback_sign_digest,
+                out_transaction.as_mut_ptr(),
+                out_transaction.len() as u64,
+                &mut out_transaction_length,
+                fixture.descriptor.as_ptr(),
+                fixture.descriptor.len() as u64,
+                1,
+                fixture.slip77.as_ptr(),
+            )
+        };
+        assert_eq!(status, WLN_WLPQ_STATUS_SIGNING_REJECTED_V1);
+    }
+
+    #[test]
+    fn ffi_sign_finalize_signer_refusal_fails_closed_as_signer_refused() {
+        let fixture = SignableFixture::new();
+        let frame = fixture.frame();
+        let state = CallbackSignerState {
+            spend_key: fixture.spend_key,
+            refuse_public_key: true,
+            refuse_sign_digest: false,
+            wrong_digest: false,
+        };
+        let mut out_transaction = [0u8; 65536];
+        let mut out_transaction_length = 0u64;
+        // SAFETY: All borrowed buffers remain valid for the call.
+        let status = unsafe {
+            wln_wlpq_sign_finalize_impl_v1(
+                frame.as_ptr(),
+                frame.len() as u64,
+                fixture.source_epoch.as_ptr(),
+                (&state as *const CallbackSignerState) as *const u8,
+                callback_public_key,
+                callback_sign_digest,
+                out_transaction.as_mut_ptr(),
+                out_transaction.len() as u64,
+                &mut out_transaction_length,
+                fixture.descriptor.as_ptr(),
+                fixture.descriptor.len() as u64,
+                1,
+                fixture.slip77.as_ptr(),
+            )
+        };
+        assert_eq!(status, WLN_WLPQ_STATUS_SIGNER_REFUSED_V1);
+    }
+
+    #[test]
+    fn ffi_sign_finalize_corrupt_frame_fails_closed_as_invalid_encoding() {
+        let fixture = SignableFixture::new();
+        let mut frame = fixture.frame();
+        frame.truncate(frame.len() / 2);
+        let state = CallbackSignerState {
+            spend_key: fixture.spend_key,
+            refuse_public_key: false,
+            refuse_sign_digest: false,
+            wrong_digest: false,
+        };
+        let mut out_transaction = [0u8; 65536];
+        let mut out_transaction_length = 0u64;
+        // SAFETY: All borrowed buffers remain valid for the call.
+        let status = unsafe {
+            wln_wlpq_sign_finalize_impl_v1(
+                frame.as_ptr(),
+                frame.len() as u64,
+                fixture.source_epoch.as_ptr(),
+                (&state as *const CallbackSignerState) as *const u8,
+                callback_public_key,
+                callback_sign_digest,
+                out_transaction.as_mut_ptr(),
+                out_transaction.len() as u64,
+                &mut out_transaction_length,
+                fixture.descriptor.as_ptr(),
+                fixture.descriptor.len() as u64,
+                1,
+                fixture.slip77.as_ptr(),
+            )
+        };
+        assert_eq!(status, WLN_WLPQ_STATUS_INVALID_ENCODING_V1);
+    }
+
+    #[test]
+    fn ffi_sign_finalize_output_capacity_failure_reports_required_length() {
+        let fixture = SignableFixture::new();
+        let frame = fixture.frame();
+        let state = CallbackSignerState {
+            spend_key: fixture.spend_key,
+            refuse_public_key: false,
+            refuse_sign_digest: false,
+            wrong_digest: false,
+        };
+        let mut out_transaction = [0u8; 1];
+        let mut out_transaction_length = 0u64;
+        // SAFETY: All borrowed buffers remain valid for the call.
+        let status = unsafe {
+            wln_wlpq_sign_finalize_impl_v1(
+                frame.as_ptr(),
+                frame.len() as u64,
+                fixture.source_epoch.as_ptr(),
+                (&state as *const CallbackSignerState) as *const u8,
+                callback_public_key,
+                callback_sign_digest,
+                out_transaction.as_mut_ptr(),
+                out_transaction.len() as u64,
+                &mut out_transaction_length,
+                fixture.descriptor.as_ptr(),
+                fixture.descriptor.len() as u64,
+                1,
+                fixture.slip77.as_ptr(),
+            )
+        };
+        assert_eq!(status, WLN_WLPQ_STATUS_OUTPUT_CAPACITY_V1);
+        assert!(out_transaction_length > 1);
+        assert!(out_transaction_length <= 65536);
+    }
+
+    #[test]
+    fn ffi_sign_finalize_null_and_capacity_failures_fail_closed() {
+        let fixture = SignableFixture::new();
+        let frame = fixture.frame();
+        let state = CallbackSignerState {
+            spend_key: fixture.spend_key,
+            refuse_public_key: false,
+            refuse_sign_digest: false,
+            wrong_digest: false,
+        };
+        let mut out_transaction = [0u8; 65536];
+        let mut out_transaction_length = 0u64;
+        // SAFETY: Null is intentionally supplied to exercise pre-dereference validation.
+        let status = unsafe {
+            wln_wlpq_sign_finalize_impl_v1(
+                ptr::null(),
+                1,
+                fixture.source_epoch.as_ptr(),
+                (&state as *const CallbackSignerState) as *const u8,
+                callback_public_key,
+                callback_sign_digest,
+                out_transaction.as_mut_ptr(),
+                out_transaction.len() as u64,
+                &mut out_transaction_length,
+                fixture.descriptor.as_ptr(),
+                fixture.descriptor.len() as u64,
+                1,
+                fixture.slip77.as_ptr(),
+            )
+        };
+        assert_eq!(status, WLN_WLPQ_STATUS_INVALID_ARGUMENT_V1);
+        // SAFETY: Null is intentionally supplied to exercise pre-dereference validation.
+        let status = unsafe {
+            wln_wlpq_sign_finalize_impl_v1(
+                frame.as_ptr(),
+                frame.len() as u64,
+                ptr::null(),
+                (&state as *const CallbackSignerState) as *const u8,
+                callback_public_key,
+                callback_sign_digest,
+                out_transaction.as_mut_ptr(),
+                out_transaction.len() as u64,
+                &mut out_transaction_length,
+                fixture.descriptor.as_ptr(),
+                fixture.descriptor.len() as u64,
+                1,
+                fixture.slip77.as_ptr(),
+            )
+        };
+        assert_eq!(status, WLN_WLPQ_STATUS_INVALID_ARGUMENT_V1);
+        // SAFETY: Null is intentionally supplied to exercise pre-dereference validation.
+        let status = unsafe {
+            wln_wlpq_sign_finalize_impl_v1(
+                frame.as_ptr(),
+                frame.len() as u64,
+                fixture.source_epoch.as_ptr(),
+                (&state as *const CallbackSignerState) as *const u8,
+                callback_public_key,
+                callback_sign_digest,
+                ptr::null_mut(),
+                out_transaction.len() as u64,
+                &mut out_transaction_length,
+                fixture.descriptor.as_ptr(),
+                fixture.descriptor.len() as u64,
+                1,
+                fixture.slip77.as_ptr(),
+            )
+        };
+        assert_eq!(status, WLN_WLPQ_STATUS_INVALID_ARGUMENT_V1);
+        // SAFETY: Null is intentionally supplied to exercise pre-dereference validation.
+        let status = unsafe {
+            wln_wlpq_sign_finalize_impl_v1(
+                frame.as_ptr(),
+                frame.len() as u64,
+                fixture.source_epoch.as_ptr(),
+                (&state as *const CallbackSignerState) as *const u8,
+                callback_public_key,
+                callback_sign_digest,
+                out_transaction.as_mut_ptr(),
+                out_transaction.len() as u64,
+                ptr::null_mut(),
+                fixture.descriptor.as_ptr(),
+                fixture.descriptor.len() as u64,
+                1,
+                fixture.slip77.as_ptr(),
+            )
+        };
+        assert_eq!(status, WLN_WLPQ_STATUS_INVALID_ARGUMENT_V1);
+    }
+
     struct SignableFixture {
         catalog: DescriptorCatalog,
+        descriptor: String,
         funding_transaction: Transaction,
         funding_transaction_bytes: Vec<u8>,
         previous_transaction_bytes: Vec<u8>,
@@ -545,6 +1233,7 @@ mod tests {
 
             Self {
                 catalog,
+                descriptor,
                 funding_transaction_bytes: serialize(&funding_transaction),
                 previous_transaction_bytes: serialize(&previous),
                 funding_transaction,

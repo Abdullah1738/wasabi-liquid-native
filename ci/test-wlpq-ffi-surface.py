@@ -118,7 +118,14 @@ def main() -> None:
     )
     exercise_mutation(
         "WLPQ FFI panic closure hook changed",
-        lambda root: mutate_source(root, "        maybe_inject_test_panic();\n", ""),
+        lambda root: mutate_source(
+            root,
+            "        let decoded = decode_request(&frame.0, &epoch.0).map_err(wire_status)?;\n"
+            "        let reencoded = decoded.reencode().map_err(wire_status)?;",
+            "        let decoded = decode_request(&frame.0, &epoch.0).map_err(wire_status)?;\n"
+            "        let reencoded = decoded.reencode().map_err(wire_status)?;\n"
+            "        maybe_inject_test_panic();\n",
+        ),
     )
     exercise_mutation(
         "WLPQ FFI byte-identity check changed",
@@ -132,9 +139,9 @@ def main() -> None:
         "WLPQ FFI production unsafe surface changed",
         lambda root: mutate_source(
             root,
-            "        maybe_inject_test_panic();",
+            "        let reencoded = decoded.reencode().map_err(wire_status)?;",
             "        let _first = unsafe { frame.0.as_ptr().read() };\n"
-            "        maybe_inject_test_panic();",
+            "        let reencoded = decoded.reencode().map_err(wire_status)?;",
         ),
     )
     exercise_mutation(
@@ -226,7 +233,7 @@ def main() -> None:
         root = Path(directory)
         copy_fixture(root)
         symbols = root / "symbols.txt"
-        symbols.write_text("wln_wlpq_validate_v1\n", encoding="utf-8")
+        symbols.write_text("wln_wlpq_sign_finalize_v1\nwln_wlpq_validate_v1\n", encoding="utf-8")
         shutil.rmtree(root / "crates")
         subprocess.run(
             [

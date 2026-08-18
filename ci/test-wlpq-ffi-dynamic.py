@@ -81,7 +81,27 @@ def main() -> None:
     except AttributeError:
         reject("WLPQ FFI dynamic export is missing")
     function.argtypes = (ctypes.c_void_p, ctypes.c_uint64, ctypes.c_void_p)
-    function.restype = ctypes.c_int32
+    function.restype = ctypes.c_int32  # WLPQ FFI validate restype
+    try:
+        sign_function = library.wln_wlpq_sign_finalize_v1
+    except AttributeError:
+        reject("WLPQ FFI dynamic sign export is missing")
+    sign_function.argtypes = (
+        ctypes.c_void_p,
+        ctypes.c_uint64,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_uint64,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_uint64,
+        ctypes.c_uint64,
+        ctypes.c_void_p,
+    )
+    sign_function.restype = ctypes.c_int32  # WLPQ FFI dynamic sign restype
 
     epoch = bytes([0x41]) * 32
     rows = (
@@ -102,6 +122,26 @@ def main() -> None:
         reject("WLPQ FFI dynamic null-pointer precedence changed")
     if function(ctypes.byref(byte), 268_435_457, epoch_buffer) != -4:
         reject("WLPQ FFI dynamic outer-limit precedence changed")
+    out_length = ctypes.c_uint64(0)
+    if (
+        sign_function(
+            None,
+            1,
+            epoch_buffer,
+            None,
+            None,
+            None,
+            None,
+            0,
+            ctypes.byref(out_length),
+            None,
+            0,
+            0,
+            None,
+        )
+        != -1
+    ):
+        reject("WLPQ FFI dynamic sign null-pointer precedence changed")
     if read_regular(library_path, 64 * 1024 * 1024) != library_bytes:
         reject("WLPQ FFI dynamic library changed during execution")
 
