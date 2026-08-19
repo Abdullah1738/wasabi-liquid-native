@@ -24,7 +24,9 @@ extern int32_t wln_wlpq_sign_finalize_impl_v1(
     const uint8_t *descriptor,
     uint64_t descriptor_length,
     uint64_t last_index,
-    const uint8_t *slip77_master_key);
+    const uint8_t *slip77_master_key,
+    const uint8_t *entropy,
+    uint64_t entropy_length);
 
 WLN_WLPQ_EXPORT_V1 int32_t wln_wlpq_validate_v1(
     const uint8_t *frame,
@@ -47,7 +49,9 @@ WLN_WLPQ_EXPORT_V1 int32_t wln_wlpq_sign_finalize_v1(
     const uint8_t *descriptor,
     uint64_t descriptor_length,
     uint64_t last_index,
-    const uint8_t *slip77_master_key)
+    const uint8_t *slip77_master_key,
+    const uint8_t *entropy,
+    uint64_t entropy_length)
 {
     return wln_wlpq_sign_finalize_impl_v1(
         frame,
@@ -62,5 +66,7 @@ WLN_WLPQ_EXPORT_V1 int32_t wln_wlpq_sign_finalize_v1(
         descriptor,
         descriptor_length,
         last_index,
-        slip77_master_key);
+        slip77_master_key,
+        entropy,
+        entropy_length);
 }

@@ -81,11 +81,15 @@ int32_t wln_wlpq_validate_v1(
  * descriptor is the caller-owned public spend descriptor text used to prove
  * selected-output ownership, last_index is its highest derived index, and
  * slip77_master_key references the 32-byte SLIP-77 master blinding key used to
- * open the selected confidential outputs. On success the finalized
- * confidential transaction serialization is written to out_transaction and
- * its byte length to *out_transaction_length; when out_transaction_capacity
- * is too small the required length is still reported and
- * WLN_WLPQ_STATUS_OUTPUT_CAPACITY_V1 is returned.
+ * open the selected confidential outputs. entropy references exactly
+ * entropy_length == 32 readable bytes of fresh caller-supplied CSPRNG output,
+ * generated immediately before the call and never reused; the native side
+ * expands it through an approved-primitive Hash-DRBG into the RngCore +
+ * CryptoRng the finalize path requires and zeroizes its copy on all paths.
+ * On success the finalized confidential transaction serialization is written
+ * to out_transaction and its byte length to *out_transaction_length; when
+ * out_transaction_capacity is too small the required length is still reported
+ * and WLN_WLPQ_STATUS_OUTPUT_CAPACITY_V1 is returned.
  */
 int32_t wln_wlpq_sign_finalize_v1(
     const uint8_t *frame,
@@ -100,7 +104,9 @@ int32_t wln_wlpq_sign_finalize_v1(
     const uint8_t *descriptor,
     uint64_t descriptor_length,
     uint64_t last_index,
-    const uint8_t *slip77_master_key);
+    const uint8_t *slip77_master_key,
+    const uint8_t *entropy,
+    uint64_t entropy_length);
 
 #if defined(__cplusplus)
 }

@@ -9,13 +9,13 @@ from pathlib import Path
 
 
 EXPECTED_FILES = {
-    "Cargo.toml": "d9966ff1ff6e409bc259e3bd2b9e9dd2b4de0ac6a05b77d4e4913f6814eda5ac",
+    "Cargo.toml": "6b5d3302d8545b09df9adfdc0b134c97cc7b40bf59c35bf245254e662fdb9428",
     "exports/linux.map": "8f5ddf997b081c7922cfbc7c622631468707f69010315700e28e0dcc95df7009",
     "exports/macos.txt": "e63738d2c483aa0ceaacc7ab8263c2b6a4ef2b8005374b63a04a3efdf651058b",
     "exports/windows.def": "dfdb09ca7ab86e697ce1e4108c02d177d5d1a7033a7339bfd7357ac6f0da82fd",
-    "include/wasabi_liquid_wlpq_v1.h": "82de10bb20d967407d61e4e763bad42a957dcbf33d3c44abd88a5b925b65ccc4",
-    "src/lib.rs": "298b19f5082e33508671e1312e5435857de6e8e6c168f25151c2845c647d83ba",
-    "src/shim.c": "69959b617e61a51f2c7fa70a3794a8f19adf87e3b651811cb908e307c0d6ef12",
+    "include/wasabi_liquid_wlpq_v1.h": "9951aa3ed9ae65bd0753a9c5ba19818c2e5e2ff3ecb64cd7cb222a36f7d28895",
+    "src/lib.rs": "89304d3ff1e7ade9b0f7af28da15c5936a1502014cf4b2cd9e2ea254076f0254",
+    "src/shim.c": "ea9d090b09c882d11ac37b1998d039fcf06a5134986c982a8e076679e3f7514f",
 }
 
 EXPECTED_SUPPORT_FILES = {
@@ -24,7 +24,7 @@ EXPECTED_SUPPORT_FILES = {
         0o755,
     ),
     "ci/test-wlpq-ffi-dynamic.py": (
-        "a3b3c4f23160d955cc2608be3583876960557ba8da873a8b19a3ea38dead3f48",
+        "c5c817155c616247945d4bfd69d8930fc93f815130d04f8f281f5a72d2075f4b",
         0o644,
     ),
 }
@@ -60,6 +60,7 @@ TEST_NAMES = {
     "ffi_sign_finalize_corrupt_frame_fails_closed_as_invalid_encoding",
     "ffi_sign_finalize_output_capacity_failure_reports_required_length",
     "ffi_sign_finalize_null_and_capacity_failures_fail_closed",
+    "ffi_sign_finalize_null_and_wrong_length_entropy_fail_closed",
 }
 
 CALLBACK_TYPEDEFS = (
@@ -119,7 +120,8 @@ def validate_manifest(root: Path, manifest_text: str) -> None:
             "rev": "5b8865f8061459f82dcb8a1cf476b7ba17b14193",
             "default-features": False,
         },
-        "rand": "0.8",
+        "rand": {"version": "0.8", "default-features": False},
+        "sha2": {"version": "=0.11.0", "default-features": False},
         "wasabi-liquid-native-ordinary-pset": {"path": "../ordinary-pset"},
         "wasabi-liquid-native-ordinary-wallet-plan": {
             "path": "../ordinary-wallet-plan"
@@ -142,7 +144,7 @@ def validate_manifest(root: Path, manifest_text: str) -> None:
             "default-features": False,
             "features": ["no-std"],
         },
-        "rand": "0.8",
+        "rand": {"version": "0.8", "default-features": False},
         "sha2": {"version": "=0.11.0", "default-features": False},
         "wasabi-liquid-native-ordinary-pset": {"path": "../ordinary-pset"},
         "wasabi-liquid-native-ordinary-wallet-pset": {
@@ -198,9 +200,9 @@ def validate_rust_source(source: str) -> None:
         reject("WLPQ FFI export surface changed")
 
     product = source.split("#[cfg(test)]", 1)[0]
-    if product.count("unsafe {") != 10 or product.count("pub unsafe extern") != 2:
+    if product.count("unsafe {") != 11 or product.count("pub unsafe extern") != 2:
         reject("WLPQ FFI production unsafe surface changed")
-    if product.count("ptr::copy_nonoverlapping") != 4:
+    if product.count("ptr::copy_nonoverlapping") != 5:
         reject("WLPQ FFI epoch snapshot changed")
     if product.count("slice::from_raw_parts") != 3:
         reject("WLPQ FFI frame snapshot changed")
@@ -210,7 +212,7 @@ def validate_rust_source(source: str) -> None:
         reject("WLPQ FFI canonical codec path changed")
     if "if reencoded.as_bytes() != frame.0" not in product:
         reject("WLPQ FFI byte-identity check changed")
-    if product.count("self.0.zeroize();") != 3:
+    if product.count("self.0.zeroize();") != 4:
         reject("WLPQ FFI native copy clearing changed")
     if product.count("maybe_inject_test_panic();") != 2:
         reject("WLPQ FFI panic closure hook changed")

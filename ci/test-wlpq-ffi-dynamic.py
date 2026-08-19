@@ -100,6 +100,8 @@ def main() -> None:
         ctypes.c_uint64,
         ctypes.c_uint64,
         ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_uint64,
     )
     sign_function.restype = ctypes.c_int32  # WLPQ FFI dynamic sign restype
 
@@ -138,6 +140,8 @@ def main() -> None:
             0,
             0,
             None,
+            None,
+            0,
         )
         != -1
     ):

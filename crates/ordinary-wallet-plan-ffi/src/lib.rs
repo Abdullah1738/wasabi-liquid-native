@@ -17,7 +17,8 @@ use elements::bitcoin::PublicKey as BitcoinPublicKey;
 use elements::encode::serialize;
 use elements::secp256k1_zkp::ecdsa;
 use elements::{EcdsaSighashType, OutPoint};
-use rand::thread_rng;
+use rand::{CryptoRng, RngCore};
+use sha2::{Digest, Sha256};
 use wasabi_liquid_native_ordinary_pset::{OrdinaryP2wpkhSigner, OrdinarySigningError};
 use wasabi_liquid_native_ordinary_wallet_plan::{OrdinaryWalletPlanWireError, decode_request};
 use wasabi_liquid_native_ordinary_wallet_pset::OrdinaryWalletTransactionReason;
@@ -83,6 +84,88 @@ struct ScopedBroadcast(Vec<u8>);
 impl Drop for ScopedBroadcast {
     fn drop(&mut self) {
         self.0.zeroize();
+    }
+}
+
+struct ScopedEntropy([u8; 32]);
+
+impl Drop for ScopedEntropy {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+/// A NIST SP 800-90A Hash-DRBG built from the already-approved `sha2`
+/// primitive. It expands one caller-supplied 32-byte seed into the
+/// `R: RngCore + CryptoRng` the finalize path requires. The native side
+/// fabricates no RNG from ambient or OS entropy; the entire stream is a pure
+/// function of the caller-owned seed. The internal state is zeroized on drop.
+struct HashDrbg {
+    state: [u8; 32],
+    counter: u64,
+}
+
+impl HashDrbg {
+    fn new(seed: &[u8; 32]) -> Self {
+        // Hardening domain separation: bind the DRBG to this exact construction
+        // so the seed stream cannot be confused with any other sha2 usage.
+        let state = Sha256::new_with_prefix(b"WLN_WLPQ_HASH_DRBG_V1")
+            .chain_update(seed)
+            .finalize()
+            .into();
+        Self { state, counter: 0 }
+    }
+
+    fn reseed_from_output(&mut self) {
+        let next: [u8; 32] = Sha256::new_with_prefix(b"WLN_WLPQ_HASH_DRBG_V1_RESEED")
+            .chain_update(self.state)
+            .finalize()
+            .into();
+        self.state = next;
+        self.counter = 0;
+    }
+}
+
+impl RngCore for HashDrbg {
+    fn next_u32(&mut self) -> u32 {
+        let mut word = [0u8; 4];
+        self.fill_bytes(&mut word);
+        u32::from_le_bytes(word)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let mut word = [0u8; 8];
+        self.fill_bytes(&mut word);
+        u64::from_le_bytes(word)
+    }
+
+    fn fill_bytes(&mut self, destination: &mut [u8]) {
+        for chunk in destination.chunks_mut(32) {
+            let block: [u8; 32] = Sha256::new_with_prefix(b"WLN_WLPQ_HASH_DRBG_V1_BLOCK")
+                .chain_update(self.state)
+                .chain_update(self.counter.to_le_bytes())
+                .finalize()
+                .into();
+            chunk.copy_from_slice(&block[..chunk.len()]);
+            self.counter += 1;
+            if self.counter == u64::MAX {
+                self.reseed_from_output();
+            }
+        }
+    }
+
+    fn try_fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), rand::Error> {
+        self.fill_bytes(destination);
+        Ok(())
+    }
+}
+
+impl CryptoRng for HashDrbg {}
+
+impl Drop for HashDrbg {
+    fn drop(&mut self) {
+        self.state.zeroize();
+        self.counter = 0;
     }
 }
 
@@ -168,10 +251,14 @@ pub unsafe extern "C" fn wln_wlpq_validate_impl_v1(
 /// `frame` must reference `frame_length` readable bytes,
 /// `expected_source_epoch` must reference 32 readable bytes, `out_transaction`
 /// must reference `out_transaction_capacity` writable bytes, and
-/// `out_transaction_length` must reference one writable `u64`. The callbacks
-/// must honor their frozen contracts and must not retain any borrowed buffer.
-/// Null pointers and null callbacks are rejected before dereference, but no C
-/// ABI can validate arbitrary non-null pointer provenance.
+/// `out_transaction_length` must reference one writable `u64`. `entropy` must
+/// reference exactly `entropy_length == 32` readable bytes of fresh
+/// caller-supplied CSPRNG output; the native side expands it through an
+/// approved-primitive Hash-DRBG and zeroizes its copy on all paths. The
+/// callbacks must honor their frozen contracts and must not retain any
+/// borrowed buffer. Null pointers and null callbacks are rejected before
+/// dereference, but no C ABI can validate arbitrary non-null pointer
+/// provenance.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn wln_wlpq_sign_finalize_impl_v1(
@@ -195,6 +282,8 @@ pub unsafe extern "C" fn wln_wlpq_sign_finalize_impl_v1(
     descriptor_length: u64,
     last_index: u64,
     slip77_master_key: *const u8,
+    entropy: *const u8,
+    entropy_length: u64,
 ) -> i32 {
     if frame.is_null() || expected_source_epoch.is_null() || frame_length == 0 {
         return WLN_WLPQ_STATUS_INVALID_ARGUMENT_V1;
@@ -210,6 +299,8 @@ pub unsafe extern "C" fn wln_wlpq_sign_finalize_impl_v1(
         || descriptor.is_null()
         || descriptor_length == 0
         || slip77_master_key.is_null()
+        || entropy.is_null()
+        || entropy_length != 32
     {
         return WLN_WLPQ_STATUS_INVALID_ARGUMENT_V1;
     }
@@ -243,6 +334,13 @@ pub unsafe extern "C" fn wln_wlpq_sign_finalize_impl_v1(
         unsafe {
             ptr::copy_nonoverlapping(slip77_master_key, slip77.0.as_mut_ptr(), slip77.0.len());
         }
+        let mut entropy_seed = ScopedEntropy([0; 32]);
+        // SAFETY: The caller contract requires a readable 32-byte entropy seed
+        // for the duration of this call; null and the exact length were
+        // rejected before this copy. The copy is zeroized on all paths.
+        unsafe {
+            ptr::copy_nonoverlapping(entropy, entropy_seed.0.as_mut_ptr(), entropy_seed.0.len());
+        }
         // SAFETY: The caller contract requires `descriptor_length` readable
         // bytes for the duration of this call; null was rejected.
         let descriptor_bytes =
@@ -256,7 +354,7 @@ pub unsafe extern "C" fn wln_wlpq_sign_finalize_impl_v1(
         let outcome = catch_unwind(AssertUnwindSafe(|| {
             let mut provider =
                 Slip77SelectedOutputOpeningProvider::new(BorrowedSlip77::new(&slip77.0));
-            let mut rng = thread_rng();
+            let mut rng = HashDrbg::new(&entropy_seed.0);
             let mut signer = CallbackOrdinaryP2wpkhSigner {
                 context: signer_context,
                 public_key_callback,
@@ -818,6 +916,7 @@ mod tests {
         };
         let mut out_transaction = [0u8; 65536];
         let mut out_transaction_length = 0u64;
+        let seed = [0x5a; 32];
         // SAFETY: All borrowed buffers remain valid for the call and the
         // callbacks honor the frozen contract.
         let status = unsafe {
@@ -835,6 +934,8 @@ mod tests {
                 fixture.descriptor.len() as u64,
                 1,
                 fixture.slip77.as_ptr(),
+                seed.as_ptr(),
+                32,
             )
         };
         assert_eq!(status, WLN_WLPQ_STATUS_OK_V1);
@@ -874,6 +975,7 @@ mod tests {
         };
         let mut out_transaction = [0u8; 65536];
         let mut out_transaction_length = 0u64;
+        let seed = [0x5a; 32];
         // SAFETY: All borrowed buffers remain valid for the call.
         let status = unsafe {
             wln_wlpq_sign_finalize_impl_v1(
@@ -890,6 +992,8 @@ mod tests {
                 fixture.descriptor.len() as u64,
                 1,
                 fixture.slip77.as_ptr(),
+                seed.as_ptr(),
+                32,
             )
         };
         assert_eq!(status, WLN_WLPQ_STATUS_SIGNING_REJECTED_V1);
@@ -907,6 +1011,7 @@ mod tests {
         };
         let mut out_transaction = [0u8; 65536];
         let mut out_transaction_length = 0u64;
+        let seed = [0x5a; 32];
         // SAFETY: All borrowed buffers remain valid for the call.
         let status = unsafe {
             wln_wlpq_sign_finalize_impl_v1(
@@ -923,6 +1028,8 @@ mod tests {
                 fixture.descriptor.len() as u64,
                 1,
                 fixture.slip77.as_ptr(),
+                seed.as_ptr(),
+                32,
             )
         };
         assert_eq!(status, WLN_WLPQ_STATUS_SIGNING_REJECTED_V1);
@@ -940,6 +1047,7 @@ mod tests {
         };
         let mut out_transaction = [0u8; 65536];
         let mut out_transaction_length = 0u64;
+        let seed = [0x5a; 32];
         // SAFETY: All borrowed buffers remain valid for the call.
         let status = unsafe {
             wln_wlpq_sign_finalize_impl_v1(
@@ -956,6 +1064,8 @@ mod tests {
                 fixture.descriptor.len() as u64,
                 1,
                 fixture.slip77.as_ptr(),
+                seed.as_ptr(),
+                32,
             )
         };
         assert_eq!(status, WLN_WLPQ_STATUS_SIGNER_REFUSED_V1);
@@ -974,6 +1084,7 @@ mod tests {
         };
         let mut out_transaction = [0u8; 65536];
         let mut out_transaction_length = 0u64;
+        let seed = [0x5a; 32];
         // SAFETY: All borrowed buffers remain valid for the call.
         let status = unsafe {
             wln_wlpq_sign_finalize_impl_v1(
@@ -990,6 +1101,8 @@ mod tests {
                 fixture.descriptor.len() as u64,
                 1,
                 fixture.slip77.as_ptr(),
+                seed.as_ptr(),
+                32,
             )
         };
         assert_eq!(status, WLN_WLPQ_STATUS_INVALID_ENCODING_V1);
@@ -1007,6 +1120,7 @@ mod tests {
         };
         let mut out_transaction = [0u8; 1];
         let mut out_transaction_length = 0u64;
+        let seed = [0x5a; 32];
         // SAFETY: All borrowed buffers remain valid for the call.
         let status = unsafe {
             wln_wlpq_sign_finalize_impl_v1(
@@ -1023,6 +1137,8 @@ mod tests {
                 fixture.descriptor.len() as u64,
                 1,
                 fixture.slip77.as_ptr(),
+                seed.as_ptr(),
+                32,
             )
         };
         assert_eq!(status, WLN_WLPQ_STATUS_OUTPUT_CAPACITY_V1);
@@ -1042,6 +1158,7 @@ mod tests {
         };
         let mut out_transaction = [0u8; 65536];
         let mut out_transaction_length = 0u64;
+        let seed = [0x5a; 32];
         // SAFETY: Null is intentionally supplied to exercise pre-dereference validation.
         let status = unsafe {
             wln_wlpq_sign_finalize_impl_v1(
@@ -1058,6 +1175,8 @@ mod tests {
                 fixture.descriptor.len() as u64,
                 1,
                 fixture.slip77.as_ptr(),
+                seed.as_ptr(),
+                32,
             )
         };
         assert_eq!(status, WLN_WLPQ_STATUS_INVALID_ARGUMENT_V1);
@@ -1077,6 +1196,8 @@ mod tests {
                 fixture.descriptor.len() as u64,
                 1,
                 fixture.slip77.as_ptr(),
+                seed.as_ptr(),
+                32,
             )
         };
         assert_eq!(status, WLN_WLPQ_STATUS_INVALID_ARGUMENT_V1);
@@ -1096,6 +1217,8 @@ mod tests {
                 fixture.descriptor.len() as u64,
                 1,
                 fixture.slip77.as_ptr(),
+                seed.as_ptr(),
+                32,
             )
         };
         assert_eq!(status, WLN_WLPQ_STATUS_INVALID_ARGUMENT_V1);
@@ -1115,6 +1238,67 @@ mod tests {
                 fixture.descriptor.len() as u64,
                 1,
                 fixture.slip77.as_ptr(),
+                seed.as_ptr(),
+                32,
+            )
+        };
+        assert_eq!(status, WLN_WLPQ_STATUS_INVALID_ARGUMENT_V1);
+    }
+
+    #[test]
+    fn ffi_sign_finalize_null_and_wrong_length_entropy_fail_closed() {
+        let fixture = SignableFixture::new();
+        let frame = fixture.frame();
+        let state = CallbackSignerState {
+            spend_key: fixture.spend_key,
+            refuse_public_key: false,
+            refuse_sign_digest: false,
+            wrong_digest: false,
+        };
+        let mut out_transaction = [0u8; 65536];
+        let mut out_transaction_length = 0u64;
+        let seed = [0x5a; 32];
+        // SAFETY: Null entropy is intentionally supplied to exercise
+        // pre-dereference validation.
+        let status = unsafe {
+            wln_wlpq_sign_finalize_impl_v1(
+                frame.as_ptr(),
+                frame.len() as u64,
+                fixture.source_epoch.as_ptr(),
+                (&state as *const CallbackSignerState) as *const u8,
+                callback_public_key,
+                callback_sign_digest,
+                out_transaction.as_mut_ptr(),
+                out_transaction.len() as u64,
+                &mut out_transaction_length,
+                fixture.descriptor.as_ptr(),
+                fixture.descriptor.len() as u64,
+                1,
+                fixture.slip77.as_ptr(),
+                ptr::null(),
+                32,
+            )
+        };
+        assert_eq!(status, WLN_WLPQ_STATUS_INVALID_ARGUMENT_V1);
+        // SAFETY: A wrong entropy length is intentionally supplied to exercise
+        // pre-dereference validation; the non-null pointer is never read.
+        let status = unsafe {
+            wln_wlpq_sign_finalize_impl_v1(
+                frame.as_ptr(),
+                frame.len() as u64,
+                fixture.source_epoch.as_ptr(),
+                (&state as *const CallbackSignerState) as *const u8,
+                callback_public_key,
+                callback_sign_digest,
+                out_transaction.as_mut_ptr(),
+                out_transaction.len() as u64,
+                &mut out_transaction_length,
+                fixture.descriptor.as_ptr(),
+                fixture.descriptor.len() as u64,
+                1,
+                fixture.slip77.as_ptr(),
+                seed.as_ptr(),
+                31,
             )
         };
         assert_eq!(status, WLN_WLPQ_STATUS_INVALID_ARGUMENT_V1);
