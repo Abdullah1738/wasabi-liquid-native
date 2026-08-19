@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CHECKER = Path("ci/check-wlpq-ffi-surface.py")
 BUILDER = Path("ci/build-wlpq-ffi-library.sh")
 DYNAMIC_TEST = Path("ci/test-wlpq-ffi-dynamic.py")
+CHECKER_SHA256 = "bfb2f05b943cc55c75ed2fafb5c17f01621d96ba2abf720a9fb73f271a83cacc"
 CRATE_FILES = (
     Path("crates/ordinary-wallet-plan-ffi/Cargo.toml"),
     Path("crates/ordinary-wallet-plan-ffi/exports/linux.map"),
@@ -95,6 +96,9 @@ def exercise_mutation(expected: str, mutation) -> None:
 
 
 def main() -> None:
+    checker_bytes = (ROOT / CHECKER).read_bytes()
+    if hashlib.sha256(checker_bytes).hexdigest() != CHECKER_SHA256:
+        raise SystemExit("WLPQ FFI checker bytes changed")
     subprocess.run(
         [sys.executable, "-I", str(ROOT / CHECKER), str(ROOT)],
         cwd=ROOT,
@@ -224,7 +228,10 @@ def main() -> None:
         lambda root: mutate_dynamic_test(
             root,
             "    if read_regular(library_path, 64 * 1024 * 1024) != library_bytes:\n"
-            '        reject("WLPQ FFI dynamic library changed during execution")\n',
+            '        reject("WLPQ FFI dynamic library changed during execution")\n'
+            "\n"
+            "    try:\n"
+            "        txid_function = library.wln_wlpq_transaction_id_v1\n",
             "",
         ),
     )
@@ -233,7 +240,7 @@ def main() -> None:
         root = Path(directory)
         copy_fixture(root)
         symbols = root / "symbols.txt"
-        symbols.write_text("wln_wlpq_sign_finalize_v1\nwln_wlpq_validate_v1\n", encoding="utf-8")
+        symbols.write_text("wln_wlpq_sign_finalize_v1\nwln_wlpq_transaction_id_v1\nwln_wlpq_validate_v1\n", encoding="utf-8")
         shutil.rmtree(root / "crates")
         subprocess.run(
             [

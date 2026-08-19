@@ -28,6 +28,12 @@ extern int32_t wln_wlpq_sign_finalize_impl_v1(
     const uint8_t *entropy,
     uint64_t entropy_length);
 
+extern int32_t wln_wlpq_transaction_id_impl_v1(
+    const uint8_t *transaction,
+    uint64_t transaction_length,
+    uint8_t *out_txid,
+    uint64_t out_txid_capacity);
+
 WLN_WLPQ_EXPORT_V1 int32_t wln_wlpq_validate_v1(
     const uint8_t *frame,
     uint64_t frame_length,
@@ -69,4 +75,17 @@ WLN_WLPQ_EXPORT_V1 int32_t wln_wlpq_sign_finalize_v1(
         slip77_master_key,
         entropy,
         entropy_length);
+}
+
+WLN_WLPQ_EXPORT_V1 int32_t wln_wlpq_transaction_id_v1(
+    const uint8_t *transaction,
+    uint64_t transaction_length,
+    uint8_t *out_txid,
+    uint64_t out_txid_capacity)
+{
+    return wln_wlpq_transaction_id_impl_v1(
+        transaction,
+        transaction_length,
+        out_txid,
+        out_txid_capacity);
 }

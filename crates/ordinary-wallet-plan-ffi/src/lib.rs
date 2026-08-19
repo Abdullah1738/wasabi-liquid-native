@@ -4,7 +4,7 @@
 //! Minimal C ABI for canonical WLPQ v1 frame validation and caller-owned
 //! signing.
 //!
-//! This crate deliberately exposes two stateless operations. It has no handle,
+//! This crate deliberately exposes three stateless operations. It has no handle,
 //! allocator, provider, PSET, transaction, node, reservation, currentness,
 //! broadcast, or release authority. The signer stays caller-owned: only
 //! compressed public keys and digest signatures cross the callback boundary
@@ -14,9 +14,9 @@ use core::{ptr, slice};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use elements::bitcoin::PublicKey as BitcoinPublicKey;
-use elements::encode::serialize;
+use elements::encode::{deserialize, serialize};
 use elements::secp256k1_zkp::ecdsa;
-use elements::{EcdsaSighashType, OutPoint};
+use elements::{EcdsaSighashType, OutPoint, Transaction};
 use rand::{CryptoRng, RngCore};
 use sha2::{Digest, Sha256};
 use wasabi_liquid_native_ordinary_pset::{OrdinaryP2wpkhSigner, OrdinarySigningError};
@@ -509,6 +509,75 @@ fn wire_status(error: OrdinaryWalletPlanWireError) -> i32 {
     -(error.code() as i32)
 }
 
+/// Recomputes the canonical `Transaction::txid()` hex of one
+/// broadcast-serialized confidential transaction.
+///
+/// On success exactly 64 lowercase ASCII bytes (the `to_string()` of the
+/// txid, with no NUL terminator) are written to `out_txid` and
+/// `WLN_WLPQ_STATUS_OK_V1` is returned. The transaction bytes are strictly
+/// deserialized (malformed or trailing input is rejected) and the decoded
+/// transaction must re-serialize byte-identically or the call fails closed
+/// with `WLN_WLPQ_STATUS_INTERNAL_ERROR_V1`. On every failure path
+/// `out_txid` is left untouched: the caller buffer is written only after
+/// the full decode, re-encode, and txid pipeline has succeeded inside the
+/// unwind boundary. This operation retains no state and invokes no caller
+/// callback.
+///
+/// # Safety
+///
+/// `tx` must reference `tx_length` readable bytes and `out_txid` must
+/// reference `out_txid_capacity >= 64` writable bytes. Both regions must
+/// remain valid until the function returns. Null pointers, a zero length,
+/// and a capacity below 64 are rejected before any dereference, but no C
+/// ABI can validate arbitrary non-null pointer provenance.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wln_wlpq_transaction_id_impl_v1(
+    tx: *const u8,
+    tx_length: u64,
+    out_txid: *mut u8,
+    out_txid_capacity: u64,
+) -> i32 {
+    if tx.is_null() || out_txid.is_null() || tx_length == 0 || out_txid_capacity < 64 {
+        return WLN_WLPQ_STATUS_INVALID_ARGUMENT_V1;
+    }
+    if tx_length > WLN_WLPQ_MAX_FRAME_BYTES_V1 {
+        return WLN_WLPQ_STATUS_LIMIT_EXCEEDED_V1;
+    }
+    let Ok(tx_length) = usize::try_from(tx_length) else {
+        return WLN_WLPQ_STATUS_INVALID_ARGUMENT_V1;
+    };
+
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        maybe_inject_test_panic();
+        // SAFETY: The caller contract requires `tx_length` readable bytes
+        // for the duration of this call; null and the outer cap were
+        // checked before this borrow.
+        let transaction_bytes = unsafe { slice::from_raw_parts(tx, tx_length) };
+        let decoded = deserialize::<Transaction>(transaction_bytes)
+            .map_err(|_| WLN_WLPQ_STATUS_INVALID_ENCODING_V1)?;
+        if serialize(&decoded) != transaction_bytes {
+            return Err(WLN_WLPQ_STATUS_INTERNAL_ERROR_V1);
+        }
+        let txid = decoded.txid().to_string();
+        debug_assert_eq!(txid.len(), 64);
+        debug_assert!(
+            txid.bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        );
+        // SAFETY: The caller contract requires `out_txid_capacity >= 64`
+        // writable bytes; the capacity check passed before the closure.
+        unsafe {
+            ptr::copy_nonoverlapping(txid.as_ptr(), out_txid, 64);
+        }
+        Ok(WLN_WLPQ_STATUS_OK_V1)
+    }));
+
+    match outcome {
+        Ok(Ok(status)) | Ok(Err(status)) => status,
+        Err(_) => WLN_WLPQ_STATUS_INTERNAL_ERROR_V1,
+    }
+}
+
 #[cfg(test)]
 std::thread_local! {
     static INJECT_TEST_PANIC: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
@@ -541,8 +610,6 @@ mod tests {
     };
     use miniscript::bitcoin::NetworkKind;
     use miniscript::bitcoin::bip32::{ChildNumber, DerivationPath, Xpriv, Xpub};
-    use rand::SeedableRng;
-    use rand::rngs::StdRng;
     use wasabi_liquid_native_ordinary_pset::OrdinarySigningError;
     use wasabi_liquid_native_ordinary_wallet_plan::{
         OrdinaryWalletPlanDestinationRef, OrdinaryWalletPlanRequestRef,
@@ -692,7 +759,7 @@ mod tests {
 
         let mut provider =
             Slip77SelectedOutputOpeningProvider::new(BorrowedSlip77::new(&fixture.slip77));
-        let mut rng = StdRng::from_seed(synthetic_material(
+        let mut rng = HashDrbg::new(&synthetic_material(
             b"WLPQ FFI caller evidence finalized layout",
         ));
         let mut signer =
@@ -778,7 +845,7 @@ mod tests {
         let mut baseline_provider =
             Slip77SelectedOutputOpeningProvider::new(BorrowedSlip77::new(&fixture.slip77));
         let baseline = baseline_prepared
-            .into_blinded_ordinary_wallet_pset(&mut baseline_provider, &mut StdRng::from_seed(seed))
+            .into_blinded_ordinary_wallet_pset(&mut baseline_provider, &mut HashDrbg::new(&seed))
             .unwrap();
         let baseline_bytes = baseline.serialize_sensitive();
         drop(baseline);
@@ -793,7 +860,7 @@ mod tests {
             BorrowedOrdinaryP2wpkhSigner::new(BorrowedOrdinarySpendKey::new(&wrong_key));
         let failure = match prepared.into_finalized_ordinary_wallet_transaction(
             &mut provider,
-            &mut StdRng::from_seed(seed),
+            &mut HashDrbg::new(&seed),
             &mut wrong_key_signer,
         ) {
             Ok(_) => panic!("a wrong-key signer must not finalize"),
@@ -1304,6 +1371,185 @@ mod tests {
         assert_eq!(status, WLN_WLPQ_STATUS_INVALID_ARGUMENT_V1);
     }
 
+    /// Broadcast bytes produced by the real caller-owned sign/finalize path.
+    fn finalized_broadcast_fixture() -> Vec<u8> {
+        let fixture = SignableFixture::new();
+        let frame = fixture.frame();
+        let state = CallbackSignerState {
+            spend_key: fixture.spend_key,
+            refuse_public_key: false,
+            refuse_sign_digest: false,
+            wrong_digest: false,
+        };
+        let mut out_transaction = [0u8; 65536];
+        let mut out_transaction_length = 0u64;
+        let seed = [0x5a; 32];
+        // SAFETY: All borrowed buffers remain valid for the call and the
+        // callbacks honor the frozen contract.
+        let status = unsafe {
+            wln_wlpq_sign_finalize_impl_v1(
+                frame.as_ptr(),
+                frame.len() as u64,
+                fixture.source_epoch.as_ptr(),
+                (&state as *const CallbackSignerState) as *const u8,
+                callback_public_key,
+                callback_sign_digest,
+                out_transaction.as_mut_ptr(),
+                out_transaction.len() as u64,
+                &mut out_transaction_length,
+                fixture.descriptor.as_ptr(),
+                fixture.descriptor.len() as u64,
+                1,
+                fixture.slip77.as_ptr(),
+                seed.as_ptr(),
+                seed.len() as u64,
+            )
+        };
+        assert_eq!(status, WLN_WLPQ_STATUS_OK_V1);
+        assert!(out_transaction_length > 0);
+        out_transaction[..out_transaction_length as usize].to_vec()
+    }
+
+    #[test]
+    fn ffi_transaction_id_reports_the_canonical_txid_hex() {
+        let broadcast = finalized_broadcast_fixture();
+        let decoded: Transaction = deserialize(&broadcast).unwrap();
+        assert_eq!(serialize(&decoded), broadcast);
+        let expected_txid = decoded.txid().to_string();
+        let mut out_txid = [0u8; 64];
+        // SAFETY: Both borrowed buffers remain valid for the call.
+        let status = unsafe {
+            wln_wlpq_transaction_id_impl_v1(
+                broadcast.as_ptr(),
+                broadcast.len() as u64,
+                out_txid.as_mut_ptr(),
+                out_txid.len() as u64,
+            )
+        };
+        assert_eq!(status, WLN_WLPQ_STATUS_OK_V1);
+        let actual = core::str::from_utf8(&out_txid).unwrap();
+        assert_eq!(actual, expected_txid);
+        assert_eq!(actual.len(), 64);
+        assert!(
+            actual
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        );
+        assert!(
+            !out_txid.contains(&0),
+            "the output carries no NUL terminator"
+        );
+    }
+
+    #[test]
+    fn ffi_transaction_id_rejects_every_invalid_argument_without_writing() {
+        let broadcast = finalized_broadcast_fixture();
+        let sentinel = [0xa5u8; 64];
+        let mut out_txid = sentinel;
+        // SAFETY: Null is intentionally supplied to exercise pre-dereference validation.
+        let status = unsafe {
+            wln_wlpq_transaction_id_impl_v1(
+                ptr::null(),
+                broadcast.len() as u64,
+                out_txid.as_mut_ptr(),
+                64,
+            )
+        };
+        assert_eq!(status, WLN_WLPQ_STATUS_INVALID_ARGUMENT_V1);
+        assert_eq!(out_txid, sentinel);
+        // SAFETY: Null is intentionally supplied to exercise pre-dereference validation.
+        let status = unsafe {
+            wln_wlpq_transaction_id_impl_v1(
+                broadcast.as_ptr(),
+                broadcast.len() as u64,
+                ptr::null_mut(),
+                64,
+            )
+        };
+        assert_eq!(status, WLN_WLPQ_STATUS_INVALID_ARGUMENT_V1);
+        assert_eq!(out_txid, sentinel);
+        // SAFETY: Zero length is rejected before the non-null pointer is read.
+        let status = unsafe {
+            wln_wlpq_transaction_id_impl_v1(broadcast.as_ptr(), 0, out_txid.as_mut_ptr(), 64)
+        };
+        assert_eq!(status, WLN_WLPQ_STATUS_INVALID_ARGUMENT_V1);
+        assert_eq!(out_txid, sentinel);
+        // SAFETY: The undersized capacity is rejected before any write.
+        let status = unsafe {
+            wln_wlpq_transaction_id_impl_v1(
+                broadcast.as_ptr(),
+                broadcast.len() as u64,
+                out_txid.as_mut_ptr(),
+                63,
+            )
+        };
+        assert_eq!(status, WLN_WLPQ_STATUS_INVALID_ARGUMENT_V1);
+        assert_eq!(out_txid, sentinel);
+    }
+
+    #[test]
+    fn ffi_transaction_id_rejects_malformed_trailing_and_oversized_inputs() {
+        let broadcast = finalized_broadcast_fixture();
+        let sentinel = [0xa5u8; 64];
+        let mut out_txid = sentinel;
+        let truncated = &broadcast[..broadcast.len() / 2];
+        // SAFETY: Both borrowed buffers remain valid for the call.
+        let status = unsafe {
+            wln_wlpq_transaction_id_impl_v1(
+                truncated.as_ptr(),
+                truncated.len() as u64,
+                out_txid.as_mut_ptr(),
+                64,
+            )
+        };
+        assert_eq!(status, WLN_WLPQ_STATUS_INVALID_ENCODING_V1);
+        assert_eq!(out_txid, sentinel);
+        let mut trailing = broadcast.clone();
+        trailing.push(0x00);
+        // SAFETY: Both borrowed buffers remain valid for the call.
+        let status = unsafe {
+            wln_wlpq_transaction_id_impl_v1(
+                trailing.as_ptr(),
+                trailing.len() as u64,
+                out_txid.as_mut_ptr(),
+                64,
+            )
+        };
+        assert_eq!(status, WLN_WLPQ_STATUS_INVALID_ENCODING_V1);
+        assert_eq!(out_txid, sentinel);
+        // SAFETY: The oversized length is rejected before the pointer is read.
+        let status = unsafe {
+            wln_wlpq_transaction_id_impl_v1(
+                broadcast.as_ptr(),
+                WLN_WLPQ_MAX_FRAME_BYTES_V1 + 1,
+                out_txid.as_mut_ptr(),
+                64,
+            )
+        };
+        assert_eq!(status, WLN_WLPQ_STATUS_LIMIT_EXCEEDED_V1);
+        assert_eq!(out_txid, sentinel);
+    }
+
+    #[test]
+    fn ffi_transaction_id_contains_panic_as_internal_error() {
+        let broadcast = finalized_broadcast_fixture();
+        let sentinel = [0xa5u8; 64];
+        let mut out_txid = sentinel;
+        INJECT_TEST_PANIC.with(|armed| armed.set(true));
+        // SAFETY: Both borrowed buffers remain valid for the call.
+        let status = unsafe {
+            wln_wlpq_transaction_id_impl_v1(
+                broadcast.as_ptr(),
+                broadcast.len() as u64,
+                out_txid.as_mut_ptr(),
+                64,
+            )
+        };
+        assert_eq!(status, WLN_WLPQ_STATUS_INTERNAL_ERROR_V1);
+        assert_eq!(out_txid, sentinel);
+        INJECT_TEST_PANIC.with(|armed| assert!(!armed.get()));
+    }
+
     struct SignableFixture {
         catalog: DescriptorCatalog,
         descriptor: String,
@@ -1375,7 +1621,7 @@ mod tests {
                 &AddressParams::LIQUID_TESTNET,
             )
             .unwrap();
-            let mut rng = StdRng::from_seed(synthetic_material(
+            let mut rng = HashDrbg::new(&synthetic_material(
                 b"WLPQ FFI caller evidence funding randomness",
             ));
             let (first_output, first_abf, first_vbf, _) = TxOut::new_not_last_confidential(

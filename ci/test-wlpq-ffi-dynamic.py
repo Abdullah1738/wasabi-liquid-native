@@ -149,6 +149,75 @@ def main() -> None:
     if read_regular(library_path, 64 * 1024 * 1024) != library_bytes:
         reject("WLPQ FFI dynamic library changed during execution")
 
+    try:
+        txid_function = library.wln_wlpq_transaction_id_v1
+    except AttributeError:
+        reject("WLPQ FFI dynamic txid export is missing")
+    txid_function.argtypes = (
+        ctypes.c_void_p,
+        ctypes.c_uint64,
+        ctypes.c_void_p,
+        ctypes.c_uint64,
+    )
+    txid_function.restype = ctypes.c_int32  # WLPQ FFI dynamic txid restype
+
+    txid_out = ctypes.create_string_buffer(64)
+    txid_sentinel = bytes([0xA5]) * 64
+    ctypes.memset(txid_out, 0xA5, 64)
+    if txid_function(None, 1, txid_out, 64) != -1:
+        reject("WLPQ FFI dynamic txid null-pointer precedence changed")
+    if txid_out.raw != txid_sentinel:
+        reject("WLPQ FFI dynamic txid null-pointer wrote output")
+    if txid_function(ctypes.byref(byte), 0, txid_out, 64) != -1:
+        reject("WLPQ FFI dynamic txid zero-length precedence changed")
+    if txid_out.raw != txid_sentinel:
+        reject("WLPQ FFI dynamic txid zero-length wrote output")
+    if txid_function(ctypes.byref(byte), 1, None, 64) != -1:
+        reject("WLPQ FFI dynamic txid null-output precedence changed")
+    if txid_function(ctypes.byref(byte), 1, txid_out, 63) != -1:
+        reject("WLPQ FFI dynamic txid capacity precedence changed")
+    if txid_out.raw != txid_sentinel:
+        reject("WLPQ FFI dynamic txid capacity wrote output")
+    if txid_function(ctypes.byref(byte), 268_435_457, txid_out, 64) != -4:
+        reject("WLPQ FFI dynamic txid outer-limit precedence changed")
+    if txid_out.raw != txid_sentinel:
+        reject("WLPQ FFI dynamic txid outer-limit wrote output")
+    txid_frame = decode_fixture(root, "frame-test-toy-single.hex")
+    if txid_function(txid_frame, len(txid_frame), txid_out, 64) != -3:
+        reject("WLPQ FFI dynamic txid invalid-encoding status changed")
+    if txid_out.raw != txid_sentinel:
+        reject("WLPQ FFI dynamic txid invalid-encoding wrote output")
+    txid_truncated = txid_frame[: len(txid_frame) // 2]
+    if txid_function(txid_truncated, len(txid_truncated), txid_out, 64) != -3:
+        reject("WLPQ FFI dynamic txid truncated status changed")
+    if txid_out.raw != txid_sentinel:
+        reject("WLPQ FFI dynamic txid truncated wrote output")
+    txid_trailing = txid_frame + b"\x00"
+    if txid_function(txid_trailing, len(txid_trailing), txid_out, 64) != -3:
+        reject("WLPQ FFI dynamic txid trailing status changed")
+    if txid_out.raw != txid_sentinel:
+        reject("WLPQ FFI dynamic txid trailing wrote output")
+
+    candidate_path = (
+        root
+        / "contracts/ordinary-wallet-plan/v1/nonlinkable-reference/vectors/public/test-candidate-valid.hex"
+    )
+    candidate_text = read_regular(candidate_path, 1024 * 1024)
+    if not candidate_text.endswith(b"\n") or b"\r" in candidate_text:
+        reject("WLPQ FFI dynamic-test candidate fixture framing changed")
+    try:
+        candidate = bytes.fromhex(candidate_text[:-1].decode("ascii"))
+    except (UnicodeDecodeError, ValueError):
+        reject("WLPQ FFI dynamic-test candidate fixture encoding changed")
+    expected_txid = b"c71de6c2b9dfb2b68f6676d49203ddca9e624ce6398b6b38e9db7fc899864fc0"
+    ctypes.memset(txid_out, 0xA5, 64)
+    if txid_function(candidate, len(candidate), txid_out, 64) != 0:
+        reject("WLPQ FFI dynamic txid known-answer status changed")
+    if txid_out.raw != expected_txid:
+        reject("WLPQ FFI dynamic txid known-answer mismatch")
+    if read_regular(library_path, 64 * 1024 * 1024) != library_bytes:
+        reject("WLPQ FFI dynamic library changed during execution")
+
 
 if __name__ == "__main__":
     main()

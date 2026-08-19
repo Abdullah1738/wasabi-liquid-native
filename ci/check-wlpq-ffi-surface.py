@@ -10,12 +10,12 @@ from pathlib import Path
 
 EXPECTED_FILES = {
     "Cargo.toml": "6b5d3302d8545b09df9adfdc0b134c97cc7b40bf59c35bf245254e662fdb9428",
-    "exports/linux.map": "8f5ddf997b081c7922cfbc7c622631468707f69010315700e28e0dcc95df7009",
-    "exports/macos.txt": "e63738d2c483aa0ceaacc7ab8263c2b6a4ef2b8005374b63a04a3efdf651058b",
-    "exports/windows.def": "dfdb09ca7ab86e697ce1e4108c02d177d5d1a7033a7339bfd7357ac6f0da82fd",
-    "include/wasabi_liquid_wlpq_v1.h": "9951aa3ed9ae65bd0753a9c5ba19818c2e5e2ff3ecb64cd7cb222a36f7d28895",
-    "src/lib.rs": "89304d3ff1e7ade9b0f7af28da15c5936a1502014cf4b2cd9e2ea254076f0254",
-    "src/shim.c": "ea9d090b09c882d11ac37b1998d039fcf06a5134986c982a8e076679e3f7514f",
+    "exports/linux.map": "72477ead43e140bbbebf51854589b40d88df9e3e4fb6454d5062cf142b074ba1",
+    "exports/macos.txt": "e9f5b087a6304805e0f3582f9bab6a27b2e2bcc9e57395e99664a324c90ec068",
+    "exports/windows.def": "94f5e598b29f93c7399838b0e5c82b8afe013189a7b76faad64a0f79f3985dec",
+    "include/wasabi_liquid_wlpq_v1.h": "e366314d3af707af5fdbcd3b8670da5955e779852ddc501046b6f97e391385e5",
+    "src/lib.rs": "5b4e55c148664017d8e41c2d17c2d1fb13725f542970f54e551e4af1fb618da9",
+    "src/shim.c": "883d9d189807c492530eed5be0867305d13d04d07e7e531db4f5401a9dbcb9c8",
 }
 
 EXPECTED_SUPPORT_FILES = {
@@ -24,7 +24,7 @@ EXPECTED_SUPPORT_FILES = {
         0o755,
     ),
     "ci/test-wlpq-ffi-dynamic.py": (
-        "c5c817155c616247945d4bfd69d8930fc93f815130d04f8f281f5a72d2075f4b",
+        "3cc1fde97d0bd46292b931dd7d6de4518c4543f87d5a17a795846facb5ad11eb",
         0o644,
     ),
 }
@@ -61,6 +61,10 @@ TEST_NAMES = {
     "ffi_sign_finalize_output_capacity_failure_reports_required_length",
     "ffi_sign_finalize_null_and_capacity_failures_fail_closed",
     "ffi_sign_finalize_null_and_wrong_length_entropy_fail_closed",
+    "ffi_transaction_id_reports_the_canonical_txid_hex",
+    "ffi_transaction_id_rejects_every_invalid_argument_without_writing",
+    "ffi_transaction_id_rejects_malformed_trailing_and_oversized_inputs",
+    "ffi_transaction_id_contains_panic_as_internal_error",
 }
 
 CALLBACK_TYPEDEFS = (
@@ -188,7 +192,7 @@ def validate_manifest(root: Path, manifest_text: str) -> None:
 
 
 def validate_rust_source(source: str) -> None:
-    if source.count('#[unsafe(no_mangle)]') != 2:
+    if source.count('#[unsafe(no_mangle)]') != 3:
         reject("WLPQ FFI export count changed")
     signature = 'pub unsafe extern "C" fn wln_wlpq_validate_impl_v1('
     if source.count(signature) != 1:
@@ -196,25 +200,34 @@ def validate_rust_source(source: str) -> None:
     sign_signature = 'pub unsafe extern "C" fn wln_wlpq_sign_finalize_impl_v1('
     if source.count(sign_signature) != 1:
         reject("WLPQ FFI sign export signature changed")
-    if source.count('extern "C"') != 8 or "export_name" in source or "link_section" in source:
+    txid_signature = 'pub unsafe extern "C" fn wln_wlpq_transaction_id_impl_v1('
+    if source.count(txid_signature) != 1:
+        reject("WLPQ FFI txid export signature changed")
+    if source.count('extern "C"') != 9 or "export_name" in source or "link_section" in source:
         reject("WLPQ FFI export surface changed")
 
     product = source.split("#[cfg(test)]", 1)[0]
-    if product.count("unsafe {") != 11 or product.count("pub unsafe extern") != 2:
+    if product.count("unsafe {") != 13 or product.count("pub unsafe extern") != 3:
         reject("WLPQ FFI production unsafe surface changed")
-    if product.count("ptr::copy_nonoverlapping") != 5:
+    if product.count("ptr::copy_nonoverlapping") != 6:
         reject("WLPQ FFI epoch snapshot changed")
-    if product.count("slice::from_raw_parts") != 3:
+    if product.count("slice::from_raw_parts") != 4:
         reject("WLPQ FFI frame snapshot changed")
-    if product.count("catch_unwind") != 4:
+    if product.count("catch_unwind") != 5:
         reject("WLPQ FFI unwind containment changed")
     if product.count("decode_request(") != 2 or product.count(".reencode()") != 1:
         reject("WLPQ FFI canonical codec path changed")
     if "if reencoded.as_bytes() != frame.0" not in product:
         reject("WLPQ FFI byte-identity check changed")
+    if product.count("deserialize::<Transaction>") != 1:
+        reject("WLPQ FFI txid decode path changed")
+    if "if serialize(&decoded) != transaction_bytes" not in product:
+        reject("WLPQ FFI txid byte-identity check changed")
+    if product.count("decoded.txid().to_string()") != 1:
+        reject("WLPQ FFI txid computation changed")
     if product.count("self.0.zeroize();") != 4:
         reject("WLPQ FFI native copy clearing changed")
-    if product.count("maybe_inject_test_panic();") != 2:
+    if product.count("maybe_inject_test_panic();") != 3:
         reject("WLPQ FFI panic closure hook changed")
 
     validate_region = product.split("/// Signs and finalizes one canonical WLPQ v1 frame", 1)[0]
@@ -278,6 +291,15 @@ def validate_header(header: str) -> None:
         reject("WLPQ FFI header export changed")
     if header.count("int32_t wln_wlpq_sign_finalize_v1(") != 1:
         reject("WLPQ FFI header sign export changed")
+    if header.count("int32_t wln_wlpq_transaction_id_v1(") != 1:
+        reject("WLPQ FFI header txid export changed")
+    txid_signature = """int32_t wln_wlpq_transaction_id_v1(
+    const uint8_t *transaction,
+    uint64_t transaction_length,
+    uint8_t *out_txid,
+    uint64_t out_txid_capacity);"""
+    if txid_signature not in header:
+        reject("WLPQ FFI header txid signature changed")
     if header.count('extern "C"') != 1:
         reject("WLPQ FFI C++ linkage changed")
     if "#define WLN_WLPQ_ABI_VERSION_V1 UINT32_C(1)" not in header:
@@ -330,10 +352,14 @@ def validate_shim(shim: str) -> None:
         reject("WLPQ FFI shim internal binding changed")
     if shim.count("extern int32_t wln_wlpq_sign_finalize_impl_v1(") != 1:
         reject("WLPQ FFI shim internal sign binding changed")
+    if shim.count("extern int32_t wln_wlpq_transaction_id_impl_v1(") != 1:
+        reject("WLPQ FFI shim internal txid binding changed")
     if shim.count("WLN_WLPQ_EXPORT_V1 int32_t wln_wlpq_validate_v1(") != 1:
         reject("WLPQ FFI shim export changed")
     if shim.count("WLN_WLPQ_EXPORT_V1 int32_t wln_wlpq_sign_finalize_v1(") != 1:
         reject("WLPQ FFI shim sign export changed")
+    if shim.count("WLN_WLPQ_EXPORT_V1 int32_t wln_wlpq_transaction_id_v1(") != 1:
+        reject("WLPQ FFI shim txid export changed")
     delegate = (
         "return wln_wlpq_validate_impl_v1(frame, frame_length, "
         "expected_source_epoch);"
@@ -343,7 +369,14 @@ def validate_shim(shim: str) -> None:
     sign_delegate = "return wln_wlpq_sign_finalize_impl_v1("
     if shim.count(sign_delegate) != 1:
         reject("WLPQ FFI shim sign delegate changed")
-    if shim.count("wln_wlpq_validate_v1(") != 1 or shim.count("wln_wlpq_sign_finalize_v1(") != 1:
+    txid_delegate = "return wln_wlpq_transaction_id_impl_v1("
+    if shim.count(txid_delegate) != 1:
+        reject("WLPQ FFI shim txid delegate changed")
+    if (
+        shim.count("wln_wlpq_validate_v1(") != 1
+        or shim.count("wln_wlpq_sign_finalize_v1(") != 1
+        or shim.count("wln_wlpq_transaction_id_v1(") != 1
+    ):
         reject("WLPQ FFI shim function inventory changed")
     for forbidden in ("malloc", "calloc", "realloc", "free(", "dlopen", "dlsym", "LoadLibrary"):
         if forbidden in shim:
@@ -352,11 +385,16 @@ def validate_shim(shim: str) -> None:
 
 def validate_export_maps(contents: dict[str, str]) -> None:
     if contents["exports/macos.txt"] != (
-        "_wln_wlpq_validate_v1\n" "_wln_wlpq_sign_finalize_v1\n"
+        "_wln_wlpq_validate_v1\n"
+        "_wln_wlpq_sign_finalize_v1\n"
+        "_wln_wlpq_transaction_id_v1\n"
     ):
         reject("WLPQ FFI macOS export map changed")
     if contents["exports/windows.def"] != (
-        "EXPORTS\n" "    wln_wlpq_validate_v1\n" "    wln_wlpq_sign_finalize_v1\n"
+        "EXPORTS\n"
+        "    wln_wlpq_validate_v1\n"
+        "    wln_wlpq_sign_finalize_v1\n"
+        "    wln_wlpq_transaction_id_v1\n"
     ):
         reject("WLPQ FFI Windows export map changed")
     if contents["exports/linux.map"] != (
@@ -364,6 +402,7 @@ def validate_export_maps(contents: dict[str, str]) -> None:
         "    global:\n"
         "        wln_wlpq_validate_v1;\n"
         "        wln_wlpq_sign_finalize_v1;\n"
+        "        wln_wlpq_transaction_id_v1;\n"
         "    local:\n"
         "        *;\n"
         "};\n"
@@ -414,9 +453,20 @@ def validate_dynamic_test(test: str) -> None:
         "read_regular(library_path, 64 * 1024 * 1024) != library_bytes",
         "sign_function = library.wln_wlpq_sign_finalize_v1",
         'reject("WLPQ FFI dynamic sign null-pointer precedence changed")',
+        "txid_function = library.wln_wlpq_transaction_id_v1",
+        'reject("WLPQ FFI dynamic txid null-pointer precedence changed")',
+        'reject("WLPQ FFI dynamic txid zero-length precedence changed")',
+        'reject("WLPQ FFI dynamic txid null-output precedence changed")',
+        'reject("WLPQ FFI dynamic txid capacity precedence changed")',
+        'reject("WLPQ FFI dynamic txid outer-limit precedence changed")',
+        'reject("WLPQ FFI dynamic txid invalid-encoding status changed")',
     )
-    if any(test.count(token) != 1 for token in required):
-        reject("WLPQ FFI dynamic-test authority changed")
+    for token in required:
+        if token == "read_regular(library_path, 64 * 1024 * 1024) != library_bytes":
+            if test.count(token) != 2:
+                reject("WLPQ FFI dynamic-test authority changed")
+        elif test.count(token) != 1:
+            reject("WLPQ FFI dynamic-test authority changed")
     for forbidden in ("subprocess", "socket", "urllib", "requests", "http"):
         if forbidden in test:
             reject("WLPQ FFI dynamic-test capability surface expanded")
@@ -435,7 +485,11 @@ def validate_symbols(platform: str, path: Path) -> None:
         elif platform != "Linux":
             reject("unsupported WLPQ FFI symbol platform")
         symbols.append(symbol)
-    if symbols != ["wln_wlpq_sign_finalize_v1", "wln_wlpq_validate_v1"]:
+    if symbols != [
+        "wln_wlpq_sign_finalize_v1",
+        "wln_wlpq_transaction_id_v1",
+        "wln_wlpq_validate_v1",
+    ]:
         reject("WLPQ FFI dynamic export allowlist changed")
 
 

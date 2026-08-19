@@ -108,6 +108,15 @@ int32_t wln_wlpq_sign_finalize_v1(
     const uint8_t *entropy,
     uint64_t entropy_length);
 
+/* Recompute the canonical RPC/display txid. On success exactly 64 lowercase
+ * ASCII hexadecimal bytes are written without a NUL terminator. Failure does
+ * not modify the output buffer. */
+int32_t wln_wlpq_transaction_id_v1(
+    const uint8_t *transaction,
+    uint64_t transaction_length,
+    uint8_t *out_txid,
+    uint64_t out_txid_capacity);
+
 #if defined(__cplusplus)
 }
 #endif
