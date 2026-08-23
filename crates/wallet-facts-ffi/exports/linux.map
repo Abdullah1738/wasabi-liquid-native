@@ -1,0 +1,6 @@
+{
+    global:
+        wln_wallet_facts_observe_v1;
+    local:
+        *;
+};

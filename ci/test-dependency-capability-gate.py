@@ -3793,7 +3793,7 @@ if __name__ == "__main__":
     )
     expect_lock_snippet(changed_ffi_base_pin, valid, success=False)
     changed_current_pin = snippet.replace(
-        "c12c61b0848647ad550dd5d63e9283559809f12e56d86646328bd99566cf7064",
+        "67f5fa8be8d5f932f4a5ea55c43b32cf4961357a17986533f6fbb82432b7d263",
         "0" * 64,
         1,
     )

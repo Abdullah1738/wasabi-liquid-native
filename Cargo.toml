@@ -24,6 +24,7 @@ members = [
     "crates/output-opening",
     "crates/transaction-validation",
     "crates/wallet-facts",
+    "crates/wallet-facts-ffi",
     "crates/wallet-facts-wire",
 ]
 exclude = ["tools/ordinary-wallet-plan-public-proof-verifier"]
@@ -37,6 +38,7 @@ default-members = [
     "crates/output-opening",
     "crates/transaction-validation",
     "crates/wallet-facts",
+    "crates/wallet-facts-ffi",
     "crates/wallet-facts-wire",
 ]
 resolver = "3"

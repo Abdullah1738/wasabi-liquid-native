@@ -1,0 +1,23 @@
+[package]
+name = "wasabi-liquid-native-wallet-facts-ffi"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT"
+publish = false
+description = "Stateless C ABI for bounded native wallet-facts observation"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+rand = { version = "0.8", features = ["std_rng"] }
+sha2 = { version = "=0.11.0", default-features = false }
+wasabi-liquid-native-wallet-facts = { path = "../wallet-facts" }
+wasabi-liquid-native-wallet-facts-wire = { path = "../wallet-facts-wire" }
+zeroize = { version = "1.8", default-features = false }
+
+[dev-dependencies]
+elements = { git = "https://github.com/Abdullah1738/rust-elements.git", rev = "5b8865f8061459f82dcb8a1cf476b7ba17b14193", default-features = false }
+miniscript = { version = "=12.3.7", default-features = false, features = ["no-std"] }
+rand = { version = "0.8", features = ["std_rng"] }

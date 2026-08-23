@@ -522,6 +522,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasabi-liquid-native-wallet-facts-ffi"
+version = "0.1.0"
+dependencies = [
+ "elements",
+ "miniscript",
+ "rand",
+ "sha2",
+ "wasabi-liquid-native-wallet-facts",
+ "wasabi-liquid-native-wallet-facts-wire",
+ "zeroize",
+]
+
+[[package]]
 name = "wasabi-liquid-native-wallet-facts-wire"
 version = "0.1.0"
 dependencies = [
