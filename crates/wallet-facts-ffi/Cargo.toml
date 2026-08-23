@@ -11,7 +11,7 @@ description = "Stateless C ABI for bounded native wallet-facts observation"
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
-rand = { version = "0.8", features = ["std_rng"] }
+rand = { version = "0.8", default-features = false }
 sha2 = { version = "=0.11.0", default-features = false }
 wasabi-liquid-native-wallet-facts = { path = "../wallet-facts" }
 wasabi-liquid-native-wallet-facts-wire = { path = "../wallet-facts-wire" }
