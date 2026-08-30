@@ -1466,16 +1466,24 @@ where
 ///
 /// Every candidate transaction is decoded canonically, bound to its complete
 /// previous-transaction set, and amount-proof validated before any output is
-/// opened. A single malformed transaction or owned-output opening rejects the
-/// entire batch without returning partial facts. Product-owned HMAC pads and
-/// digests are cleared on every return or unwind path, the pinned SHA-256 state
-/// and finalization temporary are zeroized, and each scoped derived key is
-/// erased on every return path. The caller must supply a cryptographically
-/// secure random generator. When the batch has at least one owned output,
-/// exactly one call obtains 32 bytes to randomize the secp256k1 context before
-/// any blinding-key operation, and that seed is then erased. A batch with no
-/// owned outputs performs no random request or blinding-key derivation. No
-/// guarantee is made about compiler-made copies.
+/// opened. A candidate that produces an owned output or spends a catalog script
+/// is fully validated: any decoding, previous-transaction-set, or amount-proof
+/// failure there rejects the entire batch without returning partial facts. A
+/// structurally complete candidate that proves irrelevant to the wallet (no
+/// owned output AND no catalog-script spend) but fails previous-transaction-set
+/// or amount-proof validation is excluded from the observed batch instead of
+/// aborting it, so one unrelated or under-fetched block-scan transaction no
+/// longer fails the whole batch closed. A structurally malformed candidate (no
+/// inputs or no outputs) and any canonical-decoding failure stay fail-closed
+/// for every candidate. Product-owned HMAC pads and digests are cleared on
+/// every return or unwind path, the pinned SHA-256 state and finalization
+/// temporary are zeroized, and each scoped derived key is erased on every
+/// return path. The caller must supply a cryptographically secure random
+/// generator. When the batch has at least one owned output, exactly one call
+/// obtains 32 bytes to randomize the secp256k1 context before any blinding-key
+/// operation, and that seed is then erased. A batch with no owned outputs
+/// performs no random request or blinding-key derivation. No guarantee is made
+/// about compiler-made copies.
 pub fn observe_owned_outputs<R: RngCore + CryptoRng>(
     catalog: &DescriptorCatalog,
     slip77_master_key: BorrowedSlip77<'_>,
@@ -1485,30 +1493,44 @@ pub fn observe_owned_outputs<R: RngCore + CryptoRng>(
     let mut candidate_indices_by_id = BTreeMap::new();
     let public_validation_context = Secp256k1::new();
     let mut prepared_candidates = Vec::with_capacity(candidates.candidates.len());
+    // Dense prepared-candidate position -> original candidate index, so the
+    // second pass can recover the candidate bytes for a kept candidate.
+    let mut original_index_by_prepared = Vec::with_capacity(candidates.candidates.len());
     let mut total_inputs = 0_usize;
     let mut total_owned_outputs = 0_usize;
 
+    // A candidate whose previous transaction set is incomplete or inconsistent,
+    // or whose amount proofs do not verify, is fully validated when it is
+    // wallet-relevant: an owned output or a catalog-script spend keeps the
+    // failure fatal. A candidate that proves irrelevant to the wallet (no owned
+    // output AND no catalog-script spend) is excluded from the observed batch
+    // instead of aborting it, so one unrelated or under-fetched block-scan
+    // transaction no longer fails the whole window closed. Wallet-relevance is
+    // decided on the decoded transaction before any validation failure can fire,
+    // so a candidate that fails prev-set or proof validation is still checked
+    // for owned outputs and catalog spends before being excluded.
+    let mut kept_candidates = 0_usize;
     for (candidate_index, candidate) in candidates.candidates.iter().enumerate() {
         let transaction = decode_candidate_transaction(&candidate.transaction)?;
-        let transaction_id = Box::new(PreparedTransactionId(transaction.txid().to_byte_array()));
-        if candidate_indices_by_id
-            .insert(transaction_id, candidate_index)
-            .is_some()
-        {
+        let transaction_id = PreparedTransactionId(transaction.txid().to_byte_array());
+        if candidate_indices_by_id.contains_key(&transaction_id) {
             return Err(WalletObservationError::DuplicateTransaction);
         }
 
-        let previous_outputs =
-            previous_outputs_for(&transaction, &candidate.previous_transactions)?;
-        let validated = validate_transaction_amount_proofs(
-            &public_validation_context,
-            &transaction,
-            previous_outputs,
-        )?;
-        total_inputs =
-            checked_total_input_count(total_inputs, validated.transaction().input.len())?;
-        let owned_output_count = validated
-            .transaction()
+        // Relevance is decided on the decoded transaction before any prev-set or
+        // proof failure can fire, so an under-fetched or unverifiable candidate
+        // is still checked for owned outputs and catalog spends before being
+        // excluded. The confidential-shape check for catalog-matched outputs is
+        // deliberately deferred until after amount-proof validation so a
+        // malformed candidate reports its validation failure first, preserving
+        // the original fail-closed precedence.
+        //
+        // Only a plausibly real transaction (at least one input and one output)
+        // that is wallet-irrelevant is excludable. A structurally malformed
+        // candidate with no inputs or no outputs stays fail-closed regardless of
+        // relevance, exactly as before.
+        let structurally_complete = !transaction.input.is_empty() && !transaction.output.is_empty();
+        let owned_output_count = transaction
             .output
             .iter()
             .filter(|output| {
@@ -1517,6 +1539,37 @@ pub fn observe_owned_outputs<R: RngCore + CryptoRng>(
                     .contains_key(output.script_pubkey.as_bytes())
             })
             .count();
+        let excludable = structurally_complete
+            && owned_output_count == 0
+            && !spends_catalog_script(
+                &transaction,
+                &candidate.previous_transactions,
+                &catalog.entries,
+            );
+
+        let previous_outputs =
+            match previous_outputs_for(&transaction, &candidate.previous_transactions) {
+                Ok(previous_outputs) => previous_outputs,
+                Err(_) if excludable => continue,
+                Err(error) => return Err(error),
+            };
+        let validated = match validate_transaction_amount_proofs(
+            &public_validation_context,
+            &transaction,
+            previous_outputs,
+        ) {
+            Ok(validated) => validated,
+            Err(_) if excludable => continue,
+            Err(error) => return Err(error.into()),
+        };
+
+        // Map to the dense prepared_candidate position, not the original
+        // candidate index: excluded candidates keep the original index sparse
+        // while prepared_candidates is pushed only for kept candidates.
+        candidate_indices_by_id.insert(transaction_id, prepared_candidates.len());
+
+        total_inputs =
+            checked_total_input_count(total_inputs, validated.transaction().input.len())?;
         let mut prepared_candidate = PreparedCandidate {
             owned_output_indices: Vec::with_capacity(owned_output_count),
         };
@@ -1551,14 +1604,19 @@ pub fn observe_owned_outputs<R: RngCore + CryptoRng>(
             .ok_or(WalletObservationError::BatchLimit)?;
 
         prepared_candidates.push(prepared_candidate);
+        original_index_by_prepared.push(candidate_index);
+        kept_candidates += 1;
     }
+    debug_assert_eq!(prepared_candidates.len(), kept_candidates);
+    debug_assert_eq!(original_index_by_prepared.len(), kept_candidates);
+    debug_assert_eq!(candidate_indices_by_id.len(), kept_candidates);
 
     let mut candidate_order =
         PreparedCandidateOrder(Vec::with_capacity(candidate_indices_by_id.len()));
     candidate_order
         .0
         .extend(candidate_indices_by_id.into_values());
-    debug_assert_eq!(candidate_order.0.len(), candidates.candidates.len());
+    debug_assert_eq!(candidate_order.0.len(), kept_candidates);
 
     let mut secp = public_validation_context;
     if total_owned_outputs != 0 {
@@ -1569,11 +1627,11 @@ pub fn observe_owned_outputs<R: RngCore + CryptoRng>(
         drop(context_randomization_seed);
     }
 
-    let mut transactions = Vec::with_capacity(candidates.candidates.len());
+    let mut transactions = Vec::with_capacity(kept_candidates);
     let mut outputs = Vec::with_capacity(total_owned_outputs);
-    for candidate_index in candidate_order.0.iter().copied() {
-        let candidate = &candidates.candidates[candidate_index];
-        let prepared = &prepared_candidates[candidate_index];
+    for prepared_index in candidate_order.0.iter().copied() {
+        let candidate = &candidates.candidates[original_index_by_prepared[prepared_index]];
+        let prepared = &prepared_candidates[prepared_index];
         let transaction = decode_candidate_transaction(&candidate.transaction)?;
         let previous_outputs =
             previous_outputs_for(&transaction, &candidate.previous_transactions)?;
@@ -1622,11 +1680,11 @@ pub fn observe_owned_outputs<R: RngCore + CryptoRng>(
                 value: *opened.value(),
             });
         }
-        debug_assert!(transactions.len() < candidates.candidates.len());
+        debug_assert!(transactions.len() < kept_candidates);
         transactions.push(observed_transaction);
     }
 
-    debug_assert_eq!(transactions.len(), candidates.candidates.len());
+    debug_assert_eq!(transactions.len(), kept_candidates);
     debug_assert_eq!(transactions.len(), transactions.capacity());
     debug_assert_eq!(
         transactions
@@ -1660,6 +1718,33 @@ fn require_positive_owned_output_value(value: &u64) -> Result<(), WalletObservat
     } else {
         Ok(())
     }
+}
+
+/// Returns whether any transaction input spends a previous output whose script
+/// is in the descriptor catalog.
+///
+/// Previous transactions that fail to decode are ignored here; a malformed or
+/// missing previous transaction only makes a candidate excludable, and the
+/// exact previous-transaction set is still enforced for every candidate that is
+/// kept or wallet-relevant.
+fn spends_catalog_script(
+    transaction: &Transaction,
+    previous_transactions: &[Vec<u8>],
+    catalog_entries: &BTreeMap<CatalogScript, CatalogEntry>,
+) -> bool {
+    let mut previous_by_id = BTreeMap::<Txid, Transaction>::new();
+    for bytes in previous_transactions {
+        let Ok(previous) = deserialize::<Transaction>(bytes) else {
+            continue;
+        };
+        previous_by_id.insert(previous.txid(), previous);
+    }
+    transaction.input.iter().any(|input| {
+        previous_by_id
+            .get(&input.previous_output.txid)
+            .and_then(|previous| previous.output.get(input.previous_output.vout as usize))
+            .is_some_and(|output| catalog_entries.contains_key(output.script_pubkey.as_bytes()))
+    })
 }
 
 fn checked_total_input_count(

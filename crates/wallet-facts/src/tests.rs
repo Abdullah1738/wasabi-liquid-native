@@ -2811,6 +2811,149 @@ fn previous_transaction_sets_and_duplicate_candidates_are_exact() {
 }
 
 #[test]
+fn unrelated_invalid_candidates_are_excluded_and_owned_outputs_still_observed() {
+    let catalog = test_catalog(1);
+    let slip77 = synthetic_material(b"wallet-facts unrelated tolerance material");
+    let fixture = confidential_fixture(&catalog, &slip77);
+    let owned_id = fixture.transaction.txid().to_byte_array();
+
+    // An unrelated candidate with an empty previous-transaction set (a missing
+    // prev), well-formed encoding, and only non-catalog outputs.
+    let mut missing_prev = fixture.transaction.clone();
+    missing_prev.lock_time = LockTime::from_consensus(9);
+    missing_prev.output[0].script_pubkey = Script::from(vec![0x51]);
+    missing_prev.output[1].script_pubkey = Script::from(vec![0x51]);
+    let missing_prev_bytes = serialize(&missing_prev);
+    let missing_prev_id = missing_prev.txid().to_byte_array();
+
+    // An unrelated candidate whose amount proofs do not verify (emptied
+    // rangeproof) on a non-catalog output, with a well-formed prev set.
+    let mut bad_proof = fixture.transaction.clone();
+    bad_proof.lock_time = LockTime::from_consensus(11);
+    bad_proof.output[0].script_pubkey = Script::from(vec![0x51]);
+    bad_proof.output[1].script_pubkey = Script::from(vec![0x51]);
+    bad_proof.output[0].witness.rangeproof = RangeProof::EMPTY;
+    let bad_proof_bytes = serialize(&bad_proof);
+    let bad_proof_id = bad_proof.txid().to_byte_array();
+
+    let candidates = CandidateBatch::new(&[
+        fixture.borrowed(),
+        BorrowedCandidateTransaction::new(&missing_prev_bytes, &[]),
+        BorrowedCandidateTransaction::new(
+            &bad_proof_bytes,
+            std::slice::from_ref(&fixture.previous_transaction_bytes),
+        ),
+    ])
+    .unwrap();
+    let batch = observe_owned_outputs(&catalog, BorrowedSlip77::new(&slip77), &candidates).unwrap();
+
+    // The two unrelated candidates are excluded; the owned candidate is still
+    // fully validated and observed with both of its owned outputs.
+    assert_eq!(batch.transactions().len(), 1);
+    assert_eq!(batch.transactions()[0].transaction_id(), &owned_id);
+    assert_eq!(batch.outputs().len(), 2);
+    assert!(
+        batch
+            .outputs()
+            .iter()
+            .all(|output| output.transaction_id() == &owned_id)
+    );
+    assert_ne!(owned_id, missing_prev_id);
+    assert_ne!(owned_id, bad_proof_id);
+}
+
+#[test]
+fn excluded_candidate_before_kept_candidate_preserves_prepared_alignment() {
+    let catalog = test_catalog(1);
+    let slip77 = synthetic_material(b"wallet-facts excluded-first alignment material");
+    let fixture = confidential_fixture(&catalog, &slip77);
+    let owned_id = fixture.transaction.txid().to_byte_array();
+
+    // An excluded (unrelated, missing-prev) candidate ordered BEFORE the kept
+    // owned candidate. The kept candidate's original index (1) then differs
+    // from its dense prepared-candidate position (0); the second pass must
+    // still pair it with its own prepared owned-output indices and bytes.
+    let mut missing_prev = fixture.transaction.clone();
+    missing_prev.lock_time = LockTime::from_consensus(9);
+    missing_prev.output[0].script_pubkey = Script::from(vec![0x51]);
+    missing_prev.output[1].script_pubkey = Script::from(vec![0x51]);
+    let missing_prev_bytes = serialize(&missing_prev);
+
+    let candidates = CandidateBatch::new(&[
+        BorrowedCandidateTransaction::new(&missing_prev_bytes, &[]),
+        fixture.borrowed(),
+    ])
+    .unwrap();
+    let batch = observe_owned_outputs(&catalog, BorrowedSlip77::new(&slip77), &candidates).unwrap();
+
+    // The kept candidate is observed with its own two owned outputs, not the
+    // excluded candidate's (empty) prepared indices.
+    assert_eq!(batch.transactions().len(), 1);
+    assert_eq!(batch.transactions()[0].transaction_id(), &owned_id);
+    assert_eq!(batch.outputs().len(), 2);
+    assert!(
+        batch
+            .outputs()
+            .iter()
+            .all(|output| output.transaction_id() == &owned_id)
+    );
+}
+
+#[test]
+fn wallet_relevant_validation_failure_still_fails_closed() {
+    let catalog = test_catalog(1);
+    let slip77 = synthetic_material(b"wallet-facts relevant fail-closed material");
+    let fixture = confidential_fixture(&catalog, &slip77);
+
+    // A candidate that produces an owned output but is missing its previous
+    // transaction set must still abort the whole batch (the owned observation
+    // cannot be independently validated).
+    let missing_prev_owned = CandidateBatch::new(&[BorrowedCandidateTransaction::new(
+        &fixture.transaction_bytes,
+        &[],
+    )])
+    .unwrap();
+    assert!(matches!(
+        observe_owned_outputs(&catalog, BorrowedSlip77::new(&slip77), &missing_prev_owned),
+        Err(WalletObservationError::PreviousTransactionSet)
+    ));
+
+    // A candidate that produces an owned output with a damaged amount proof
+    // must still abort a batch that also contains a valid owned candidate.
+    let mut bad_proof = fixture.transaction.clone();
+    bad_proof.lock_time = LockTime::from_consensus(13);
+    bad_proof.output[0].witness.rangeproof = RangeProof::EMPTY;
+    let bad_proof_bytes = serialize(&bad_proof);
+    let bad_proof_owned = CandidateBatch::new(&[
+        fixture.borrowed(),
+        BorrowedCandidateTransaction::new(
+            &bad_proof_bytes,
+            std::slice::from_ref(&fixture.previous_transaction_bytes),
+        ),
+    ])
+    .unwrap();
+    assert!(matches!(
+        observe_owned_outputs(&catalog, BorrowedSlip77::new(&slip77), &bad_proof_owned),
+        Err(WalletObservationError::TransactionValidation)
+    ));
+
+    // A structurally malformed candidate (no outputs) stays fail-closed even
+    // though it matches no catalog script and is therefore wallet-irrelevant.
+    let mut empty = fixture.transaction.clone();
+    empty.output.clear();
+    let empty_bytes = serialize(&empty);
+    let empty_candidates = CandidateBatch::new(&[BorrowedCandidateTransaction::new(
+        &empty_bytes,
+        std::slice::from_ref(&fixture.previous_transaction_bytes),
+    )])
+    .unwrap();
+    assert!(matches!(
+        observe_owned_outputs(&catalog, BorrowedSlip77::new(&slip77), &empty_candidates),
+        Err(WalletObservationError::TransactionValidation)
+    ));
+}
+
+#[test]
 fn malformed_and_bounded_inputs_return_redacted_errors() {
     assert_eq!(checked_total_input_count(7, 9).unwrap(), 16);
     assert!(matches!(
