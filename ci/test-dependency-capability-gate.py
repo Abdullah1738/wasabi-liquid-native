@@ -3764,6 +3764,24 @@ if __name__ == "__main__":
     )
     expect_lock_snippet(snippet, ffi_zeroize_edge, success=False)
 
+    equality_edge = lock_root("lock-equality-edge")
+    remove_lock_dependency(
+        equality_edge,
+        "wasabi-liquid-native-credential-commitment-equality",
+        "zeroize",
+    )
+    expect_lock_snippet(snippet, equality_edge, success=False)
+
+    equality_identity = lock_root("lock-equality-identity")
+    (equality_identity / "Cargo.lock").write_text(
+        (equality_identity / "Cargo.lock").read_text().replace(
+            'name = "wasabi-liquid-native-credential-commitment-equality"',
+            'name = "wasabi-liquid-native-credential-commitment-equalitx"',
+            1,
+        )
+    )
+    expect_lock_snippet(snippet, equality_identity, success=False)
+
     baseline = lock_root("lock-baseline")
     (baseline / "ci/expected-wallet-facts-conformance-lock-baseline.txt").write_text("0" * 64 + "\n")
     expect_lock_snippet(snippet, baseline, success=False)
@@ -3792,8 +3810,20 @@ if __name__ == "__main__":
         1,
     )
     expect_lock_snippet(changed_ffi_base_pin, valid, success=False)
-    changed_current_pin = snippet.replace(
+    changed_equality_base_pin = snippet.replace(
         "67f5fa8be8d5f932f4a5ea55c43b32cf4961357a17986533f6fbb82432b7d263",
+        "0" * 64,
+        1,
+    )
+    expect_lock_snippet(changed_equality_base_pin, valid, success=False)
+    changed_equality_identity = snippet.replace(
+        "wasabi-liquid-native-credential-commitment-equality",
+        "wasabi-liquid-native-credential-commitment-equalitx",
+        1,
+    )
+    expect_lock_snippet(changed_equality_identity, valid, success=False)
+    changed_current_pin = snippet.replace(
+        "705ef6c3c0abfedf3af2028bc4d20912f0d92365188d1deb462b7f8d32f54e10",
         "0" * 64,
         1,
     )

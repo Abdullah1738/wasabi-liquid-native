@@ -17,6 +17,7 @@ path = "src/lib.rs"
 members = [
     ".",
     "crates/address",
+    "crates/credential-commitment-equality",
     "crates/ordinary-wallet-plan",
     "crates/ordinary-wallet-plan-ffi",
     "crates/ordinary-wallet-pset",
@@ -31,6 +32,7 @@ exclude = ["tools/ordinary-wallet-plan-public-proof-verifier"]
 default-members = [
     ".",
     "crates/address",
+    "crates/credential-commitment-equality",
     "crates/ordinary-wallet-plan",
     "crates/ordinary-wallet-plan-ffi",
     "crates/ordinary-wallet-pset",

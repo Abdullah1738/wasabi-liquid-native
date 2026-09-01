@@ -432,6 +432,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasabi-liquid-native-credential-commitment-equality"
+version = "0.1.0"
+dependencies = [
+ "elements",
+ "rand",
+ "sha2",
+ "zeroize",
+]
+
+[[package]]
 name = "wasabi-liquid-native-ordinary-pset"
 version = "0.1.0"
 dependencies = [
