@@ -11,7 +11,7 @@ import tomllib
 from pathlib import Path
 
 
-WORKSPACE_LOCK_SHA256 = "705ef6c3c0abfedf3af2028bc4d20912f0d92365188d1deb462b7f8d32f54e10"
+WORKSPACE_LOCK_SHA256 = "d6efc0056683780da23d8c06017d6618f8a2ae0d1164ab40e41176ab17c088ca"
 PROOF_LOCK_SHA256 = "4ca45ca0dd27b2a545b0d93174e02487cc756b26a34d946de5dcb349ceea7aab"
 PROOF_TOOL = "tools/ordinary-wallet-plan-public-proof-verifier"
 DENIED_NAMES = {".gitconfig", ".netrc", "credentials", "credentials.toml"}

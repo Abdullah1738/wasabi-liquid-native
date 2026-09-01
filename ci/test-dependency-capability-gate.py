@@ -3782,6 +3782,24 @@ if __name__ == "__main__":
     )
     expect_lock_snippet(snippet, equality_identity, success=False)
 
+    transcript_edge = lock_root("lock-transcript-edge")
+    remove_lock_dependency(
+        transcript_edge,
+        "wasabi-liquid-native-coinjoin-state-transcript",
+        "sha2",
+    )
+    expect_lock_snippet(snippet, transcript_edge, success=False)
+
+    transcript_identity = lock_root("lock-transcript-identity")
+    (transcript_identity / "Cargo.lock").write_text(
+        (transcript_identity / "Cargo.lock").read_text().replace(
+            'name = "wasabi-liquid-native-coinjoin-state-transcript"',
+            'name = "wasabi-liquid-native-coinjoin-state-transcripx"',
+            1,
+        )
+    )
+    expect_lock_snippet(snippet, transcript_identity, success=False)
+
     baseline = lock_root("lock-baseline")
     (baseline / "ci/expected-wallet-facts-conformance-lock-baseline.txt").write_text("0" * 64 + "\n")
     expect_lock_snippet(snippet, baseline, success=False)
@@ -3822,8 +3840,20 @@ if __name__ == "__main__":
         1,
     )
     expect_lock_snippet(changed_equality_identity, valid, success=False)
-    changed_current_pin = snippet.replace(
+    changed_transcript_base_pin = snippet.replace(
         "705ef6c3c0abfedf3af2028bc4d20912f0d92365188d1deb462b7f8d32f54e10",
+        "0" * 64,
+        1,
+    )
+    expect_lock_snippet(changed_transcript_base_pin, valid, success=False)
+    changed_transcript_identity = snippet.replace(
+        "wasabi-liquid-native-coinjoin-state-transcript",
+        "wasabi-liquid-native-coinjoin-state-transcripx",
+        1,
+    )
+    expect_lock_snippet(changed_transcript_identity, valid, success=False)
+    changed_current_pin = snippet.replace(
+        "d6efc0056683780da23d8c06017d6618f8a2ae0d1164ab40e41176ab17c088ca",
         "0" * 64,
         1,
     )

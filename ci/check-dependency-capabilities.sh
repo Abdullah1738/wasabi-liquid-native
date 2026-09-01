@@ -297,7 +297,7 @@ workspace_cargo_home="$scratch/workspace-final-cargo-home"
 proof_cache_authority="$scratch/proof-cache-authority.jsonl"
 workspace_cache_authority="$scratch/workspace-cache-authority.jsonl"
 proof_lock_sha256=4ca45ca0dd27b2a545b0d93174e02487cc756b26a34d946de5dcb349ceea7aab
-workspace_lock_sha256=705ef6c3c0abfedf3af2028bc4d20912f0d92365188d1deb462b7f8d32f54e10
+workspace_lock_sha256=d6efc0056683780da23d8c06017d6618f8a2ae0d1164ab40e41176ab17c088ca
 python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py \
     --snapshot-only \
     "$repository_root" \
@@ -1112,8 +1112,9 @@ provider_post_hash = "5d105ea8138170cac5501f42d148855b9b9141d38b3c2b9532a246a4d5
 plan_base_hash = "3287e329ab3d1b9868cb5eb3c39b1713a0d660b0dcd35100688bfb7c7a867178"
 ffi_base_hash = "5a6a3fa2fbf890844009d1ff1ad40841977a0ffa32c0faba795fa211262f8678"
 equality_base_hash = "67f5fa8be8d5f932f4a5ea55c43b32cf4961357a17986533f6fbb82432b7d263"
+transcript_base_hash = "705ef6c3c0abfedf3af2028bc4d20912f0d92365188d1deb462b7f8d32f54e10"
 facts_ffi_base_hash = "c12c61b0848647ad550dd5d63e9283559809f12e56d86646328bd99566cf7064"
-current_hash = "705ef6c3c0abfedf3af2028bc4d20912f0d92365188d1deb462b7f8d32f54e10"
+current_hash = "d6efc0056683780da23d8c06017d6618f8a2ae0d1164ab40e41176ab17c088ca"
 if baseline_text != baseline_hash + "\n":
     raise SystemExit("wallet-facts conformance lock baseline pin mismatch")
 if hashlib.sha256(lock_bytes).hexdigest() != current_hash:
@@ -1121,6 +1122,22 @@ if hashlib.sha256(lock_bytes).hexdigest() != current_hash:
 
 text = lock_bytes.decode("utf-8")
 blocks = text.split("[[package]]\n")
+transcript_marker = 'name = "wasabi-liquid-native-coinjoin-state-transcript"\n'
+transcript_indexes = [index for index, block in enumerate(blocks) if transcript_marker in block]
+transcript_block = """name = "wasabi-liquid-native-coinjoin-state-transcript"
+version = "0.1.0"
+dependencies = [
+ "sha2",
+]
+
+"""
+if len(transcript_indexes) != 1 or blocks[transcript_indexes[0]] != transcript_block:
+    raise SystemExit("CoinJoin state transcript lock package mismatch")
+del blocks[transcript_indexes[0]]
+transcript_base_bytes = "[[package]]\n".join(blocks).encode("utf-8")
+if hashlib.sha256(transcript_base_bytes).hexdigest() != transcript_base_hash:
+    raise SystemExit("CoinJoin state transcript lock reverse transform mismatch")
+
 equality_marker = 'name = "wasabi-liquid-native-credential-commitment-equality"\n'
 equality_indexes = [index for index, block in enumerate(blocks) if equality_marker in block]
 equality_block = """name = "wasabi-liquid-native-credential-commitment-equality"

@@ -432,6 +432,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasabi-liquid-native-coinjoin-state-transcript"
+version = "0.1.0"
+dependencies = [
+ "sha2",
+]
+
+[[package]]
 name = "wasabi-liquid-native-credential-commitment-equality"
 version = "0.1.0"
 dependencies = [

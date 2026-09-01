@@ -1,0 +1,14 @@
+[package]
+name = "wasabi-liquid-native-coinjoin-state-transcript"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT"
+publish = false
+description = "Versioned state transcript primitive for Wasabi Liquid CoinJoin"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+sha2 = { version = "=0.11.0", default-features = false }
