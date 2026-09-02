@@ -432,6 +432,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasabi-liquid-native-coinjoin-collab-blinding"
+version = "0.1.0"
+dependencies = [
+ "elements",
+ "rand",
+ "wasabi-liquid-native-coinjoin-pset-state",
+]
+
+[[package]]
 name = "wasabi-liquid-native-coinjoin-pset-state"
 version = "0.1.0"
 dependencies = [

@@ -3793,6 +3793,32 @@ if __name__ == "__main__":
     )
     expect_lock_snippet(snippet, pset_state_transcript_edge, success=False)
 
+    collab_blinding_pset_state_edge = lock_root("lock-collab-blinding-pset-state-edge")
+    remove_lock_dependency(
+        collab_blinding_pset_state_edge,
+        "wasabi-liquid-native-coinjoin-collab-blinding",
+        "wasabi-liquid-native-coinjoin-pset-state",
+    )
+    expect_lock_snippet(snippet, collab_blinding_pset_state_edge, success=False)
+
+    collab_blinding_elements_edge = lock_root("lock-collab-blinding-elements-edge")
+    remove_lock_dependency(
+        collab_blinding_elements_edge,
+        "wasabi-liquid-native-coinjoin-collab-blinding",
+        "elements",
+    )
+    expect_lock_snippet(snippet, collab_blinding_elements_edge, success=False)
+
+    collab_blinding_identity = lock_root("lock-collab-blinding-identity")
+    (collab_blinding_identity / "Cargo.lock").write_text(
+        (collab_blinding_identity / "Cargo.lock").read_text().replace(
+            'name = "wasabi-liquid-native-coinjoin-collab-blinding"',
+            'name = "wasabi-liquid-native-coinjoin-collab-blindinx"',
+            1,
+        )
+    )
+    expect_lock_snippet(snippet, collab_blinding_identity, success=False)
+
     pset_state_identity = lock_root("lock-pset-state-identity")
     (pset_state_identity / "Cargo.lock").write_text(
         (pset_state_identity / "Cargo.lock").read_text().replace(
@@ -3867,6 +3893,18 @@ if __name__ == "__main__":
         1,
     )
     expect_lock_snippet(changed_pset_state_base_pin, valid, success=False)
+    changed_collab_blinding_base_pin = snippet.replace(
+        "708113d44c50f948d20d231b1c425d9060b88360ef9b4312bb6181d50f673049",
+        "0" * 64,
+        1,
+    )
+    expect_lock_snippet(changed_collab_blinding_base_pin, valid, success=False)
+    changed_collab_blinding_identity = snippet.replace(
+        "wasabi-liquid-native-coinjoin-collab-blinding",
+        "wasabi-liquid-native-coinjoin-collab-blindinx",
+        1,
+    )
+    expect_lock_snippet(changed_collab_blinding_identity, valid, success=False)
     changed_pset_state_identity = snippet.replace(
         "wasabi-liquid-native-coinjoin-pset-state",
         "wasabi-liquid-native-coinjoin-pset-statx",
@@ -3886,7 +3924,7 @@ if __name__ == "__main__":
     )
     expect_lock_snippet(changed_transcript_identity, valid, success=False)
     changed_current_pin = snippet.replace(
-        "708113d44c50f948d20d231b1c425d9060b88360ef9b4312bb6181d50f673049",
+        "9058d12bbe79b4655ccdccb4315e8c041ec326d114ad4de674c4375c6e8a7318",
         "0" * 64,
         1,
     )
