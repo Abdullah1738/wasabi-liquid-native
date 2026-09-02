@@ -3829,6 +3829,40 @@ if __name__ == "__main__":
     )
     expect_lock_snippet(snippet, pset_state_identity, success=False)
 
+    equality_integration_pset_state_edge = lock_root("lock-equality-integration-pset-state-edge")
+    remove_lock_dependency(
+        equality_integration_pset_state_edge,
+        "wasabi-liquid-native-coinjoin-equality-integration",
+        "wasabi-liquid-native-coinjoin-pset-state",
+    )
+    expect_lock_snippet(snippet, equality_integration_pset_state_edge, success=False)
+
+    equality_integration_equality_edge = lock_root("lock-equality-integration-equality-edge")
+    remove_lock_dependency(
+        equality_integration_equality_edge,
+        "wasabi-liquid-native-coinjoin-equality-integration",
+        "wasabi-liquid-native-credential-commitment-equality",
+    )
+    expect_lock_snippet(snippet, equality_integration_equality_edge, success=False)
+
+    equality_integration_elements_edge = lock_root("lock-equality-integration-elements-edge")
+    remove_lock_dependency(
+        equality_integration_elements_edge,
+        "wasabi-liquid-native-coinjoin-equality-integration",
+        "elements",
+    )
+    expect_lock_snippet(snippet, equality_integration_elements_edge, success=False)
+
+    equality_integration_identity = lock_root("lock-equality-integration-identity")
+    (equality_integration_identity / "Cargo.lock").write_text(
+        (equality_integration_identity / "Cargo.lock").read_text().replace(
+            'name = "wasabi-liquid-native-coinjoin-equality-integration"',
+            'name = "wasabi-liquid-native-coinjoin-equality-integratiox"',
+            1,
+        )
+    )
+    expect_lock_snippet(snippet, equality_integration_identity, success=False)
+
     transcript_edge = lock_root("lock-transcript-edge")
     remove_lock_dependency(
         transcript_edge,
@@ -3924,11 +3958,17 @@ if __name__ == "__main__":
     )
     expect_lock_snippet(changed_transcript_identity, valid, success=False)
     changed_current_pin = snippet.replace(
-        "9058d12bbe79b4655ccdccb4315e8c041ec326d114ad4de674c4375c6e8a7318",
+        "f2e8f1ee072f58a12fccf86f39d2f1cdc3675954b7562074c8a19c304970d9e3",
         "0" * 64,
         1,
     )
     expect_lock_snippet(changed_current_pin, valid, success=False)
+    changed_equality_integration_identity = snippet.replace(
+        "wasabi-liquid-native-coinjoin-equality-integration",
+        "wasabi-liquid-native-coinjoin-equality-integratiox",
+        1,
+    )
+    expect_lock_snippet(changed_equality_integration_identity, valid, success=False)
 
 
 def main() -> None:
