@@ -12,6 +12,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 GATE = ROOT / "ci" / "check-dependency-capabilities.sh"
 REAL_CARGO = shutil.which("cargo")
+REAL_PYTHON = shutil.which("python3.13") or shutil.which("python3")
+if REAL_PYTHON is None:
+    raise RuntimeError("python3.13 or python3 is unavailable")
 CONFORMANCE_CHECKER = ROOT / "ci" / "check-wallet-facts-conformance.py"
 REFERENCE = Path("contracts/wallet-facts/v1/nonlinkable-reference")
 PLAN_PRODUCTION_SOURCES = (
@@ -49,7 +52,7 @@ def plan_outer_attribute_authority_is_exact(
 
 def expect_conformance(root: Path, *, success: bool) -> None:
     result = subprocess.run(
-        ["python3", str(CONFORMANCE_CHECKER), str(root)],
+        [REAL_PYTHON, str(CONFORMANCE_CHECKER), str(root)],
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -485,7 +488,7 @@ def test_conformance_checker(scratch: Path) -> None:
 
 def expect_lock_snippet(snippet: str, root: Path, *, success: bool) -> None:
     result = subprocess.run(
-        ["python3", "-", str(root)],
+        [REAL_PYTHON, "-", str(root)],
         input=snippet,
         text=True,
         stdout=subprocess.PIPE,
@@ -3782,6 +3785,24 @@ if __name__ == "__main__":
     )
     expect_lock_snippet(snippet, equality_identity, success=False)
 
+    pset_state_transcript_edge = lock_root("lock-pset-state-transcript-edge")
+    remove_lock_dependency(
+        pset_state_transcript_edge,
+        "wasabi-liquid-native-coinjoin-pset-state",
+        "wasabi-liquid-native-coinjoin-state-transcript",
+    )
+    expect_lock_snippet(snippet, pset_state_transcript_edge, success=False)
+
+    pset_state_identity = lock_root("lock-pset-state-identity")
+    (pset_state_identity / "Cargo.lock").write_text(
+        (pset_state_identity / "Cargo.lock").read_text().replace(
+            'name = "wasabi-liquid-native-coinjoin-pset-state"',
+            'name = "wasabi-liquid-native-coinjoin-pset-statx"',
+            1,
+        )
+    )
+    expect_lock_snippet(snippet, pset_state_identity, success=False)
+
     transcript_edge = lock_root("lock-transcript-edge")
     remove_lock_dependency(
         transcript_edge,
@@ -3840,6 +3861,18 @@ if __name__ == "__main__":
         1,
     )
     expect_lock_snippet(changed_equality_identity, valid, success=False)
+    changed_pset_state_base_pin = snippet.replace(
+        "d6efc0056683780da23d8c06017d6618f8a2ae0d1164ab40e41176ab17c088ca",
+        "0" * 64,
+        1,
+    )
+    expect_lock_snippet(changed_pset_state_base_pin, valid, success=False)
+    changed_pset_state_identity = snippet.replace(
+        "wasabi-liquid-native-coinjoin-pset-state",
+        "wasabi-liquid-native-coinjoin-pset-statx",
+        1,
+    )
+    expect_lock_snippet(changed_pset_state_identity, valid, success=False)
     changed_transcript_base_pin = snippet.replace(
         "705ef6c3c0abfedf3af2028bc4d20912f0d92365188d1deb462b7f8d32f54e10",
         "0" * 64,
@@ -3853,7 +3886,7 @@ if __name__ == "__main__":
     )
     expect_lock_snippet(changed_transcript_identity, valid, success=False)
     changed_current_pin = snippet.replace(
-        "d6efc0056683780da23d8c06017d6618f8a2ae0d1164ab40e41176ab17c088ca",
+        "708113d44c50f948d20d231b1c425d9060b88360ef9b4312bb6181d50f673049",
         "0" * 64,
         1,
     )

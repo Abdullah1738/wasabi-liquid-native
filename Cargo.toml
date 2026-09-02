@@ -17,6 +17,7 @@ path = "src/lib.rs"
 members = [
     ".",
     "crates/address",
+    "crates/coinjoin-pset-state",
     "crates/coinjoin-state-transcript",
     "crates/credential-commitment-equality",
     "crates/ordinary-wallet-plan",
@@ -33,6 +34,7 @@ exclude = ["tools/ordinary-wallet-plan-public-proof-verifier"]
 default-members = [
     ".",
     "crates/address",
+    "crates/coinjoin-pset-state",
     "crates/coinjoin-state-transcript",
     "crates/credential-commitment-equality",
     "crates/ordinary-wallet-plan",
