@@ -451,6 +451,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasabi-liquid-native-coinjoin-partial-balance"
+version = "0.1.0"
+dependencies = [
+ "elements",
+ "rand",
+ "sha2",
+ "wasabi-liquid-native-coinjoin-pset-state",
+ "zeroize",
+]
+
+[[package]]
 name = "wasabi-liquid-native-coinjoin-pset-state"
 version = "0.1.0"
 dependencies = [

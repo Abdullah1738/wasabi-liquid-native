@@ -3863,6 +3863,48 @@ if __name__ == "__main__":
     )
     expect_lock_snippet(snippet, equality_integration_identity, success=False)
 
+    partial_balance_pset_state_edge = lock_root("lock-partial-balance-pset-state-edge")
+    remove_lock_dependency(
+        partial_balance_pset_state_edge,
+        "wasabi-liquid-native-coinjoin-partial-balance",
+        "wasabi-liquid-native-coinjoin-pset-state",
+    )
+    expect_lock_snippet(snippet, partial_balance_pset_state_edge, success=False)
+
+    partial_balance_elements_edge = lock_root("lock-partial-balance-elements-edge")
+    remove_lock_dependency(
+        partial_balance_elements_edge,
+        "wasabi-liquid-native-coinjoin-partial-balance",
+        "elements",
+    )
+    expect_lock_snippet(snippet, partial_balance_elements_edge, success=False)
+
+    partial_balance_sha2_edge = lock_root("lock-partial-balance-sha2-edge")
+    remove_lock_dependency(
+        partial_balance_sha2_edge,
+        "wasabi-liquid-native-coinjoin-partial-balance",
+        "sha2",
+    )
+    expect_lock_snippet(snippet, partial_balance_sha2_edge, success=False)
+
+    partial_balance_zeroize_edge = lock_root("lock-partial-balance-zeroize-edge")
+    remove_lock_dependency(
+        partial_balance_zeroize_edge,
+        "wasabi-liquid-native-coinjoin-partial-balance",
+        "zeroize",
+    )
+    expect_lock_snippet(snippet, partial_balance_zeroize_edge, success=False)
+
+    partial_balance_identity = lock_root("lock-partial-balance-identity")
+    (partial_balance_identity / "Cargo.lock").write_text(
+        (partial_balance_identity / "Cargo.lock").read_text().replace(
+            'name = "wasabi-liquid-native-coinjoin-partial-balance"',
+            'name = "wasabi-liquid-native-coinjoin-partial-balancx"',
+            1,
+        )
+    )
+    expect_lock_snippet(snippet, partial_balance_identity, success=False)
+
     transcript_edge = lock_root("lock-transcript-edge")
     remove_lock_dependency(
         transcript_edge,
@@ -3958,17 +4000,29 @@ if __name__ == "__main__":
     )
     expect_lock_snippet(changed_transcript_identity, valid, success=False)
     changed_current_pin = snippet.replace(
-        "f2e8f1ee072f58a12fccf86f39d2f1cdc3675954b7562074c8a19c304970d9e3",
+        "ff5567d32ae688faa1ca44f490eea822d911288bf3e452099af510a1089517ef",
         "0" * 64,
         1,
     )
     expect_lock_snippet(changed_current_pin, valid, success=False)
+    changed_partial_balance_base_pin = snippet.replace(
+        "f2e8f1ee072f58a12fccf86f39d2f1cdc3675954b7562074c8a19c304970d9e3",
+        "0" * 64,
+        1,
+    )
+    expect_lock_snippet(changed_partial_balance_base_pin, valid, success=False)
     changed_equality_integration_identity = snippet.replace(
         "wasabi-liquid-native-coinjoin-equality-integration",
         "wasabi-liquid-native-coinjoin-equality-integratiox",
         1,
     )
     expect_lock_snippet(changed_equality_integration_identity, valid, success=False)
+    changed_partial_balance_identity = snippet.replace(
+        "wasabi-liquid-native-coinjoin-partial-balance",
+        "wasabi-liquid-native-coinjoin-partial-balancx",
+        1,
+    )
+    expect_lock_snippet(changed_partial_balance_identity, valid, success=False)
 
 
 def main() -> None:

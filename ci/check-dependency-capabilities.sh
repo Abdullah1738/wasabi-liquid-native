@@ -297,7 +297,7 @@ workspace_cargo_home="$scratch/workspace-final-cargo-home"
 proof_cache_authority="$scratch/proof-cache-authority.jsonl"
 workspace_cache_authority="$scratch/workspace-cache-authority.jsonl"
 proof_lock_sha256=4ca45ca0dd27b2a545b0d93174e02487cc756b26a34d946de5dcb349ceea7aab
-workspace_lock_sha256=f2e8f1ee072f58a12fccf86f39d2f1cdc3675954b7562074c8a19c304970d9e3
+workspace_lock_sha256=ff5567d32ae688faa1ca44f490eea822d911288bf3e452099af510a1089517ef
 python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py \
     --snapshot-only \
     "$repository_root" \
@@ -1114,7 +1114,7 @@ ffi_base_hash = "5a6a3fa2fbf890844009d1ff1ad40841977a0ffa32c0faba795fa211262f867
 equality_base_hash = "67f5fa8be8d5f932f4a5ea55c43b32cf4961357a17986533f6fbb82432b7d263"
 transcript_base_hash = "705ef6c3c0abfedf3af2028bc4d20912f0d92365188d1deb462b7f8d32f54e10"
 facts_ffi_base_hash = "c12c61b0848647ad550dd5d63e9283559809f12e56d86646328bd99566cf7064"
-current_hash = "f2e8f1ee072f58a12fccf86f39d2f1cdc3675954b7562074c8a19c304970d9e3"
+current_hash = "ff5567d32ae688faa1ca44f490eea822d911288bf3e452099af510a1089517ef"
 if baseline_text != baseline_hash + "\n":
     raise SystemExit("wallet-facts conformance lock baseline pin mismatch")
 if hashlib.sha256(lock_bytes).hexdigest() != current_hash:
@@ -1122,6 +1122,26 @@ if hashlib.sha256(lock_bytes).hexdigest() != current_hash:
 
 text = lock_bytes.decode("utf-8")
 blocks = text.split("[[package]]\n")
+partial_balance_marker = 'name = "wasabi-liquid-native-coinjoin-partial-balance"\n'
+partial_balance_indexes = [index for index, block in enumerate(blocks) if partial_balance_marker in block]
+partial_balance_block = """name = "wasabi-liquid-native-coinjoin-partial-balance"
+version = "0.1.0"
+dependencies = [
+ "elements",
+ "rand",
+ "sha2",
+ "wasabi-liquid-native-coinjoin-pset-state",
+ "zeroize",
+]
+
+"""
+if len(partial_balance_indexes) != 1 or blocks[partial_balance_indexes[0]] != partial_balance_block:
+    raise SystemExit("CoinJoin partial balance lock package mismatch")
+del blocks[partial_balance_indexes[0]]
+partial_balance_base_bytes = "[[package]]\n".join(blocks).encode("utf-8")
+if hashlib.sha256(partial_balance_base_bytes).hexdigest() != "f2e8f1ee072f58a12fccf86f39d2f1cdc3675954b7562074c8a19c304970d9e3":
+    raise SystemExit("CoinJoin partial balance lock reverse transform mismatch")
+
 equality_integration_marker = 'name = "wasabi-liquid-native-coinjoin-equality-integration"\n'
 equality_integration_indexes = [index for index, block in enumerate(blocks) if equality_integration_marker in block]
 equality_integration_block = """name = "wasabi-liquid-native-coinjoin-equality-integration"
