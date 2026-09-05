@@ -1062,7 +1062,7 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
     ffi_artifact_tokens = (
         ffi_release_build,
         '        ffi_archive="$target_directory/release/libwasabi_liquid_native_ordinary_wallet_plan_ffi.a"',
-        '        c++ -x c++ -std=c++17 -fsyntax-only -Wall -Wextra -Werror \\',
+        '        c++ -x c++ -std=c++17 -fsyntax-only -Wall -Wextra -Werror \\\n            crates/ordinary-wallet-plan-ffi/src/shim.c',
         '        ffi_output="$gate_output/wlpq-ffi-library"',
         ffi_builder,
         '                nm -gjU "$ffi_library" >"$gate_output/wlpq-ffi.symbols"',
@@ -1075,6 +1075,52 @@ def test_gate_wiring_and_lock_proof(scratch: Path) -> None:
     ffi_positions = [gate.index(token) for token in ffi_artifact_tokens]
     if ffi_positions != sorted(ffi_positions):
         raise AssertionError("WLPQ FFI artifact gate order changed")
+    coinjoin_ffi_preflight = (
+        '"$python_bin" -I ci/check-coinjoin-ffi-surface.py "$repository_root"'
+    )
+    coinjoin_ffi_surface_mutations = '"$python_bin" -I ci/test-coinjoin-ffi-surface.py'
+    if (
+        gate.count(coinjoin_ffi_preflight) != 1
+        or gate.count(coinjoin_ffi_surface_mutations) != 1
+    ):
+        raise AssertionError("CoinJoin FFI preflight is not exact and singular")
+    if gate.index(coinjoin_ffi_preflight) > first_cargo_invocation:
+        raise AssertionError("CoinJoin FFI surface preflight does not precede Cargo")
+    if gate.index(coinjoin_ffi_surface_mutations) > first_cargo_invocation:
+        raise AssertionError("CoinJoin FFI surface mutations do not precede Cargo")
+    coinjoin_ffi_release_build = '''        run_sealed "$compiler_cargo_bin" build \\
+            --quiet \\
+            -p wasabi-liquid-native-coinjoin-ffi \\
+            --lib \\
+            --release \\
+            --locked \\
+            --offline'''
+    coinjoin_ffi_builder = '''            SDKROOT="$darwin_sdkroot" \\
+            ci/build-coinjoin-ffi-library.sh \\
+                "$repository_root" \\
+                "$target_directory" \\
+                "$coinjoin_ffi_output"'''
+    coinjoin_ffi_symbol_check = '''        python3 -I ci/check-coinjoin-ffi-surface.py \\
+            "$repository_root" \\
+            --symbols \\
+            "$host_system" \\
+            "$gate_output/coinjoin-ffi.symbols"'''
+    coinjoin_ffi_dynamic_test = '        python3 -I ci/test-coinjoin-ffi-dynamic.py "$repository_root" "$coinjoin_ffi_library"'
+    coinjoin_ffi_artifact_tokens = (
+        coinjoin_ffi_release_build,
+        '        c++ -x c++ -std=c++17 -fsyntax-only -Wall -Wextra -Werror \\\n            crates/coinjoin-ffi/src/shim.c',
+        '        coinjoin_ffi_output="$gate_output/coinjoin-ffi-library"',
+        coinjoin_ffi_builder,
+        '                nm -gjU "$coinjoin_ffi_library" >"$gate_output/coinjoin-ffi.symbols"',
+        '                nm -D --defined-only "$coinjoin_ffi_library" | awk \'{ print $3 }\' \\',
+        coinjoin_ffi_symbol_check,
+        coinjoin_ffi_dynamic_test,
+    )
+    if any(gate.count(token) != 1 for token in coinjoin_ffi_artifact_tokens):
+        raise AssertionError("CoinJoin FFI artifact gate is not exact and singular")
+    coinjoin_ffi_positions = [gate.index(token) for token in coinjoin_ffi_artifact_tokens]
+    if coinjoin_ffi_positions != sorted(coinjoin_ffi_positions):
+        raise AssertionError("CoinJoin FFI artifact gate order changed")
     first_build_capable_cargo = gate.index('tree_raw="$(')
     if gate.index(proof_surface_mutations) > first_build_capable_cargo:
         raise AssertionError("public proof surface mutations do not precede build-capable Cargo")
@@ -3905,6 +3951,72 @@ if __name__ == "__main__":
     )
     expect_lock_snippet(snippet, partial_balance_identity, success=False)
 
+    coinjoin_ffi_collab_blinding_edge = lock_root("lock-coinjoin-ffi-collab-blinding-edge")
+    remove_lock_dependency(
+        coinjoin_ffi_collab_blinding_edge,
+        "wasabi-liquid-native-coinjoin-ffi",
+        "wasabi-liquid-native-coinjoin-collab-blinding",
+    )
+    expect_lock_snippet(snippet, coinjoin_ffi_collab_blinding_edge, success=False)
+
+    coinjoin_ffi_equality_integration_edge = lock_root("lock-coinjoin-ffi-equality-integration-edge")
+    remove_lock_dependency(
+        coinjoin_ffi_equality_integration_edge,
+        "wasabi-liquid-native-coinjoin-ffi",
+        "wasabi-liquid-native-coinjoin-equality-integration",
+    )
+    expect_lock_snippet(snippet, coinjoin_ffi_equality_integration_edge, success=False)
+
+    coinjoin_ffi_partial_balance_edge = lock_root("lock-coinjoin-ffi-partial-balance-edge")
+    remove_lock_dependency(
+        coinjoin_ffi_partial_balance_edge,
+        "wasabi-liquid-native-coinjoin-ffi",
+        "wasabi-liquid-native-coinjoin-partial-balance",
+    )
+    expect_lock_snippet(snippet, coinjoin_ffi_partial_balance_edge, success=False)
+
+    coinjoin_ffi_pset_state_edge = lock_root("lock-coinjoin-ffi-pset-state-edge")
+    remove_lock_dependency(
+        coinjoin_ffi_pset_state_edge,
+        "wasabi-liquid-native-coinjoin-ffi",
+        "wasabi-liquid-native-coinjoin-pset-state",
+    )
+    expect_lock_snippet(snippet, coinjoin_ffi_pset_state_edge, success=False)
+
+    coinjoin_ffi_elements_edge = lock_root("lock-coinjoin-ffi-elements-edge")
+    remove_lock_dependency(
+        coinjoin_ffi_elements_edge,
+        "wasabi-liquid-native-coinjoin-ffi",
+        "elements",
+    )
+    expect_lock_snippet(snippet, coinjoin_ffi_elements_edge, success=False)
+
+    coinjoin_ffi_sha2_edge = lock_root("lock-coinjoin-ffi-sha2-edge")
+    remove_lock_dependency(
+        coinjoin_ffi_sha2_edge,
+        "wasabi-liquid-native-coinjoin-ffi",
+        "sha2",
+    )
+    expect_lock_snippet(snippet, coinjoin_ffi_sha2_edge, success=False)
+
+    coinjoin_ffi_zeroize_edge = lock_root("lock-coinjoin-ffi-zeroize-edge")
+    remove_lock_dependency(
+        coinjoin_ffi_zeroize_edge,
+        "wasabi-liquid-native-coinjoin-ffi",
+        "zeroize",
+    )
+    expect_lock_snippet(snippet, coinjoin_ffi_zeroize_edge, success=False)
+
+    coinjoin_ffi_identity = lock_root("lock-coinjoin-ffi-identity")
+    (coinjoin_ffi_identity / "Cargo.lock").write_text(
+        (coinjoin_ffi_identity / "Cargo.lock").read_text().replace(
+            'name = "wasabi-liquid-native-coinjoin-ffi"',
+            'name = "wasabi-liquid-native-coinjoin-ffx"',
+            1,
+        )
+    )
+    expect_lock_snippet(snippet, coinjoin_ffi_identity, success=False)
+
     transcript_edge = lock_root("lock-transcript-edge")
     remove_lock_dependency(
         transcript_edge,
@@ -4000,11 +4112,17 @@ if __name__ == "__main__":
     )
     expect_lock_snippet(changed_transcript_identity, valid, success=False)
     changed_current_pin = snippet.replace(
-        "ff5567d32ae688faa1ca44f490eea822d911288bf3e452099af510a1089517ef",
+        "1aca521a3b17172ee367b114c152c72b70777c0b6b0da8c02658e5165ef13e47",
         "0" * 64,
         1,
     )
     expect_lock_snippet(changed_current_pin, valid, success=False)
+    changed_coinjoin_ffi_base_pin = snippet.replace(
+        "ff5567d32ae688faa1ca44f490eea822d911288bf3e452099af510a1089517ef",
+        "0" * 64,
+        1,
+    )
+    expect_lock_snippet(changed_coinjoin_ffi_base_pin, valid, success=False)
     changed_partial_balance_base_pin = snippet.replace(
         "f2e8f1ee072f58a12fccf86f39d2f1cdc3675954b7562074c8a19c304970d9e3",
         "0" * 64,
@@ -4023,6 +4141,12 @@ if __name__ == "__main__":
         1,
     )
     expect_lock_snippet(changed_partial_balance_identity, valid, success=False)
+    changed_coinjoin_ffi_identity = snippet.replace(
+        "wasabi-liquid-native-coinjoin-ffi",
+        "wasabi-liquid-native-coinjoin-ffx",
+        1,
+    )
+    expect_lock_snippet(changed_coinjoin_ffi_identity, valid, success=False)
 
 
 def main() -> None:

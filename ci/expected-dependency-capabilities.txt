@@ -36,6 +36,7 @@ wasabi-liquid-native-abi-v24-types v0.1.0 (workspace)|
 wasabi-liquid-native-address v0.1.0 (workspace)|
 wasabi-liquid-native-coinjoin-collab-blinding v0.1.0 (workspace)|
 wasabi-liquid-native-coinjoin-equality-integration v0.1.0 (workspace)|
+wasabi-liquid-native-coinjoin-ffi v0.1.0 (workspace)|
 wasabi-liquid-native-coinjoin-partial-balance v0.1.0 (workspace)|
 wasabi-liquid-native-coinjoin-pset-state v0.1.0 (workspace)|
 wasabi-liquid-native-coinjoin-state-transcript v0.1.0 (workspace)|

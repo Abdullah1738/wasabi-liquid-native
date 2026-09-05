@@ -1,0 +1,6 @@
+{
+    global:
+        wlcj_execute_v1;
+    local:
+        *;
+};

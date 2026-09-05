@@ -451,6 +451,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasabi-liquid-native-coinjoin-ffi"
+version = "0.1.0"
+dependencies = [
+ "elements",
+ "rand",
+ "sha2",
+ "wasabi-liquid-native-coinjoin-collab-blinding",
+ "wasabi-liquid-native-coinjoin-equality-integration",
+ "wasabi-liquid-native-coinjoin-partial-balance",
+ "wasabi-liquid-native-coinjoin-pset-state",
+ "wasabi-liquid-native-credential-commitment-equality",
+ "zeroize",
+]
+
+[[package]]
 name = "wasabi-liquid-native-coinjoin-partial-balance"
 version = "0.1.0"
 dependencies = [

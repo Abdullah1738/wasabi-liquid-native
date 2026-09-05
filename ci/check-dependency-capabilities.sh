@@ -153,6 +153,8 @@ fi
 "$python_bin" -I ci/check-ordinary-wallet-plan-public-proof-surface.py "$repository_root"
 "$python_bin" -I ci/check-wlpq-ffi-surface.py "$repository_root"
 "$python_bin" -I ci/test-wlpq-ffi-surface.py
+"$python_bin" -I ci/check-coinjoin-ffi-surface.py "$repository_root"
+"$python_bin" -I ci/test-coinjoin-ffi-surface.py
 "$python_bin" -I ci/check-cargo-fetch-preflight.py "$repository_root"
 if ! compiler_toolchain_root="$("$python_bin" -I ci/check-pinned-rust-toolchain.py "${HOME:?}")"; then
     echo "dependency compiler and artifact gates require Cargo 1.96.0" >&2
@@ -297,7 +299,7 @@ workspace_cargo_home="$scratch/workspace-final-cargo-home"
 proof_cache_authority="$scratch/proof-cache-authority.jsonl"
 workspace_cache_authority="$scratch/workspace-cache-authority.jsonl"
 proof_lock_sha256=4ca45ca0dd27b2a545b0d93174e02487cc756b26a34d946de5dcb349ceea7aab
-workspace_lock_sha256=ff5567d32ae688faa1ca44f490eea822d911288bf3e452099af510a1089517ef
+workspace_lock_sha256=1aca521a3b17172ee367b114c152c72b70777c0b6b0da8c02658e5165ef13e47
 python3 -I ci/prepare-ordinary-wallet-plan-proof-snapshot.py \
     --snapshot-only \
     "$repository_root" \
@@ -1114,7 +1116,7 @@ ffi_base_hash = "5a6a3fa2fbf890844009d1ff1ad40841977a0ffa32c0faba795fa211262f867
 equality_base_hash = "67f5fa8be8d5f932f4a5ea55c43b32cf4961357a17986533f6fbb82432b7d263"
 transcript_base_hash = "705ef6c3c0abfedf3af2028bc4d20912f0d92365188d1deb462b7f8d32f54e10"
 facts_ffi_base_hash = "c12c61b0848647ad550dd5d63e9283559809f12e56d86646328bd99566cf7064"
-current_hash = "ff5567d32ae688faa1ca44f490eea822d911288bf3e452099af510a1089517ef"
+current_hash = "1aca521a3b17172ee367b114c152c72b70777c0b6b0da8c02658e5165ef13e47"
 if baseline_text != baseline_hash + "\n":
     raise SystemExit("wallet-facts conformance lock baseline pin mismatch")
 if hashlib.sha256(lock_bytes).hexdigest() != current_hash:
@@ -1122,6 +1124,29 @@ if hashlib.sha256(lock_bytes).hexdigest() != current_hash:
 
 text = lock_bytes.decode("utf-8")
 blocks = text.split("[[package]]\n")
+coinjoin_ffi_marker = 'name = "wasabi-liquid-native-coinjoin-ffi"\n'
+coinjoin_ffi_indexes = [index for index, block in enumerate(blocks) if coinjoin_ffi_marker in block]
+coinjoin_ffi_block = """name = "wasabi-liquid-native-coinjoin-ffi"
+version = "0.1.0"
+dependencies = [
+ "elements",
+ "rand",
+ "sha2",
+ "wasabi-liquid-native-coinjoin-collab-blinding",
+ "wasabi-liquid-native-coinjoin-equality-integration",
+ "wasabi-liquid-native-coinjoin-partial-balance",
+ "wasabi-liquid-native-coinjoin-pset-state",
+ "wasabi-liquid-native-credential-commitment-equality",
+ "zeroize",
+]
+
+"""
+if len(coinjoin_ffi_indexes) != 1 or blocks[coinjoin_ffi_indexes[0]] != coinjoin_ffi_block:
+    raise SystemExit("CoinJoin FFI lock package mismatch")
+del blocks[coinjoin_ffi_indexes[0]]
+coinjoin_ffi_base_bytes = "[[package]]\n".join(blocks).encode("utf-8")
+if hashlib.sha256(coinjoin_ffi_base_bytes).hexdigest() != "ff5567d32ae688faa1ca44f490eea822d911288bf3e452099af510a1089517ef":
+    raise SystemExit("CoinJoin FFI lock reverse transform mismatch")
 partial_balance_marker = 'name = "wasabi-liquid-native-coinjoin-partial-balance"\n'
 partial_balance_indexes = [index for index, block in enumerate(blocks) if partial_balance_marker in block]
 partial_balance_block = """name = "wasabi-liquid-native-coinjoin-partial-balance"
@@ -1838,6 +1863,13 @@ $decoder_uniqueness_mir"
             --release \
             --locked \
             --offline
+        run_sealed "$compiler_cargo_bin" build \
+            --quiet \
+            -p wasabi-liquid-native-coinjoin-ffi \
+            --lib \
+            --release \
+            --locked \
+            --offline
         target_directory="$(
             python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["target_directory"])' \
                 "$gate_output/metadata.json"
@@ -1930,6 +1962,40 @@ $decoder_uniqueness_mir"
             "$host_system" \
             "$gate_output/wlpq-ffi.symbols"
         python3 -I ci/test-wlpq-ffi-dynamic.py "$repository_root" "$ffi_library"
+        c++ -x c++ -std=c++17 -fsyntax-only -Wall -Wextra -Werror \
+            crates/coinjoin-ffi/src/shim.c
+        coinjoin_ffi_output="$gate_output/coinjoin-ffi-library"
+        mkdir "$coinjoin_ffi_output"
+        coinjoin_ffi_library="$(
+            SDKROOT="$darwin_sdkroot" \
+            ci/build-coinjoin-ffi-library.sh \
+                "$repository_root" \
+                "$target_directory" \
+                "$coinjoin_ffi_output"
+        )"
+        case "$host_system" in
+            Darwin)
+                if [ "$coinjoin_ffi_library" != "$coinjoin_ffi_output/libwasabi_liquid_coinjoin_v1.dylib" ]; then
+                    echo "CoinJoin FFI macOS artifact path changed" >&2
+                    exit 1
+                fi
+                nm -gjU "$coinjoin_ffi_library" >"$gate_output/coinjoin-ffi.symbols"
+                ;;
+            Linux)
+                if [ "$coinjoin_ffi_library" != "$coinjoin_ffi_output/libwasabi_liquid_coinjoin_v1.so" ]; then
+                    echo "CoinJoin FFI Linux artifact path changed" >&2
+                    exit 1
+                fi
+                nm -D --defined-only "$coinjoin_ffi_library" | awk '{ print $3 }' \
+                    >"$gate_output/coinjoin-ffi.symbols"
+                ;;
+        esac
+        python3 -I ci/check-coinjoin-ffi-surface.py \
+            "$repository_root" \
+            --symbols \
+            "$host_system" \
+            "$gate_output/coinjoin-ffi.symbols"
+        python3 -I ci/test-coinjoin-ffi-dynamic.py "$repository_root" "$coinjoin_ffi_library"
         if ! dynamic_artifacts="$(
             find "$target_directory/release" "$target_directory/debug" -type f \
                 \( -name 'libwasabi_liquid_native_wallet_facts_wire*.dylib' \
