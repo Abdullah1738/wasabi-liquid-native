@@ -58,8 +58,8 @@ def invoke(fn, request: bytes):
 
 
 def main() -> None:
-    if len(sys.argv) not in (3, 4, 5):
-        raise SystemExit("usage: test-coinjoin-ffi-dynamic.py REPOSITORY_ROOT LIBRARY [C1_FIXTURES [C2_FIXTURES]]")
+    if len(sys.argv) not in (3, 4, 5, 6):
+        raise SystemExit("usage: test-coinjoin-ffi-dynamic.py REPOSITORY_ROOT LIBRARY [C1_FIXTURES [C2_FIXTURES [OPENING_FIXTURES]]]")
     root = pathlib.Path(sys.argv[1]).resolve()
     library_path = pathlib.Path(sys.argv[2]).resolve()
     _ = root
@@ -191,7 +191,7 @@ def main() -> None:
                 assert out.raw == b"\xa5" * 84
         print("coinjoin-ffi C1 dynamic: ops 8->2, 9->3 and both participants 10->7 OK")
 
-    if len(sys.argv) == 5:
+    if len(sys.argv) >= 5:
         fixtures = pathlib.Path(sys.argv[4]).resolve()
         cases = sorted(fixtures.glob("*.status"))
         assert len(cases) >= 50, "missing C2 success/hostile fixtures"
@@ -220,6 +220,49 @@ def main() -> None:
                 assert out.raw == b"\xa5" * 32768, case
         assert successful == {"op11-0", "op11-1", "op12"}, successful
         print(f"coinjoin-ffi C2 dynamic: {len(cases)} cases, independent digests and signature assembly OK")
+
+    if len(sys.argv) == 6:
+        fixtures = pathlib.Path(sys.argv[5]).resolve()
+        cases = sorted(fixtures.glob("*.status"))
+        required_cases = {
+            "op13", "wrong-key", "zero-key", "overflow-key", "wrong-index",
+            "index-oob", "index-max", "wrong-script", "wrong-value", "wrong-asset",
+            "wrong-txid", "reversed-txid", "invalid-pset", "empty-pset",
+            "explicit-output", "extra-field", "trailing-pset", "truncated-frame",
+            "trailing-frame", "payload-cap", "field-cap",
+        }
+        required_cases.update(f"output-mutation-{i}" for i in range(4))
+        required_cases.update(f"missing-field-{i}" for i in range(7))
+        required_cases.update(f"field-length-{i}-{big}" for i in (1, 2, 3, 5, 6)
+                              for big in ("false", "true"))
+        assert {case.stem for case in cases} == required_cases, "opening fixture matrix changed"
+        for case in cases:
+            request = case.with_suffix(".request").read_bytes()
+            expected_status = int(case.read_text())
+            status, length = invoke(execute, request)
+            if expected_status == STATUS_OK:
+                expected = case.with_suffix(".response").read_bytes()
+                assert expected[:20] == struct.pack(">IIIII", MAGIC, ABI, 13, 108, 104)
+                assert len(expected) == 124 and status == STATUS_OUTPUT_CAPACITY and length == 124
+                for capacity in (0, 123, 124, 125):
+                    out = ctypes.create_string_buffer(b"\xa5" * 125, 125)
+                    written = ctypes.c_uint64(123)
+                    status = execute(request, len(request), out, capacity, ctypes.byref(written))
+                    assert written.value == 124
+                    if capacity < 124:
+                        assert status == STATUS_OUTPUT_CAPACITY and out.raw == b"\xa5" * 125
+                    else:
+                        assert status == STATUS_OK and out.raw[:124] == expected
+                        assert out.raw[124:] == b"\xa5"
+                assert call(request) == expected and call(request) == expected
+            else:
+                assert status == expected_status and length == 0, (case, status)
+                out = ctypes.create_string_buffer(b"\xa5" * 125, 125)
+                written = ctypes.c_uint64(123)
+                status = execute(request, len(request), out, 125, ctypes.byref(written))
+                assert status == expected_status and written.value == 0, (case, status)
+                assert out.raw == b"\xa5" * 125, case
+        print(f"coinjoin-ffi opening dynamic: {len(cases)} cases, participant-only secret record OK")
 
     print("coinjoin-ffi dynamic: OK")
 

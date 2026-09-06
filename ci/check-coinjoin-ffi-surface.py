@@ -84,6 +84,7 @@ def validate(root: pathlib.Path) -> None:
         "wasabi-liquid-native-coinjoin-equality-integration",
         "wasabi-liquid-native-coinjoin-partial-balance",
         "wasabi-liquid-native-coinjoin-pset-state",
+        "wasabi-liquid-native-output-opening",
         "zeroize",
     }:
         reject("CoinJoin FFI dependency capability surface changed")
@@ -107,6 +108,8 @@ def validate(root: pathlib.Path) -> None:
         "fn op_verify_partial_balance",
         "fn op_prove_registration",
         "fn op_prove_partial_balance",
+        "fn op_open_output",
+        "open_confidential_output(&Secp256k1::new()",
     ):
         if token not in source:
             reject(f"CoinJoin FFI source token missing: {token}")
@@ -119,6 +122,7 @@ def validate(root: pathlib.Path) -> None:
         "PROVE_INPUT_REGISTRATION", "PROVE_OUTPUT_REGISTRATION",
         "PROVE_PARTIAL_BALANCE",
         "SIGNING_DIGESTS", "ASSEMBLE_SIGNATURES",
+        "OPEN_OUTPUT",
     ), 1):
         constant = f"WLCJ_OP_{name}_V1"
         if f"pub const {constant}: u32 = {op};" not in source:
@@ -177,6 +181,7 @@ def validate(root: pathlib.Path) -> None:
         "no_secret_bytes_in_any_response",
         "c1_registration_creation_and_hostiles",
         "c1_partial_balance_scalar_boundaries",
+        "opening_bridge_hostile_matrix_and_zeroization",
     ):
         if f"fn {name}(" not in tests:
             reject(f"CoinJoin FFI test inventory changed: {name}")

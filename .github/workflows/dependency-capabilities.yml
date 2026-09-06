@@ -109,7 +109,7 @@ jobs:
               "profile": "release",
               "rustc": subprocess.check_output(["rustc", "+1.96.0", "-vV"], text=True).strip(),
               "abi_version": 1,
-              "operations": list(range(1, 13)),
+              "operations": list(range(1, 14)),
               "export": "wlcj_execute_v1",
               "cargo_lock_sha256": digest(pathlib.Path("Cargo.lock")),
               "build_script_sha256": digest(pathlib.Path("ci/build-coinjoin-ffi-library.sh")),
