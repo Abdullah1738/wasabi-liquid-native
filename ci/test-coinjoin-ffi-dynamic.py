@@ -58,8 +58,8 @@ def invoke(fn, request: bytes):
 
 
 def main() -> None:
-    if len(sys.argv) != 3:
-        raise SystemExit("usage: test-coinjoin-ffi-dynamic.py REPOSITORY_ROOT LIBRARY")
+    if len(sys.argv) not in (3, 4):
+        raise SystemExit("usage: test-coinjoin-ffi-dynamic.py REPOSITORY_ROOT LIBRARY [C1_FIXTURES]")
     root = pathlib.Path(sys.argv[1]).resolve()
     library_path = pathlib.Path(sys.argv[2]).resolve()
     _ = root
@@ -116,6 +116,80 @@ def main() -> None:
     oversized_declared = struct.pack(">IIII", MAGIC, ABI, OP_CANONICALIZE_STATE, 1081345) + b"\x00"
     status, _ = invoke(execute, oversized_declared)
     assert status in (STATUS_INVALID_FRAME, STATUS_PAYLOAD_TOO_LARGE), status
+
+    if len(sys.argv) == 4:
+        fixtures = pathlib.Path(sys.argv[3]).resolve()
+
+        def call(request):
+            status, required = invoke(execute, request)
+            assert status == STATUS_OUTPUT_CAPACITY, status
+            out = ctypes.create_string_buffer(required)
+            written = ctypes.c_uint64(0)
+            status = execute(request, len(request), out, required, ctypes.byref(written))
+            assert status == STATUS_OK and written.value == required
+            return out.raw
+
+        for prove_op, verify_op, suffix, proof_len, scalar_field in (
+            (8, 2, "", 162, 4), (9, 3, "", 162, 4),
+            (10, 7, "-0", 65, 2), (10, 7, "-1", 65, 2),
+        ):
+            request = (fixtures / f"op{prove_op}{suffix}.request").read_bytes()
+            response = call(request)
+            assert response == (fixtures / f"op{prove_op}{suffix}.response").read_bytes()
+            assert call(request) == response
+            assert len(response) == 20 + proof_len
+            assert response[:20] == struct.pack(">IIIII", MAGIC, ABI, prove_op, 4 + proof_len, proof_len)
+            verification = bytearray((fixtures / f"op{verify_op}{suffix}.request").read_bytes())
+            # Replace its proof with the actual dynamically generated proof.
+            offset = 16
+            for _ in range(2):
+                offset += 4 + struct.unpack_from(">I", verification, offset)[0]
+            assert struct.unpack_from(">I", verification, offset)[0] == proof_len
+            verification[offset + 4:offset + 4 + proof_len] = response[20:]
+            assert call(bytes(verification))[16:] == field(b"OK\x00\x00")
+            if prove_op == 10:
+                # The balance context's final u64 is the fee share.
+                context_offset = 20 + struct.unpack_from(">I", request, 16)[0]
+                fee_offset = context_offset + 4 + struct.unpack_from(">I", request, context_offset)[0] - 8
+                zero_fee_verification = bytearray(verification)
+                zero_fee_verification[fee_offset:fee_offset + 8] = bytes(8)
+                status, length = invoke(execute, bytes(zero_fee_verification))
+                assert status == -6 and length == 0
+                for zero_fee, zero_residual in ((True, False), (False, True), (True, True)):
+                    invalid = bytearray(request)
+                    if zero_fee:
+                        invalid[fee_offset:fee_offset + 8] = bytes(8)
+                    if zero_residual:
+                        invalid[fee_offset + 12:fee_offset + 44] = bytes(32)
+                    status, length = invoke(execute, bytes(invalid))
+                    assert status == -5 and length == 0
+                    out = ctypes.create_string_buffer(b"\xa5" * 85, 85)
+                    written = ctypes.c_uint64(123)
+                    status = execute(bytes(invalid), len(invalid), out, 85, ctypes.byref(written))
+                    assert status == -5 and written.value == 0 and out.raw == b"\xa5" * 85
+            verification[offset + 4] ^= 1
+            status, length = invoke(execute, bytes(verification))
+            assert status == -6 and length == 0
+            # Malformed scalar fails through the real export.
+            offset = 16
+            for _ in range(scalar_field):
+                offset += 4 + struct.unpack_from(">I", request, offset)[0]
+            invalid = bytearray(request)
+            invalid[offset + 4:offset + 36] = bytes([255] * 32)
+            status, length = invoke(execute, bytes(invalid))
+            assert status == -5 and length == 0
+            if prove_op == 10:
+                invalid = bytearray(request)
+                invalid[offset + 35] ^= 1
+                out = ctypes.create_string_buffer(b"\xa5" * 85, 85)
+                written = ctypes.c_uint64(123)
+                status = execute(bytes(invalid), len(invalid), out, 85, ctypes.byref(written))
+                assert status == -6 and written.value == 0 and out.raw == b"\xa5" * 85
+                out = ctypes.create_string_buffer(b"\xa5" * 84, 84)
+                status = execute(request, len(request), out, 84, ctypes.byref(written))
+                assert status == STATUS_OUTPUT_CAPACITY and written.value == 85
+                assert out.raw == b"\xa5" * 84
+        print("coinjoin-ffi C1 dynamic: ops 8->2, 9->3 and both participants 10->7 OK")
 
     print("coinjoin-ffi dynamic: OK")
 

@@ -6,9 +6,9 @@
 //! This crate is a thin marshaling layer over the four landed, already-reviewed
 //! pure primitives: `coinjoin-pset-state` (canonical PSET state projection and
 //! digest), `coinjoin-equality-integration` (registration-bound equality proof
-//! verification), `coinjoin-collab-blinding` (two-participant collaborative
+//! creation and verification), `coinjoin-collab-blinding` (two-participant collaborative
 //! blinding), and `coinjoin-partial-balance` (per-participant balance proof
-//! verification). It adds NO new cryptography and NO new protocol logic.
+//! creation and verification). It adds NO new cryptography and NO new protocol logic.
 //!
 //! Every request and response crosses the boundary as exactly one bounded
 //! frame `[magic u32][abi_version u32][op u32][payload_len u32][payload]`
@@ -45,7 +45,7 @@ use wasabi_liquid_native_coinjoin_pset_state::{
     CanonicalStateContext, ParticipantRole, Phase, PredecessorDigest, ProfileVersion,
     canonicalize_pset_state,
 };
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 /// The frozen CoinJoin ABI version.
 pub const WLCJ_ABI_VERSION_V1: u32 = 1;
@@ -77,6 +77,12 @@ pub const WLCJ_OP_BLIND_LAST_V1: u32 = 5;
 pub const WLCJ_OP_VALIDATE_SIGNER_VIEW_V1: u32 = 6;
 /// Operation: partial-balance proof verification.
 pub const WLCJ_OP_VERIFY_PARTIAL_BALANCE_V1: u32 = 7;
+/// Operation: stateless input-registration equality proof creation.
+pub const WLCJ_OP_PROVE_INPUT_REGISTRATION_V1: u32 = 8;
+/// Operation: stateless output-registration equality proof creation.
+pub const WLCJ_OP_PROVE_OUTPUT_REGISTRATION_V1: u32 = 9;
+/// Operation: stateless partial-balance proof creation.
+pub const WLCJ_OP_PROVE_PARTIAL_BALANCE_V1: u32 = 10;
 
 /// The operation succeeded and the complete response frame was copied.
 pub const WLCJ_STATUS_OK_V1: i32 = 0;
@@ -98,7 +104,7 @@ pub const WLCJ_STATUS_INTERNAL_ERROR_V1: i32 = -7;
 pub const WLCJ_STATUS_OUTPUT_CAPACITY_V1: i32 = -8;
 
 /// Per-op payload bounds, fixed by the frozen ABI.
-const OP_PAYLOAD_BOUNDS: [u32; 7] = [
+const OP_PAYLOAD_BOUNDS: [u32; 10] = [
     1_081_344, // op 1: canonicalize state
     1_081_344, // op 2: verify input registration
     3_178_496, // op 3: verify output registration
@@ -106,6 +112,9 @@ const OP_PAYLOAD_BOUNDS: [u32; 7] = [
     2_097_152, // op 5: blind last
     1_081_344, // op 6: validate signer view
     1_081_344, // op 7: verify partial balance
+    1_081_344, // op 8: prove input registration
+    3_178_496, // op 9: prove output registration
+    1_081_344, // op 10: prove partial balance
 ];
 
 const SECRET_RECORD_BYTES: usize = 108;
@@ -749,6 +758,95 @@ fn op_verify_registration(payload: &[u8], kind: RegistrationKind) -> Result<Vec<
     Ok(verdict_payload())
 }
 
+fn op_prove_registration(payload: &[u8], kind: RegistrationKind) -> Result<Vec<u8>, Rejection> {
+    let expected: &[u32] = match kind {
+        RegistrationKind::InputRegistration => &[u32::MAX, u32::MAX, 33, 8, 32, 32, 32],
+        RegistrationKind::OutputRegistration => {
+            &[u32::MAX, u32::MAX, 33, 8, 32, 32, 32, u32::MAX, u32::MAX]
+        }
+    };
+    let fields = expect_fields(payload, expected)?;
+    let parsed = parse_registration_context(fields[1])?;
+    if parsed.kind != kind as u8 {
+        return Err(Rejection::ValidationFailed);
+    }
+    let pset = decode_pset(fields[0])?;
+    let index = usize::try_from(parsed.element_index).map_err(|_| Rejection::ValidationFailed)?;
+    let statement = match kind {
+        RegistrationKind::InputRegistration => {
+            let utxo = pset
+                .inputs()
+                .get(index)
+                .and_then(|input| input.witness_utxo.as_ref())
+                .ok_or(Rejection::ValidationFailed)?;
+            equality::input_registration_statement(fields[2], utxo)
+                .map_err(|_| Rejection::ValidationFailed)?
+        }
+        RegistrationKind::OutputRegistration => {
+            let statement = equality::output_registration_statement(fields[2], &pset, index)
+                .map_err(|_| Rejection::ValidationFailed)?;
+            let output = &pset.outputs()[index];
+            if output
+                .value_rangeproof
+                .as_ref()
+                .map(|proof| proof.to_vec())
+                .as_deref()
+                != Some(fields[7])
+                || output
+                    .asset_surjection_proof
+                    .as_ref()
+                    .map(|proof| proof.to_vec())
+                    .as_deref()
+                    != Some(fields[8])
+            {
+                return Err(Rejection::ValidationFailed);
+            }
+            statement
+        }
+    };
+    // As in ops 2/3/7, this digest is caller-supplied, not recomputed here.
+    let context = RegistrationContext {
+        profile: ProfileVersion::V1,
+        network_identity: &parsed.network_identity,
+        genesis_hash: parsed.genesis_hash,
+        lbtc_asset: elements::AssetId::from_byte_array(parsed.lbtc_asset),
+        round_id: &parsed.round_id,
+        phase: parse_phase(parsed.phase)?,
+        participant_role: parse_role(parsed.participant_role)?,
+        contribution_ordinal: parsed.contribution_ordinal,
+        kind,
+        element_index: parsed.element_index,
+        pset_state_digest: parsed.pset_state_digest,
+        output_proof_binding: match kind {
+            RegistrationKind::InputRegistration => None,
+            RegistrationKind::OutputRegistration => Some(OutputProofBinding {
+                value_rangeproof: fields[7],
+                asset_surjection_proof: fields[8],
+            }),
+        },
+    };
+    let value = Zeroizing::new(take_u64(&mut &fields[3][..])?);
+    // Borrow blindings and entropy from the zeroizing request copy; the typed
+    // witness also zeroizes on drop, including rejection and unwinding paths.
+    let witness = equality::EqualityWitness::from_scalar_blindings(
+        *value,
+        fields[4].try_into().map_err(|_| Rejection::InternalError)?,
+        fields[5].try_into().map_err(|_| Rejection::InternalError)?,
+    )
+    .map_err(|_| Rejection::ValidationFailed)?;
+    let secp = Secp256k1::new();
+    let proof = equality::prove_registration(&secp, &witness, &statement, &context, fields[6])
+        .map_err(|_| Rejection::ValidationFailed)?;
+    let proof_bytes = equality::encode_proof(&proof);
+    // The primitive prover accepts inconsistent witnesses. Never return such
+    // a proof: check both Ma and Liquid commitment relations without an issuer.
+    equality::verify_registration(&secp, &statement, &proof_bytes, &context)
+        .map_err(|_| Rejection::VerificationFailed)?;
+    let mut response = Vec::with_capacity(4 + proof_bytes.len());
+    push_field(&mut response, &proof_bytes);
+    Ok(response)
+}
+
 fn op_blind_non_last(payload: &[u8]) -> Result<Vec<u8>, Rejection> {
     let fields = expect_fields(payload, &[u32::MAX, u32::MAX, u32::MAX, 32])?;
     let state = build_state(fields[0], fields[1])?;
@@ -836,6 +934,45 @@ fn op_verify_partial_balance(payload: &[u8]) -> Result<Vec<u8>, Rejection> {
     Ok(verdict_payload())
 }
 
+fn op_prove_partial_balance(payload: &[u8]) -> Result<Vec<u8>, Rejection> {
+    let fields = expect_fields(payload, &[u32::MAX, u32::MAX, 32, 32])?;
+    let pset = decode_pset(fields[0])?;
+    let parsed = parse_partial_balance_context(fields[1])?;
+    if parsed.fee_share == 0 {
+        return Err(Rejection::ValidationFailed);
+    }
+    // The caller must match this digest to its full canonical state, as in op 7.
+    let context = PartialBalanceContext {
+        profile: ProfileVersion::V1,
+        network_identity: &parsed.network_identity,
+        genesis_hash: parsed.genesis_hash,
+        lbtc_asset: elements::AssetId::from_byte_array(parsed.lbtc_asset),
+        round_id: &parsed.round_id,
+        phase: parse_phase(parsed.phase)?,
+        participant_role: parse_role(parsed.participant_role)?,
+        contribution_ordinal: parsed.contribution_ordinal,
+        pset_state_digest: parsed.pset_state_digest,
+        input_indices: &parsed.input_indices,
+        output_indices: &parsed.output_indices,
+        fee_share: parsed.fee_share,
+    };
+    // Borrow from the scoped zeroizing request; the typed witness erases on drop.
+    let witness = partial_balance::PartialBalanceWitness::from_scalar_bytes(
+        fields[2].try_into().map_err(|_| Rejection::InternalError)?,
+    )
+    .map_err(|_| Rejection::ValidationFailed)?;
+    let secp = Secp256k1::new();
+    let proof = partial_balance::prove_partial_balance(&secp, &pset, &context, &witness, fields[3])
+        .map_err(|_| Rejection::ValidationFailed)?;
+    // Proving alone does not reject a mismatched witness. Recompute and verify
+    // the residual before any proof bytes can reach a response or capacity query.
+    partial_balance::verify_partial_balance(&secp, &pset, &context, &proof)
+        .map_err(|_| Rejection::VerificationFailed)?;
+    let mut response = Vec::with_capacity(4 + partial_balance::PROOF_BYTES);
+    push_field(&mut response, &partial_balance::encode_proof(&proof));
+    Ok(response)
+}
+
 fn dispatch(op: u32, payload: &[u8]) -> Result<Vec<u8>, Rejection> {
     match op {
         WLCJ_OP_CANONICALIZE_STATE_V1 => op_canonicalize_state(payload),
@@ -849,6 +986,13 @@ fn dispatch(op: u32, payload: &[u8]) -> Result<Vec<u8>, Rejection> {
         WLCJ_OP_BLIND_LAST_V1 => op_blind_last(payload),
         WLCJ_OP_VALIDATE_SIGNER_VIEW_V1 => op_validate_signer_view(payload),
         WLCJ_OP_VERIFY_PARTIAL_BALANCE_V1 => op_verify_partial_balance(payload),
+        WLCJ_OP_PROVE_INPUT_REGISTRATION_V1 => {
+            op_prove_registration(payload, RegistrationKind::InputRegistration)
+        }
+        WLCJ_OP_PROVE_OUTPUT_REGISTRATION_V1 => {
+            op_prove_registration(payload, RegistrationKind::OutputRegistration)
+        }
+        WLCJ_OP_PROVE_PARTIAL_BALANCE_V1 => op_prove_partial_balance(payload),
         _ => Err(Rejection::InvalidFrame),
     }
 }
@@ -887,7 +1031,7 @@ fn parse_header(frame: &[u8]) -> Result<FrameHeader, i32> {
     if payload_len != payload.len() {
         return Err(WLCJ_STATUS_INVALID_FRAME_V1);
     }
-    if !(1..=7).contains(&op) {
+    if !(1..=10).contains(&op) {
         return Err(WLCJ_STATUS_UNKNOWN_OP_V1);
     }
     if payload_len > OP_PAYLOAD_BOUNDS[op as usize - 1] as usize {

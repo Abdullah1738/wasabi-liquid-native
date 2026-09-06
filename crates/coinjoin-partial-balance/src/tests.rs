@@ -577,11 +577,9 @@ fn checked_arithmetic_bounds_fail_closed() {
 }
 
 #[test]
-fn max_lbtc_boundary_residual_is_identity_fail_closed() {
-    // An explicit-value input at the exact max L-BTC atomic units with an
-    // equal fee share leaves a zero residual (the point at infinity), which
-    // cannot be represented as a curve point; statement construction fails
-    // closed rather than panicking.
+fn max_lbtc_boundary_zero_residual_rejected_at_admission() {
+    // An equal fee share leaves a zero residual (the point at infinity), which
+    // the compressed-point proof encoding cannot bind to its transcript.
     let secp = Secp256k1::new();
     let mut pset = PartiallySignedTransaction::new_v2();
     let mut input = Input::from_prevout(OutPoint::new(Txid::from_byte_array([0x30; 32]), 0));
@@ -596,7 +594,7 @@ fn max_lbtc_boundary_residual_is_identity_fail_closed() {
     let context = balance_context(&[0], &[], MAX_LBTC_ATOMIC_UNITS, [0x42; 32]);
     assert_eq!(
         build_statement(&secp, &pset, &context).err(),
-        Some(Error::ElementShape),
+        Some(Error::ElementShape)
     );
 }
 

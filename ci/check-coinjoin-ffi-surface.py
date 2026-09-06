@@ -103,11 +103,25 @@ def validate(root: pathlib.Path) -> None:
         "fn op_blind_last",
         "fn op_validate_signer_view",
         "fn op_verify_partial_balance",
+        "fn op_prove_registration",
+        "fn op_prove_partial_balance",
     ):
         if token not in source:
             reject(f"CoinJoin FFI source token missing: {token}")
     if source.count("pub unsafe extern \"C\" fn wlcj_execute_impl_v1") != 1:
         reject("CoinJoin FFI exported impl count changed")
+    header = (crate / "include/wasabi_liquid_coinjoin_v1.h").read_text()
+    for op, name in enumerate((
+        "CANONICALIZE_STATE", "VERIFY_INPUT_REGISTRATION", "VERIFY_OUTPUT_REGISTRATION",
+        "BLIND_NON_LAST", "BLIND_LAST", "VALIDATE_SIGNER_VIEW", "VERIFY_PARTIAL_BALANCE",
+        "PROVE_INPUT_REGISTRATION", "PROVE_OUTPUT_REGISTRATION",
+        "PROVE_PARTIAL_BALANCE",
+    ), 1):
+        constant = f"WLCJ_OP_{name}_V1"
+        if f"pub const {constant}: u32 = {op};" not in source:
+            reject("CoinJoin FFI Rust operation ID changed")
+        if f"#define {constant} UINT32_C({op})" not in header:
+            reject("CoinJoin FFI C operation ID changed")
     if "export_name" in source or "link_section" in source:
         reject("CoinJoin FFI forbidden export mechanism present")
     for forbidden in (
@@ -157,6 +171,8 @@ def validate(root: pathlib.Path) -> None:
         "hostile_malformed_frames_fail_closed",
         "hostile_field_shape_failures_fail_closed",
         "no_secret_bytes_in_any_response",
+        "c1_registration_creation_and_hostiles",
+        "c1_partial_balance_scalar_boundaries",
     ):
         if f"fn {name}(" not in tests:
             reject(f"CoinJoin FFI test inventory changed: {name}")

@@ -38,8 +38,11 @@ use wasabi_liquid_native_coinjoin_pset_state::{
     MAX_NETWORK_IDENTITY_BYTES, MAX_ROUND_ID_BYTES, ParticipantRole, Phase, ProfileVersion,
 };
 use wasabi_liquid_native_credential_commitment_equality::{
-    self as equality, EqualityProof, EqualityStatement, EqualityWitness,
+    self as equality, EqualityProof, EqualityStatement,
 };
+
+// Keep registration callers on this integration's dependency surface.
+pub use wasabi_liquid_native_credential_commitment_equality::{EqualityWitness, encode_proof};
 
 /// Registration proof kinds bound by this profile.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]

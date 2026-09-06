@@ -26,7 +26,8 @@ use elements::{
 };
 use wasabi_liquid_native_coinjoin_pset_state::{
     CanonicalState, CanonicalStateContext, MAX_INPUT_COUNT, MAX_LBTC_ATOMIC_UNITS,
-    MAX_OUTPUT_COUNT, MAX_SCALAR_COUNT, MAX_SCRIPT_BYTES, canonicalize_pset_state,
+    MAX_OUTPUT_COUNT, MAX_RANGEPROOF_BYTES, MAX_SCALAR_COUNT, MAX_SCRIPT_BYTES,
+    MAX_SURJECTION_PROOF_BYTES, canonicalize_pset_state,
 };
 
 /// Maximum serialized PSET bytes accepted at either blinding handoff.
@@ -96,7 +97,7 @@ pub enum Role {
 /// One validated unblinded CoinJoin PSET frozen for collaborative blinding.
 ///
 /// Construction enforces the L-BTC-only sponsor-free shape policy: bounded
-/// counts, explicit L-BTC witness UTXOs, exactly one explicit fee output, and
+/// counts, validated L-BTC witness UTXOs, exactly one explicit fee output, and
 /// every other output carrying a blinding key and a valid `blinder_index`.
 pub struct UnblindedCoinJoin {
     pset: PartiallySignedTransaction,
@@ -123,10 +124,13 @@ impl UnblindedCoinJoin {
     ///
     /// `role_of_output` maps each non-fee output index to the participant role
     /// that blinds it; it must cover every non-fee output exactly once.
+    /// After validation, freezes the PSET wire representation: `witness_utxo`
+    /// omits `TxOut.witness`, while `in_utxo_rangeproof` remains separate.
     ///
     /// # Errors
     ///
     /// Returns [`Error::UnblindedShapeInvalid`] for any shape-policy violation.
+    /// Returns [`Error::Deserialization`] if the canonical handoff is invalid or oversized.
     /// No blinding call runs on a rejected PSET.
     pub fn new(
         pset: PartiallySignedTransaction,
@@ -134,6 +138,8 @@ impl UnblindedCoinJoin {
         lbtc_asset: elements::AssetId,
     ) -> Result<Self, Error> {
         validate_unblinded_shape(&pset, role_of_output, lbtc_asset)?;
+        // Freeze exactly what B will decode, only after validating the proofs.
+        let pset = decode_handoff(&encode::serialize(&pset))?;
         let mut role_outputs: [Vec<usize>; 2] = [Vec::new(), Vec::new()];
         let mut confidential_outputs: Vec<usize> = role_of_output.keys().copied().collect();
         confidential_outputs.sort_unstable();
@@ -227,6 +233,7 @@ fn validate_unblinded_shape(
     }
 
     let mut seen_outpoints = BTreeSet::<(Txid, u32)>::new();
+    let secp = Secp256k1::new();
     for input in inputs {
         let raw_vout = input.previous_output_index;
         if input.previous_txid == Txid::from_byte_array([0; 32])
@@ -242,15 +249,44 @@ fn validate_unblinded_shape(
             .witness_utxo
             .as_ref()
             .ok_or(Error::UnblindedShapeInvalid)?;
-        if utxo.script_pubkey.len() > MAX_SCRIPT_BYTES
-            || utxo.asset != Asset::Explicit(lbtc_asset)
-            || !matches!(utxo.value, Value::Explicit(_))
-            || utxo.nonce != Nonce::Null
-            || input.asset.is_some()
-            || input.blind_asset_proof.is_some()
-            || input.in_utxo_rangeproof.is_some()
-        {
+        if utxo.script_pubkey.len() > MAX_SCRIPT_BYTES {
             return Err(Error::UnblindedShapeInvalid);
+        }
+        match (utxo.asset, utxo.value, utxo.nonce) {
+            (Asset::Explicit(asset), Value::Explicit(_), Nonce::Null)
+                if asset == lbtc_asset
+                    && input.asset.is_none()
+                    && input.blind_asset_proof.is_none()
+                    && input.in_utxo_rangeproof.is_none()
+                    && utxo.witness.rangeproof.is_empty() => {}
+            (
+                Asset::Confidential(generator),
+                Value::Confidential(commitment),
+                Nonce::Confidential(_),
+            ) => {
+                let asset_proof = input
+                    .blind_asset_proof
+                    .as_ref()
+                    .ok_or(Error::UnblindedShapeInvalid)?;
+                let range = input
+                    .in_utxo_rangeproof
+                    .as_ref()
+                    .ok_or(Error::UnblindedShapeInvalid)?;
+                if input.asset != Some(lbtc_asset)
+                    || asset_proof.len() > MAX_SURJECTION_PROOF_BYTES
+                    || range.len() > MAX_RANGEPROOF_BYTES
+                    || (!utxo.witness.rangeproof.is_empty() && &utxo.witness.rangeproof != range)
+                    || !asset_proof.blind_asset_proof_verify(&secp, lbtc_asset, generator)
+                {
+                    return Err(Error::UnblindedShapeInvalid);
+                }
+                range
+                    .as_ref()
+                    .ok_or(Error::UnblindedShapeInvalid)?
+                    .verify_inclusive(&secp, commitment, utxo.script_pubkey.as_bytes(), generator)
+                    .map_err(|_| Error::UnblindedShapeInvalid)?;
+            }
+            _ => return Err(Error::UnblindedShapeInvalid),
         }
     }
 

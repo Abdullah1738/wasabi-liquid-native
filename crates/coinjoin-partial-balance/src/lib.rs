@@ -11,12 +11,15 @@
 //! Σ_{i in P.inputs} C_i  −  Σ_{o in P.outputs} C_o  −  fee_P · H_A  ==  Δr · H
 //! ```
 //!
-//! where `C_i`/`C_o` are Pedersen value commitments over the canonical L-BTC
-//! asset generator `H_A` (explicit witness UTXOs contribute `v·H_A` directly,
+//! where `C_i`/`C_o` are Pedersen value commitments expressed over canonical
+//! L-BTC generator `H_A` (explicit witness UTXOs contribute `v·H_A` directly,
 //! with blinding factor zero), `H` is the secp256k1-zkp value/blinding
 //! generator (the standard base point `G`, the same constant the
 //! commitment-equality primitive uses for its `H`), and
-//! `Δr = Σ r_i − Σ r_o (mod n)`. When P's books balance, every `H_A` term
+//! `r = value_bf + value * asset_bf` and `Δr = Σ r_i − Σ r_o (mod n)`.
+//! The pinned library commits as `C = v*(H_A + asset_bf*H) + value_bf*H`;
+//! raw value blinding factors alone are NOT the witness for blinded assets.
+//! When P's books balance, every `H_A` term
 //! cancels and the residual commitment `R` opens to zero under `H_A`; the
 //! proof is a Schnorr proof of knowledge of `Δr` on `(R, H)`:
 //! `s·H == k·H + c·R`. When the books do not balance, `R` carries a nonzero
@@ -57,7 +60,7 @@ use wasabi_liquid_native_coinjoin_pset_state::{
     MAX_INPUT_COUNT, MAX_LBTC_ATOMIC_UNITS, MAX_NETWORK_IDENTITY_BYTES, MAX_ROUND_ID_BYTES,
     ParticipantRole, Phase, ProfileVersion,
 };
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Byte length of one compressed point encoding.
 pub const POINT_BYTES: usize = 33;
@@ -147,12 +150,14 @@ pub struct PartialBalanceContext<'a> {
     /// The participant's ordered PSET output indices (in range).
     pub output_indices: &'a [u32],
     /// The participant's exact assigned fee share in L-BTC atomic units
-    /// (zero is valid; the sum across participants is validated elsewhere).
+    /// (op-10 ABI admission rejects zero; historical op-7 context encoding is
+    /// unchanged).
     pub fee_share: u64,
 }
 
 /// The witness: the residual blinding factor
 /// `Δr = Σ r_i − Σ r_o (mod n)` opening the residual commitment under `H`.
+/// Each `r` is the effective factor `value_bf + value * asset_bf`, not raw VBF.
 ///
 /// The value is caller-owned secret material; this type deliberately does not
 /// implement `Clone` or `Debug` so witness material is not silently
@@ -169,8 +174,8 @@ impl Drop for PartialBalanceWitness {
 
 impl PartialBalanceWitness {
     /// Builds the witness from the residual blinding factor as a canonical
-    /// 32-byte scalar encoding. Zero is rejected: it is not a valid secp256k1
-    /// secret key, and the response arithmetic is defined on keys.
+    /// 32-byte scalar encoding. Zero is rejected because the current proof
+    /// encoding cannot bind an identity residual to its transcript.
     pub fn from_scalar_bytes(delta_r: &[u8; 32]) -> Result<Self, Error> {
         SecretKey::from_slice(delta_r).map_err(|_| Error::InvalidWitness)?;
         Ok(Self { delta_r: *delta_r })
@@ -289,8 +294,8 @@ struct Statement {
 ///
 /// Inputs MUST carry a witness UTXO whose asset is the canonical L-BTC asset
 /// — explicit and equal to `lbtc_asset`, or confidential (any `asset_comm`;
-/// the Pedersen value commitment `C = v·H_A + r·H` is over the canonical
-/// L-BTC generator regardless of the asset blinding, and the exact
+/// the Pedersen value commitment is `C = v·H_A + (value_bf + v*asset_bf)·H`,
+/// and the exact
 /// `asset_comm` bytes are bound into the transcript so the canonical/
 /// surjection layer's asset proof is committed) — and whose value is
 /// confidential (its commitment is used directly) or explicit (contributing
@@ -321,8 +326,15 @@ fn build_statement(
         let input = inputs.get(index).ok_or(Error::ElementShape)?;
         let utxo = input.witness_utxo.as_ref().ok_or(Error::ElementShape)?;
         match utxo.asset {
-            Asset::Explicit(asset) if asset == context.lbtc_asset => {}
-            Asset::Confidential(_) => {}
+            Asset::Explicit(asset) if asset == context.lbtc_asset => {
+                if input
+                    .asset
+                    .is_some_and(|metadata| metadata != context.lbtc_asset)
+                {
+                    return Err(Error::ElementShape);
+                }
+            }
+            Asset::Confidential(_) if input.asset == Some(context.lbtc_asset) => {}
             _ => return Err(Error::ElementShape),
         }
         let nonce = match utxo.nonce {
@@ -481,7 +493,7 @@ pub fn prove_partial_balance(
     if entropy.len() != 32 {
         return Err(Error::InvalidWitness);
     }
-    let mut entropy_bytes = [0u8; 32];
+    let mut entropy_bytes = Zeroizing::new([0u8; 32]);
     entropy_bytes.copy_from_slice(entropy);
     let statement = build_statement(secp, pset, context)?;
     let nonce = derive_nonce(&entropy_bytes, witness, &statement);
@@ -502,10 +514,10 @@ pub fn prove_partial_balance(
     let challenged_witness = witness_key
         .mul_tweak(&challenge_scalar)
         .map_err(|_| Error::ProveRejected)?;
-    let response_key = nonce
+    let response = nonce
         .add_tweak(&scalar_of(&challenged_witness))
-        .map_err(|_| Error::ProveRejected)?;
-    let response = response_key.secret_bytes();
+        .map_err(|_| Error::ProveRejected)?
+        .secret_bytes();
 
     Ok(PartialBalanceProof {
         nonce_commitment,

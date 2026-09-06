@@ -22,6 +22,9 @@ extern "C" {
 #define WLCJ_OP_BLIND_LAST_V1 UINT32_C(5)
 #define WLCJ_OP_VALIDATE_SIGNER_VIEW_V1 UINT32_C(6)
 #define WLCJ_OP_VERIFY_PARTIAL_BALANCE_V1 UINT32_C(7)
+#define WLCJ_OP_PROVE_INPUT_REGISTRATION_V1 UINT32_C(8)
+#define WLCJ_OP_PROVE_OUTPUT_REGISTRATION_V1 UINT32_C(9)
+#define WLCJ_OP_PROVE_PARTIAL_BALANCE_V1 UINT32_C(10)
 
 #define WLCJ_STATUS_OK_V1 INT32_C(0)
 #define WLCJ_STATUS_INVALID_FRAME_V1 (-INT32_C(1))
@@ -63,9 +66,62 @@ extern "C" {
  * WLCJ_STATUS_OUTPUT_CAPACITY_V1 publishes an out_frame_length of zero and
  * writes nothing to out_frame.
  *
- * No response frame ever carries secret material: response payloads are
+ * Ops 8/9 are additive; ops 1-7 retain their original wire contracts.
+ * Op 8 fields, in order: exact PSET bytes, registration context, Ma (33-byte
+ * compressed point), v (u64 BE), r1 (32-byte BE scalar), r2 (32-byte BE scalar),
+ * proof entropy (32 fresh caller-supplied bytes). Op 9 appends the exact output
+ * value_rangeproof bytes and asset_surjection_proof bytes, in that order.
+ * r2 is the raw Liquid VBF for the PSET element's actual asset generator,
+ * not the effective balance blinding. Scalars must be < secp256k1 order (zero
+ * allowed); v <= 2100000000000000. The kind must match the op and the indexed
+ * element must have the required confidential shape. Op 9 compares both proof
+ * fields byte-for-byte to that output. Payload caps: 1081344 / 3178496 bytes.
+ * Success returns ONE 162-byte equality-proof field (182-byte complete frame),
+ * verified natively before return; inconsistent witnesses return -6, invalid
+ * values/scalars/points/context/element/proof bindings -5, field lengths -1.
+ * Entropy freshness cannot be checked statelessly; every 32-byte value is
+ * accepted. A capacity query performs the proof operation; repeat the identical
+ * request to retrieve its deterministic result, then erase caller buffers.
+ *
+ * Registration context (same as ops 2/3): profile u8=1, network length u32 BE
+ * and bytes, genesis[32], L-BTC asset[32], round length u32 BE and bytes, phase
+ * u8 (1/2/3), role u8 (1/2), ordinal u32 BE, kind u8 (1=input,2=output), element
+ * index u32 BE, PSET state digest[32]. Network/round must be nonempty and within
+ * their existing profile bounds. No trailing context bytes are accepted.
+ * The digest is caller-supplied, NOT recomputed (also true of ops 2/3/7).
+ * Composition must canonicalize/check the exact revision and full canonical
+ * context, validate PSET admission/proofs, and enforce ownership/fee policy.
+ * Proof creation authenticates neither credential issuance nor consumption;
+ * WabiSabi credentials remain managed. No issuer/MAC/state/handles are created.
+ *
+ * Op 10 is additive; ops 1-9 retain their wire contracts. Fields, in order:
+ * exact PSET bytes, partial-balance context (same as op 7), effective residual
+ * scalar (32-byte BE, 0 < scalar < secp256k1 order), entropy (32 fresh caller
+ * bytes). Residual = sum(vbf + value*abf) over own inputs minus that sum over
+ * own outputs, modulo the curve order; raw VBF alone is NOT this witness.
+ * Payload cap: 1081344 bytes. Success returns ONE existing 65-byte proof field
+ * (85-byte frame), after prove AND verify against the recomputed PSET residual
+ * and context. Invalid scalar/context/element or proving failure returns -5;
+ * an inconsistent witness returns -6; bad field lengths/count returns -1.
+ * Op 10 rejects zero residuals and zero fee shares with -5 (validation failed).
+ * Op 7 retains its legacy verification path and -6 for zero-fee proof failure.
+ * The compressed Schnorr encoding has no identity-point field; an identity proof cannot
+ * bind its transcript. The caller must reject this profile before op 10.
+ * Entropy freshness and deterministic capacity-query rules match ops 8/9.
+ *
+ * Balance context: profile u8=1, network length u32 BE and bytes, genesis[32],
+ * L-BTC asset[32], round length u32 BE and bytes, phase u8 (1/2/3), role u8
+ * (1/2), ordinal u32 BE, PSET state digest[32], input count u32 BE then input
+ * indices u32 BE, output count u32 BE then output indices u32 BE, fee share
+ * u64 BE. Existing op-7 profile/count bounds apply; no trailing bytes.
+ * The digest is supplied, NOT recomputed. The caller must canonicalize full
+ * state, match the digest, validate asset/proof admission, enforce disjoint
+ * contributions and fee sums, and retain its own witnesses. No ownership
+ * guarantee or output-opening/witness acquisition is provided by op 10.
+ *
+ * Apart from the witness-class intermediate handoff below, response payloads are
  * public canonical projections, 32-byte digests, serialized PSET handoffs,
- * and fixed-size verification verdicts. Caller-supplied witness material
+ * fixed-size verification verdicts, and equality/partial-balance proofs. Caller-supplied witness material
  * (input blinding factors, the partial-balance residual blinding factor, and
  * blinding entropy) is copied into scoped native storage, zeroized before
  * return on every path, and never retained; the native side fabricates no

@@ -31,7 +31,7 @@ use core::fmt;
 
 use elements::secp256k1_zkp::{PublicKey, Scalar, Secp256k1, SecretKey};
 use sha2::{Digest, Sha256};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use transcript::Transcript;
 
@@ -303,8 +303,10 @@ fn derive_nonce(
         hasher.update(statement.value_commitment.serialize());
         hasher.update(statement.asset_generator.serialize());
         hasher.update(context);
-        let digest = hasher.finalize();
-        if let Ok(nonce) = SecretKey::from_slice(&digest) {
+        let mut digest = hasher.finalize();
+        let nonce = SecretKey::from_slice(&digest);
+        digest.as_mut_slice().zeroize();
+        if let Ok(nonce) = nonce {
             return nonce;
         }
     }
@@ -347,7 +349,7 @@ pub fn prove(
     if entropy.len() != 32 {
         return Err(EqualityProofError::InvalidEntropyLength);
     }
-    let mut entropy_bytes = [0u8; 32];
+    let mut entropy_bytes = Zeroizing::new([0u8; 32]);
     entropy_bytes.copy_from_slice(entropy);
 
     let gg = generators::wabisabi_gg();
