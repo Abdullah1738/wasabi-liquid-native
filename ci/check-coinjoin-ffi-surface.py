@@ -28,7 +28,9 @@ EXPECTED_FILES = {
     "src/signing.rs",
     "src/shim.c",
     "src/tests.rs",
+    "src/tests/public_round_fixture.rs",
     "tests/e2e.rs",
+    "tests/public_round_fixture_schema.py",
     "tests/signing/mod.rs",
 }
 

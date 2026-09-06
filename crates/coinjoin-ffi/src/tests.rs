@@ -1,6 +1,8 @@
 //! Same-transaction confidential composition and legacy per-operation wire KATs.
 use super::*;
 
+mod public_round_fixture;
+
 use elements::bitcoin::PublicKey as BitcoinPublicKey;
 use elements::confidential::{Asset, Nonce, RangeProof, SurjectionProof, Value};
 use elements::pset::{Input, Output};
