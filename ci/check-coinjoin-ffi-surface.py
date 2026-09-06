@@ -25,9 +25,11 @@ EXPECTED_FILES = {
     "exports/macos.txt",
     "exports/windows.def",
     "src/lib.rs",
+    "src/signing.rs",
     "src/shim.c",
     "src/tests.rs",
     "tests/e2e.rs",
+    "tests/signing/mod.rs",
 }
 
 # Pinned wire-KAT digests of the genuine two-participant round built in
@@ -116,6 +118,7 @@ def validate(root: pathlib.Path) -> None:
         "BLIND_NON_LAST", "BLIND_LAST", "VALIDATE_SIGNER_VIEW", "VERIFY_PARTIAL_BALANCE",
         "PROVE_INPUT_REGISTRATION", "PROVE_OUTPUT_REGISTRATION",
         "PROVE_PARTIAL_BALANCE",
+        "SIGNING_DIGESTS", "ASSEMBLE_SIGNATURES",
     ), 1):
         constant = f"WLCJ_OP_{name}_V1"
         if f"pub const {constant}: u32 = {op};" not in source:
@@ -124,10 +127,11 @@ def validate(root: pathlib.Path) -> None:
             reject("CoinJoin FFI C operation ID changed")
     if "export_name" in source or "link_section" in source:
         reject("CoinJoin FFI forbidden export mechanism present")
+    capability_source = source + (crate / "src/signing.rs").read_text()
     for forbidden in (
         "std::fs", "std::net", "std::process", "dlopen", "dlsym", "LoadLibrary", "GetProcAddress",
     ):
-        if forbidden in source:
+        if forbidden in capability_source:
             reject(f"CoinJoin FFI forbidden capability present: {forbidden}")
 
     shim = (crate / "src/shim.c").read_text()

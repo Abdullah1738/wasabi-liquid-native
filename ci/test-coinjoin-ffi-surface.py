@@ -27,6 +27,8 @@ def main() -> None:
     crate = "crates/coinjoin-ffi"
     # (path, old, new): each must flip the surface checker to a rejection.
     mutations = [
+        (f"{crate}/src/lib.rs", "WLCJ_OP_SIGNING_DIGESTS_V1: u32 = 11", "WLCJ_OP_SIGNING_DIGESTS_V1: u32 = 10"),
+        (f"{crate}/include/wasabi_liquid_coinjoin_v1.h", "WLCJ_OP_ASSEMBLE_SIGNATURES_V1 UINT32_C(12)", "WLCJ_OP_ASSEMBLE_SIGNATURES_V1 UINT32_C(10)"),
         (f"{crate}/src/lib.rs", "WLCJ_OP_PROVE_PARTIAL_BALANCE_V1: u32 = 10", "WLCJ_OP_PROVE_PARTIAL_BALANCE_V1: u32 = 7"),
         (f"{crate}/include/wasabi_liquid_coinjoin_v1.h", "WLCJ_OP_PROVE_PARTIAL_BALANCE_V1 UINT32_C(10)", "WLCJ_OP_PROVE_PARTIAL_BALANCE_V1 UINT32_C(7)"),
         (f"{crate}/src/lib.rs", "WLCJ_OP_PROVE_INPUT_REGISTRATION_V1: u32 = 8", "WLCJ_OP_PROVE_INPUT_REGISTRATION_V1: u32 = 2"),

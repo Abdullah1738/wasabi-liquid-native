@@ -58,8 +58,8 @@ def invoke(fn, request: bytes):
 
 
 def main() -> None:
-    if len(sys.argv) not in (3, 4):
-        raise SystemExit("usage: test-coinjoin-ffi-dynamic.py REPOSITORY_ROOT LIBRARY [C1_FIXTURES]")
+    if len(sys.argv) not in (3, 4, 5):
+        raise SystemExit("usage: test-coinjoin-ffi-dynamic.py REPOSITORY_ROOT LIBRARY [C1_FIXTURES [C2_FIXTURES]]")
     root = pathlib.Path(sys.argv[1]).resolve()
     library_path = pathlib.Path(sys.argv[2]).resolve()
     _ = root
@@ -117,7 +117,7 @@ def main() -> None:
     status, _ = invoke(execute, oversized_declared)
     assert status in (STATUS_INVALID_FRAME, STATUS_PAYLOAD_TOO_LARGE), status
 
-    if len(sys.argv) == 4:
+    if len(sys.argv) >= 4:
         fixtures = pathlib.Path(sys.argv[3]).resolve()
 
         def call(request):
@@ -190,6 +190,36 @@ def main() -> None:
                 assert status == STATUS_OUTPUT_CAPACITY and written.value == 85
                 assert out.raw == b"\xa5" * 84
         print("coinjoin-ffi C1 dynamic: ops 8->2, 9->3 and both participants 10->7 OK")
+
+    if len(sys.argv) == 5:
+        fixtures = pathlib.Path(sys.argv[4]).resolve()
+        cases = sorted(fixtures.glob("*.status"))
+        assert len(cases) >= 50, "missing C2 success/hostile fixtures"
+        successful = set()
+        for case in cases:
+            request = case.with_suffix(".request").read_bytes()
+            expected_status = int(case.read_text())
+            status, length = invoke(execute, request)
+            if expected_status == STATUS_OK:
+                expected = case.with_suffix(".response").read_bytes()
+                assert status == STATUS_OUTPUT_CAPACITY and length == len(expected), case
+                out = ctypes.create_string_buffer(b"\xa5" * (length - 1), length - 1)
+                written = ctypes.c_uint64(123)
+                status = execute(request, len(request), out, length - 1, ctypes.byref(written))
+                assert status == STATUS_OUTPUT_CAPACITY and written.value == length, case
+                assert out.raw == b"\xa5" * (length - 1), case
+                assert call(request) == expected, case
+                assert call(request) == expected, case
+                successful.add(case.stem)
+            else:
+                assert status == expected_status and length == 0, (case, status)
+                out = ctypes.create_string_buffer(b"\xa5" * 32768, 32768)
+                written = ctypes.c_uint64(123)
+                status = execute(request, len(request), out, 32768, ctypes.byref(written))
+                assert status == expected_status and written.value == 0, (case, status)
+                assert out.raw == b"\xa5" * 32768, case
+        assert successful == {"op11-0", "op11-1", "op12"}, successful
+        print(f"coinjoin-ffi C2 dynamic: {len(cases)} cases, independent digests and signature assembly OK")
 
     print("coinjoin-ffi dynamic: OK")
 

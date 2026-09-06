@@ -25,6 +25,8 @@ extern "C" {
 #define WLCJ_OP_PROVE_INPUT_REGISTRATION_V1 UINT32_C(8)
 #define WLCJ_OP_PROVE_OUTPUT_REGISTRATION_V1 UINT32_C(9)
 #define WLCJ_OP_PROVE_PARTIAL_BALANCE_V1 UINT32_C(10)
+#define WLCJ_OP_SIGNING_DIGESTS_V1 UINT32_C(11)
+#define WLCJ_OP_ASSEMBLE_SIGNATURES_V1 UINT32_C(12)
 
 #define WLCJ_STATUS_OK_V1 INT32_C(0)
 #define WLCJ_STATUS_INVALID_FRAME_V1 (-INT32_C(1))
@@ -118,6 +120,45 @@ extern "C" {
  * state, match the digest, validate asset/proof admission, enforce disjoint
  * contributions and fee sums, and retain its own witnesses. No ownership
  * guarantee or output-opening/witness acquisition is provided by op 10.
+ *
+ * Ops 11/12 are additive; ops 1-10 are unchanged. Both payload caps: 1081344.
+ * Common fields: exact final PSET, canonical context, approved digest[32],
+ * complete authorization vector. Context (same as op 1): profile u8=1,
+ * network length u32 BE and bytes, genesis[32], L-BTC asset[32], fee asset[32],
+ * round length u32 BE and bytes, phase u8=3 (PreSigning), role u8 (1/2),
+ * ordinal u32 BE, predecessor tag u8 (0 absent, 1 followed by digest[32]).
+ * Authorization: count u32 BE (1..16), then ascending records for ALL inputs:
+ * index u32 BE, txid[32] in Elements byte-array order (not display hex), vout
+ * u32 BE, compressed public key[33]. Native checks exact outpoint and P2WPKH
+ * ownership, final lifecycle, full-domain proofs, balance and approved digest.
+ * The caller must independently approve the digest/context/full authorization;
+ * computing a digest from an untrusted candidate is not participant approval.
+ *
+ * Op 11 fifth field: owned count u32 BE (1..16), then strictly ascending unique
+ * indices u32 BE. Response fields: binding[32], canonical digest[32], requests.
+ * Requests: count u32 BE, then (authorization record[73], signing digest[32],
+ * sighash u8=0x41). Sign original digest bytes WITHOUT reversal, strict DER
+ * low-S ECDSA, append 0x41 (SIGHASH_ALL|RANGEPROOF). No private spend keys enter
+ * native code; no signing callback or handle is exposed through this ABI.
+ *
+ * Binding = SHA256("WLCJ_SIGNING_BINDING_V1" || the exact first four common
+ * length-prefixed fields). Owned subset is excluded so independent participants
+ * share the binding. This public consistency token is NOT authentication or a
+ * MAC: ECDSA authenticates the transaction, not off-chain round context. Caller
+ * must retain approved bytes and associate contributions with that binding via
+ * authenticated participant messaging; public tokens can be relabeled.
+ *
+ * Op 12 fifth field: count u32 BE then (binding[32], index u32 BE, compressed
+ * public key[33], signature length u32 BE, DER+0x41 bytes, maximum 73 bytes).
+ * Order is arbitrary; exactly one contribution per authorized input required.
+ * Response fields: binding[32], canonical digest[32], finalized transaction
+ * bytes, txid[32] in Elements byte-array order. Native reconstructs capability,
+ * revalidates all signatures through the existing callback path and verifies
+ * assembly. Transaction body and output proofs are unchanged; no reblinding.
+ * Invalid state/digest/authorization/subset: -5; contribution binding/set/key,
+ * signature or assembly failure: -6; malformed lengths/count fields/trailing:
+ * -1; outer payload/field limits: -4. Capacity queries perform full validation;
+ * repeat identical request bytes. Output-opening acquisition is not provided.
  *
  * Apart from the witness-class intermediate handoff below, response payloads are
  * public canonical projections, 32-byte digests, serialized PSET handoffs,

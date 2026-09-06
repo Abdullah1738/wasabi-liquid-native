@@ -17,6 +17,8 @@ use elements::secp256k1_zkp::{Secp256k1, SecretKey};
 use elements::{OutPoint, Script, TxOut, Txid};
 use wasabi_liquid_native_coinjoin_ffi::*;
 
+mod signing;
+
 const NETWORK: &[u8] = b"elements-liquid-mainnet";
 const ROUND: &[u8] = b"round-coinjoin-ffi-e2e";
 const GENESIS: [u8; 32] = [0x22; 32];

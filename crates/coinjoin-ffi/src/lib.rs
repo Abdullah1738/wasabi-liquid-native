@@ -47,6 +47,8 @@ use wasabi_liquid_native_coinjoin_pset_state::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
+mod signing;
+
 /// The frozen CoinJoin ABI version.
 pub const WLCJ_ABI_VERSION_V1: u32 = 1;
 /// The frozen outer frame magic (`WLCJ`).
@@ -83,6 +85,10 @@ pub const WLCJ_OP_PROVE_INPUT_REGISTRATION_V1: u32 = 8;
 pub const WLCJ_OP_PROVE_OUTPUT_REGISTRATION_V1: u32 = 9;
 /// Operation: stateless partial-balance proof creation.
 pub const WLCJ_OP_PROVE_PARTIAL_BALANCE_V1: u32 = 10;
+/// Operation: validate final signing state and return owned-input digest requests.
+pub const WLCJ_OP_SIGNING_DIGESTS_V1: u32 = 11;
+/// Operation: validate detached signatures and assemble the final transaction.
+pub const WLCJ_OP_ASSEMBLE_SIGNATURES_V1: u32 = 12;
 
 /// The operation succeeded and the complete response frame was copied.
 pub const WLCJ_STATUS_OK_V1: i32 = 0;
@@ -104,7 +110,7 @@ pub const WLCJ_STATUS_INTERNAL_ERROR_V1: i32 = -7;
 pub const WLCJ_STATUS_OUTPUT_CAPACITY_V1: i32 = -8;
 
 /// Per-op payload bounds, fixed by the frozen ABI.
-const OP_PAYLOAD_BOUNDS: [u32; 10] = [
+const OP_PAYLOAD_BOUNDS: [u32; 12] = [
     1_081_344, // op 1: canonicalize state
     1_081_344, // op 2: verify input registration
     3_178_496, // op 3: verify output registration
@@ -115,6 +121,8 @@ const OP_PAYLOAD_BOUNDS: [u32; 10] = [
     1_081_344, // op 8: prove input registration
     3_178_496, // op 9: prove output registration
     1_081_344, // op 10: prove partial balance
+    1_081_344, // op 11: signing digests
+    1_081_344, // op 12: assemble signatures
 ];
 
 const SECRET_RECORD_BYTES: usize = 108;
@@ -993,6 +1001,8 @@ fn dispatch(op: u32, payload: &[u8]) -> Result<Vec<u8>, Rejection> {
             op_prove_registration(payload, RegistrationKind::OutputRegistration)
         }
         WLCJ_OP_PROVE_PARTIAL_BALANCE_V1 => op_prove_partial_balance(payload),
+        WLCJ_OP_SIGNING_DIGESTS_V1 => signing::execute(payload, false),
+        WLCJ_OP_ASSEMBLE_SIGNATURES_V1 => signing::execute(payload, true),
         _ => Err(Rejection::InvalidFrame),
     }
 }
@@ -1031,7 +1041,7 @@ fn parse_header(frame: &[u8]) -> Result<FrameHeader, i32> {
     if payload_len != payload.len() {
         return Err(WLCJ_STATUS_INVALID_FRAME_V1);
     }
-    if !(1..=10).contains(&op) {
+    if !(1..=12).contains(&op) {
         return Err(WLCJ_STATUS_UNKNOWN_OP_V1);
     }
     if payload_len > OP_PAYLOAD_BOUNDS[op as usize - 1] as usize {
