@@ -1492,7 +1492,7 @@ def main() -> int:
                 lambda value: Path(value).absolute(), sys.argv[2:]
             )
             lock_bytes = stable_read(source_root, source_root / "Cargo.lock", 256 * 1024)
-            if hashlib.sha256(lock_bytes).hexdigest() != "1aca521a3b17172ee367b114c152c72b70777c0b6b0da8c02658e5165ef13e47":
+            if hashlib.sha256(lock_bytes).hexdigest() != "9f45865c3e3edfd33f684c8cc36643225a0a5774814eaaea543788b908cfd8f6":
                 reject("workspace cache authority lock mismatch")
             copy_safe_cargo_cache(source_cargo_home, private_cargo_home, lock_bytes)
             print("private workspace Cargo cache copied")
