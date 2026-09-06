@@ -3991,6 +3991,17 @@ if __name__ == "__main__":
     )
     expect_lock_snippet(snippet, coinjoin_ffi_elements_edge, success=False)
 
+    for package, dependency in (
+        ("wasabi-liquid-native-coinjoin-ffi", "wasabi-liquid-native-output-opening"),
+        ("wasabi-liquid-native-output-opening", "rand"),
+    ):
+        opening_edge = lock_root("lock-opening-edge-" + package)
+        remove_lock_dependency(opening_edge, package, dependency)
+        expect_lock_snippet(snippet, opening_edge, success=False)
+        # Even re-pinning the current lock must not bypass the exact transform.
+        changed = hashlib.sha256((opening_edge / "Cargo.lock").read_bytes()).hexdigest()
+        expect_lock_snippet(snippet.replace("9f45865c3e3edfd33f684c8cc36643225a0a5774814eaaea543788b908cfd8f6", changed), opening_edge, success=False)
+
     coinjoin_ffi_sha2_edge = lock_root("lock-coinjoin-ffi-sha2-edge")
     remove_lock_dependency(
         coinjoin_ffi_sha2_edge,

@@ -25,7 +25,7 @@ VECTORS = Path("contracts/ordinary-wallet-plan/v1/nonlinkable-reference/vectors"
 SNAPSHOT_INVENTORY = Path("PROOF_SNAPSHOT_SHA256SUMS")
 SNAPSHOT_FILES = {
     Path("Cargo.toml"): (246, "42952b2479c608f073e017410c8fd958150ab0c707775487b10a7c2b4c8ca9e8"),
-    Path("Cargo.lock"): (7724, "9f45865c3e3edfd33f684c8cc36643225a0a5774814eaaea543788b908cfd8f6"),
+    Path("Cargo.lock"): (7724, "4ca45ca0dd27b2a545b0d93174e02487cc756b26a34d946de5dcb349ceea7aab"),
     TOOL / "Cargo.toml": (633, "0ed6ccf01a7c8bc3d5efd8c7fa5abf7a702591ab5e84537301f73a314f99dcbb"),
     MAIN: (20139, EXPECTED_SOURCE_SHA256),
     VECTORS / "PUBLIC_PROOF_CASES_V1.tsv": (547, "d414a588c48626f3ad6559d08c06caf119a5a48a062366d873ec4e3f689958b9"),
