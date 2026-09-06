@@ -28,7 +28,6 @@ jobs:
 
   coinjoin-ffi-artifact:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: default-workspace
     strategy:
       fail-fast: false
       matrix:
