@@ -48,6 +48,31 @@ impl SigningCapability {
     pub const fn digest(&self) -> [u8; 32] {
         self.digest
     }
+
+    /// Returns original signing digest bytes in `owned` order after validating
+    /// the entire nonempty subset. This exposes no keys and admits no signatures.
+    pub fn owned_digests(&self, owned: &[AuthorizedInput]) -> Result<Vec<[u8; 32]>, SigningError> {
+        if owned.is_empty() || owned.len() > self.authorized.len() {
+            return Err(SigningError::AuthorizationRejected);
+        }
+        let mut seen = vec![false; self.authorized.len()];
+        for auth in owned {
+            if !self.authorized.contains(auth) || seen[auth.index] {
+                return Err(SigningError::AuthorizationRejected);
+            }
+            seen[auth.index] = true;
+        }
+        owned
+            .iter()
+            .map(|auth| {
+                let prevout = self.pset.inputs()[auth.index]
+                    .witness_utxo
+                    .as_ref()
+                    .ok_or(SigningError::AuthorizationRejected)?;
+                Ok(input_digest(&self.transaction, auth, prevout.value))
+            })
+            .collect()
+    }
 }
 
 /// A detached signature contribution for exactly one authorized input.
@@ -221,26 +246,12 @@ pub fn sign_owned_inputs<S: CollabP2wpkhSigner>(
     owned: &[AuthorizedInput],
     signer: &mut S,
 ) -> Result<Vec<SignedInputContribution>, SigningError> {
-    if owned.is_empty() || owned.len() > capability.authorized.len() {
-        return Err(SigningError::AuthorizationRejected);
-    }
-    let mut seen = vec![false; capability.authorized.len()];
     // Validate the whole subset before the first callback, including duplicates.
-    for auth in owned {
-        if !capability.authorized.contains(auth) || seen[auth.index] {
-            return Err(SigningError::AuthorizationRejected);
-        }
-        seen[auth.index] = true;
-    }
+    let digests = capability.owned_digests(owned)?;
     let secp = Secp256k1::<All>::new();
     let mut result = Vec::with_capacity(owned.len());
-    for auth in owned {
+    for (auth, digest) in owned.iter().zip(digests) {
         let input = &capability.pset.inputs()[auth.index];
-        let prevout = input
-            .witness_utxo
-            .as_ref()
-            .ok_or(SigningError::AuthorizationRejected)?;
-        let digest = input_digest(&capability.transaction, auth, prevout.value);
         let signature = signer
             .sign_digest(auth.index, &input.previous_outpoint(), digest, SIGHASH)
             .ok_or(SigningError::SignerRefused)?;
