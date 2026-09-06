@@ -9,7 +9,9 @@
 //! clearing the scalars. The final blinded PSET is verified for value balance and
 //! is accepted by the canonical PSET-state projection, while the mid-lifecycle
 //! scalar-bearing state is rejected as non-signable. This crate does not
-//! coordinate a round, move bytes over a network, sign, or manage keys.
+//! coordinate a round, move bytes over a network, or manage keys. Its bounded
+//! signing bridge admits an immutable final PSET, verifies detached participant
+//! signatures from caller-owned callbacks, and assembles without reblinding.
 
 use core::fmt;
 use std::collections::{BTreeSet, HashMap};
@@ -28,6 +30,13 @@ use wasabi_liquid_native_coinjoin_pset_state::{
     CanonicalState, CanonicalStateContext, MAX_INPUT_COUNT, MAX_LBTC_ATOMIC_UNITS,
     MAX_OUTPUT_COUNT, MAX_RANGEPROOF_BYTES, MAX_SCALAR_COUNT, MAX_SCRIPT_BYTES,
     MAX_SURJECTION_PROOF_BYTES, canonicalize_pset_state,
+};
+
+mod signing;
+pub use signing::{
+    AuthorizedInput, CollabP2wpkhSigner, FinalizedCollaborativeTransaction,
+    SignedInputContribution, SigningCapability, SigningError, accept_signing_capability,
+    assemble_signatures, sign_owned_inputs,
 };
 
 /// Maximum serialized PSET bytes accepted at either blinding handoff.

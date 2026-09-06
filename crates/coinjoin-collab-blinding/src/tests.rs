@@ -1,4 +1,5 @@
 use super::*;
+mod signing;
 use elements::{
     AssetId, OutPoint, Script,
     bitcoin::PublicKey,
