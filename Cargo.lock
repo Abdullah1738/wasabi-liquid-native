@@ -462,6 +462,7 @@ dependencies = [
  "wasabi-liquid-native-coinjoin-partial-balance",
  "wasabi-liquid-native-coinjoin-pset-state",
  "wasabi-liquid-native-credential-commitment-equality",
+ "wasabi-liquid-native-output-opening",
  "zeroize",
 ]
 
@@ -565,6 +566,7 @@ name = "wasabi-liquid-native-output-opening"
 version = "0.1.0"
 dependencies = [
  "elements",
+ "rand",
  "zeroize",
 ]
 

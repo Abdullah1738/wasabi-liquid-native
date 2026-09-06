@@ -18,6 +18,7 @@ wasabi-liquid-native-coinjoin-collab-blinding = { path = "../coinjoin-collab-bli
 wasabi-liquid-native-coinjoin-equality-integration = { path = "../coinjoin-equality-integration" }
 wasabi-liquid-native-coinjoin-partial-balance = { path = "../coinjoin-partial-balance" }
 wasabi-liquid-native-coinjoin-pset-state = { path = "../coinjoin-pset-state" }
+wasabi-liquid-native-output-opening = { path = "../output-opening" }
 zeroize = { version = "1.8", default-features = false }
 
 [dev-dependencies]

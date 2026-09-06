@@ -15,6 +15,267 @@ use wasabi_liquid_native_credential_commitment_equality::{
 };
 
 #[test]
+fn opening_bridge_hostile_matrix_and_zeroization() {
+    let secp = Secp256k1::new();
+    let mut rng = StdRng::seed_from_u64(0x0013_0ffe);
+    let key = SecretKey::new(&mut rng);
+    let secrets = elements::TxOutSecrets::new(
+        AssetId::LIQUIDTESTNET_BTC,
+        AssetBlindingFactor::new(&mut rng),
+        42_000,
+        ValueBlindingFactor::new(&mut rng),
+    );
+    let ephemeral = SecretKey::new(&mut rng);
+    let funding = elements::TxOutSecrets::new(
+        secrets.asset,
+        AssetBlindingFactor::zero(),
+        secrets.value,
+        ValueBlindingFactor::zero(),
+    );
+    let output = TxOut::with_txout_secrets(
+        &mut rng,
+        &secp,
+        p2wpkh_script(0x13),
+        key.public_key(&secp),
+        ephemeral,
+        secrets,
+        &[funding],
+    )
+    .unwrap();
+    let mut pset = PartiallySignedTransaction::new_v2();
+    pset.add_input(explicit_input(0, secrets.value + 500));
+    pset.add_output(Output::from_txout(output));
+    pset.add_output(Output::from_txout(TxOut::new_fee(500, secrets.asset)));
+    let tx = pset.extract_tx().unwrap();
+    let opened = open_confidential_output(&secp, &tx.output[0], &key).unwrap();
+    assert!(core::mem::needs_drop::<
+        wasabi_liquid_native_output_opening::OpenedOutput,
+    >());
+    assert_eq!(opened.asset_id(), &secrets.asset.to_byte_array());
+    assert_eq!(opened.value(), &secrets.value);
+    assert_eq!(
+        opened.asset_blinding_factor(),
+        secrets.asset_bf.into_inner().as_ref()
+    );
+    assert_eq!(
+        opened.value_blinding_factor(),
+        secrets.value_bf.into_inner().as_ref()
+    );
+    let fields = vec![
+        serialize(&pset),
+        0u32.to_be_bytes().to_vec(),
+        key.secret_bytes().to_vec(),
+        tx.txid().to_byte_array().to_vec(),
+        tx.output[0].script_pubkey.to_bytes(),
+        secrets.asset.to_byte_array().to_vec(),
+        secrets.value.to_be_bytes().to_vec(),
+    ];
+    let make = |fields: &[Vec<u8>]| {
+        request(
+            WLCJ_OP_OPEN_OUTPUT_V1,
+            &fields.iter().map(Vec::as_slice).collect::<Vec<_>>(),
+        )
+    };
+    let good = make(&fields);
+    let mut expected_record = secrets.asset.to_byte_array().to_vec();
+    expected_record.extend_from_slice(&secrets.value.to_be_bytes());
+    expected_record.extend_from_slice(secrets.asset_bf.into_inner().as_ref());
+    expected_record.extend_from_slice(secrets.value_bf.into_inner().as_ref());
+    let expected = request(WLCJ_OP_OPEN_OUTPUT_V1, &[&expected_record]);
+    assert_eq!(expected.len(), 124);
+    assert_eq!(execute(&good), expected);
+
+    let export = |name: &str, request: &[u8], status: i32| {
+        if let Some(directory) = std::env::var_os("WLCJ_OPENING_FIXTURE_DIR") {
+            let directory = std::path::PathBuf::from(directory).canonicalize().unwrap();
+            let tmp = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tmp")
+                .canonicalize()
+                .unwrap();
+            assert!(directory.starts_with(tmp));
+            std::fs::write(directory.join(format!("{name}.request")), request).unwrap();
+            std::fs::write(directory.join(format!("{name}.status")), status.to_string()).unwrap();
+            if status == 0 {
+                std::fs::write(directory.join(format!("{name}.response")), &expected).unwrap();
+            }
+        }
+    };
+    export("op13", &good, 0);
+    for capacity in [0, 123, 124, 125] {
+        OPENING_DROP_AUDIT.with(|audit| audit.borrow_mut().clear());
+        let mut out = [0xa5; 125];
+        let mut written = 123;
+        let status = unsafe {
+            wlcj_execute_impl_v1(
+                good.as_ptr(),
+                good.len() as u64,
+                if capacity == 0 {
+                    ptr::null_mut()
+                } else {
+                    out.as_mut_ptr()
+                },
+                capacity,
+                &mut written,
+            )
+        };
+        assert_eq!(written, 124);
+        if capacity < 124 {
+            assert_eq!(status, WLCJ_STATUS_OUTPUT_CAPACITY_V1);
+            assert_eq!(out, [0xa5; 125]);
+        } else {
+            assert_eq!(status, WLCJ_STATUS_OK_V1);
+            assert_eq!(&out[..124], expected);
+            assert_eq!(out[124], 0xa5);
+        }
+        OPENING_DROP_AUDIT.with(|audit| {
+            let audit = audit.borrow();
+            for length in [good.len(), 104, 108, 124] {
+                assert!(
+                    audit.contains(&(length, true)),
+                    "missing wiped buffer {length}"
+                );
+            }
+            assert!(audit.iter().all(|(_, wiped)| *wiped));
+        });
+    }
+    let mut cases = Vec::new();
+    for (name, index, replacement) in [
+        ("wrong-key", 2, vec![0x31; 32]),
+        ("zero-key", 2, vec![0; 32]),
+        ("overflow-key", 2, vec![0xff; 32]),
+        ("wrong-index", 1, 1u32.to_be_bytes().to_vec()),
+        ("index-oob", 1, 2u32.to_be_bytes().to_vec()),
+        ("index-max", 1, u32::MAX.to_be_bytes().to_vec()),
+        ("wrong-script", 4, p2wpkh_script(0x14).to_bytes()),
+        ("wrong-value", 6, (secrets.value + 1).to_be_bytes().to_vec()),
+        ("wrong-asset", 5, vec![0x31; 32]),
+        ("wrong-txid", 3, vec![0x31; 32]),
+        (
+            "reversed-txid",
+            3,
+            fields[3].iter().rev().copied().collect(),
+        ),
+        ("invalid-pset", 0, vec![0]),
+        ("empty-pset", 0, vec![]),
+    ] {
+        let mut invalid = fields.clone();
+        invalid[index] = replacement;
+        cases.push((name.to_owned(), make(&invalid), -5));
+    }
+    // txid excludes witness proofs: missing/corrupt rangeproof must fail at opening.
+    for mutation in 0..4 {
+        let mut invalid = pset.clone();
+        match mutation {
+            0 => invalid.outputs_mut()[0].value_rangeproof = None,
+            1 => invalid.outputs_mut()[0].ecdh_pubkey = None,
+            2 => invalid.outputs_mut()[0].script_pubkey = p2wpkh_script(0x14),
+            3 => {
+                invalid.outputs_mut()[0].value_rangeproof = Some(
+                    RangeProof::blind_value_proof(
+                        &mut rng,
+                        &secp,
+                        secrets.value,
+                        tx.output[0].value.commitment().unwrap(),
+                        tx.output[0].asset.commitment().unwrap(),
+                        secrets.value_bf,
+                    )
+                    .unwrap(),
+                )
+            }
+            _ => unreachable!(),
+        }
+        let mut invalid_fields = fields.clone();
+        invalid_fields[0] = serialize(&invalid);
+        invalid_fields[3] = invalid
+            .extract_tx()
+            .unwrap()
+            .txid()
+            .to_byte_array()
+            .to_vec();
+        if mutation == 2 {
+            invalid_fields[4] = p2wpkh_script(0x14).to_bytes();
+        }
+        cases.push((
+            format!("output-mutation-{mutation}"),
+            make(&invalid_fields),
+            -5,
+        ));
+    }
+    // An explicit output must not be accepted even with all expected facts matched.
+    let mut explicit = fields.clone();
+    explicit[1] = 1u32.to_be_bytes().to_vec();
+    explicit[4] = vec![];
+    explicit[6] = 500u64.to_be_bytes().to_vec();
+    cases.push(("explicit-output".into(), make(&explicit), -5));
+    for index in 0..7 {
+        let mut missing = fields.clone();
+        missing.remove(index);
+        cases.push((format!("missing-field-{index}"), make(&missing), -1));
+        if [1, 2, 3, 5, 6].contains(&index) {
+            for oversized in [false, true] {
+                let mut invalid = fields.clone();
+                if oversized {
+                    invalid[index].push(0);
+                } else {
+                    invalid[index].pop();
+                }
+                cases.push((
+                    format!("field-length-{index}-{oversized}"),
+                    make(&invalid),
+                    -1,
+                ));
+            }
+        }
+    }
+    let mut extra = fields.clone();
+    extra.push(vec![]);
+    cases.push(("extra-field".into(), make(&extra), -1));
+    let mut trailing_pset = fields.clone();
+    trailing_pset[0].push(0);
+    cases.push(("trailing-pset".into(), make(&trailing_pset), -5));
+    cases.push((
+        "truncated-frame".into(),
+        good[..good.len() - 1].to_vec(),
+        -1,
+    ));
+    let mut trailing = good.clone();
+    trailing.push(0);
+    cases.push(("trailing-frame".into(), trailing, -1));
+    cases.push(("payload-cap".into(), frame(13, &vec![0; 2_097_153]), -4));
+    cases.push((
+        "field-cap".into(),
+        frame(13, &2_097_153u32.to_be_bytes()),
+        -4,
+    ));
+    for (name, invalid, status) in cases {
+        OPENING_DROP_AUDIT.with(|audit| audit.borrow_mut().clear());
+        assert_eq!(execute_reject(&invalid), status, "{name}");
+        OPENING_DROP_AUDIT.with(|audit| {
+            let audit = audit.borrow();
+            assert!(audit.contains(&(invalid.len(), true)), "{name}");
+            assert!(audit.iter().all(|(_, wiped)| *wiped));
+        });
+        export(&name, &invalid, status);
+    }
+    for stage in [1, 2] {
+        OPENING_DROP_AUDIT.with(|audit| audit.borrow_mut().clear());
+        INJECT_OPENING_PANIC.with(|armed| armed.set(stage));
+        assert_eq!(execute_reject(&good), WLCJ_STATUS_INTERNAL_ERROR_V1);
+        OPENING_DROP_AUDIT.with(|audit| {
+            let audit = audit.borrow();
+            for length in [good.len(), 104, 108] {
+                assert!(audit.contains(&(length, true)));
+            }
+            if stage == 2 {
+                assert!(audit.contains(&(124, true)));
+            }
+            assert!(audit.iter().all(|(_, wiped)| *wiped));
+        });
+    }
+    assert_eq!(execute(&good), expected);
+}
+
+#[test]
 fn c0_confidential_same_transaction_composition() {
     let secp = Secp256k1::new();
     let lbtc = AssetId::LIQUID_BTC;

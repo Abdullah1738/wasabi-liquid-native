@@ -3,12 +3,13 @@
 
 //! Versioned C ABI adapter for the Wasabi Liquid CoinJoin native primitives.
 //!
-//! This crate is a thin marshaling layer over the four landed, already-reviewed
+//! This crate is a thin marshaling layer over the landed
 //! pure primitives: `coinjoin-pset-state` (canonical PSET state projection and
 //! digest), `coinjoin-equality-integration` (registration-bound equality proof
 //! creation and verification), `coinjoin-collab-blinding` (two-participant collaborative
 //! blinding), and `coinjoin-partial-balance` (per-participant balance proof
-//! creation and verification). It adds NO new cryptography and NO new protocol logic.
+//! creation and verification), plus participant-local `output-opening`.
+//! It adds NO new cryptography and NO new protocol logic.
 //!
 //! Every request and response crosses the boundary as exactly one bounded
 //! frame `[magic u32][abi_version u32][op u32][payload_len u32][payload]`
@@ -17,8 +18,10 @@
 //! context structs are exposed. Witness material (input blinding factors, the
 //! residual balance factor, blinding entropy) is supplied by the caller per
 //! call, copied into scoped native storage, and zeroized before return on
-//! every path; nothing retains it and no response frame carries it. The
-//! intermediate handoff produced by the non-last blinding op carries the
+//! every path; nothing retains it and no response frame carries it, except
+//! operation 13's explicitly typed participant-only output-opening record.
+//! That record is caller-owned secret material and must never be sent to a
+//! coordinator. The intermediate handoff produced by the non-last blinding op carries the
 //! fork's pending balancing scalars inside its serialized PSET global map by
 //! protocol construction and is therefore witness-class bytes the caller must
 //! protect; it is the only handoff representation the landed state machine
@@ -45,6 +48,7 @@ use wasabi_liquid_native_coinjoin_pset_state::{
     CanonicalStateContext, ParticipantRole, Phase, PredecessorDigest, ProfileVersion,
     canonicalize_pset_state,
 };
+use wasabi_liquid_native_output_opening::open_confidential_output;
 use zeroize::{Zeroize, Zeroizing};
 
 mod signing;
@@ -89,6 +93,8 @@ pub const WLCJ_OP_PROVE_PARTIAL_BALANCE_V1: u32 = 10;
 pub const WLCJ_OP_SIGNING_DIGESTS_V1: u32 = 11;
 /// Operation: validate detached signatures and assemble the final transaction.
 pub const WLCJ_OP_ASSEMBLE_SIGNATURES_V1: u32 = 12;
+/// Operation: participant-local opening of one exact confidential output.
+pub const WLCJ_OP_OPEN_OUTPUT_V1: u32 = 13;
 
 /// The operation succeeded and the complete response frame was copied.
 pub const WLCJ_STATUS_OK_V1: i32 = 0;
@@ -110,7 +116,7 @@ pub const WLCJ_STATUS_INTERNAL_ERROR_V1: i32 = -7;
 pub const WLCJ_STATUS_OUTPUT_CAPACITY_V1: i32 = -8;
 
 /// Per-op payload bounds, fixed by the frozen ABI.
-const OP_PAYLOAD_BOUNDS: [u32; 12] = [
+const OP_PAYLOAD_BOUNDS: [u32; 13] = [
     1_081_344, // op 1: canonicalize state
     1_081_344, // op 2: verify input registration
     3_178_496, // op 3: verify output registration
@@ -123,15 +129,35 @@ const OP_PAYLOAD_BOUNDS: [u32; 12] = [
     1_081_344, // op 10: prove partial balance
     1_081_344, // op 11: signing digests
     1_081_344, // op 12: assemble signatures
+    2_097_152, // op 13: participant output opening
 ];
 
 const SECRET_RECORD_BYTES: usize = 108;
+const OUTPUT_OPENING_RECORD_BYTES: usize = 104;
 
 struct ScopedBytes(Vec<u8>);
 
 impl Drop for ScopedBytes {
     fn drop(&mut self) {
+        // Wipe before clearing the length so tests can inspect live storage.
+        self.0.as_mut_slice().zeroize();
+        #[cfg(test)]
+        OPENING_DROP_AUDIT.with(|audit| {
+            audit
+                .borrow_mut()
+                .push((self.0.len(), self.0.iter().all(|b| *b == 0)));
+        });
         self.0.zeroize();
+    }
+}
+
+struct OpeningKey(elements::secp256k1_zkp::SecretKey);
+
+impl Drop for OpeningKey {
+    fn drop(&mut self) {
+        // The dependency exposes best-effort erasure, not Zeroize; implicit
+        // compiler/dependency copies are outside this adapter's guarantee.
+        self.0.non_secure_erase();
     }
 }
 
@@ -981,7 +1007,50 @@ fn op_prove_partial_balance(payload: &[u8]) -> Result<Vec<u8>, Rejection> {
     Ok(response)
 }
 
-fn dispatch(op: u32, payload: &[u8]) -> Result<Vec<u8>, Rejection> {
+fn op_open_output(payload: &[u8]) -> Result<ScopedBytes, Rejection> {
+    let fields = expect_fields(payload, &[u32::MAX, 4, 32, 32, u32::MAX, 32, 8])?;
+    let pset = decode_pset(fields[0])?;
+    let index =
+        u32::from_be_bytes(fields[1].try_into().map_err(|_| Rejection::InvalidFrame)?) as usize;
+    let output = pset
+        .outputs()
+        .get(index)
+        .ok_or(Rejection::ValidationFailed)?;
+    let transaction = pset.extract_tx().map_err(|_| Rejection::ValidationFailed)?;
+    if transaction.txid().to_byte_array() != fields[3]
+        || output.script_pubkey.as_bytes() != fields[4]
+        || transaction.output[index].script_pubkey.as_bytes() != fields[4]
+    {
+        return Err(Rejection::ValidationFailed);
+    }
+    let key = OpeningKey(
+        elements::secp256k1_zkp::SecretKey::from_slice(fields[2])
+            .map_err(|_| Rejection::ValidationFailed)?,
+    );
+    let opened = open_confidential_output(&Secp256k1::new(), &transaction.output[index], &key.0)
+        .map_err(|_| Rejection::ValidationFailed)?;
+    let expected_value = Zeroizing::new(u64::from_be_bytes(
+        fields[6].try_into().map_err(|_| Rejection::InvalidFrame)?,
+    ));
+    if opened.asset_id() != fields[5] || opened.value() != &*expected_value {
+        return Err(Rejection::ValidationFailed);
+    }
+    let mut record = ScopedBytes(Vec::with_capacity(OUTPUT_OPENING_RECORD_BYTES));
+    record.0.extend_from_slice(opened.asset_id());
+    record.0.extend_from_slice(&opened.value().to_be_bytes());
+    record.0.extend_from_slice(opened.asset_blinding_factor());
+    record.0.extend_from_slice(opened.value_blinding_factor());
+    let mut response = ScopedBytes(Vec::with_capacity(4 + record.0.len()));
+    push_field(&mut response.0, &record.0);
+    #[cfg(test)]
+    maybe_inject_opening_panic(1);
+    Ok(response)
+}
+
+fn dispatch(op: u32, payload: &[u8]) -> Result<ScopedBytes, Rejection> {
+    if op == WLCJ_OP_OPEN_OUTPUT_V1 {
+        return op_open_output(payload);
+    }
     match op {
         WLCJ_OP_CANONICALIZE_STATE_V1 => op_canonicalize_state(payload),
         WLCJ_OP_VERIFY_INPUT_REGISTRATION_V1 => {
@@ -1005,6 +1074,7 @@ fn dispatch(op: u32, payload: &[u8]) -> Result<Vec<u8>, Rejection> {
         WLCJ_OP_ASSEMBLE_SIGNATURES_V1 => signing::execute(payload, true),
         _ => Err(Rejection::InvalidFrame),
     }
+    .map(ScopedBytes)
 }
 
 fn parse_header(frame: &[u8]) -> Result<FrameHeader, i32> {
@@ -1041,7 +1111,7 @@ fn parse_header(frame: &[u8]) -> Result<FrameHeader, i32> {
     if payload_len != payload.len() {
         return Err(WLCJ_STATUS_INVALID_FRAME_V1);
     }
-    if !(1..=12).contains(&op) {
+    if !(1..=13).contains(&op) {
         return Err(WLCJ_STATUS_UNKNOWN_OP_V1);
     }
     if payload_len > OP_PAYLOAD_BOUNDS[op as usize - 1] as usize {
@@ -1050,16 +1120,16 @@ fn parse_header(frame: &[u8]) -> Result<FrameHeader, i32> {
     Ok(FrameHeader { op, payload_len })
 }
 
-fn build_response_frame(op: u32, payload: &[u8]) -> Result<Vec<u8>, i32> {
+fn build_response_frame(op: u32, payload: &[u8]) -> Result<ScopedBytes, i32> {
     if payload.len() > WLCJ_MAX_RESPONSE_BYTES_V1 as usize - HEADER_BYTES {
         return Err(WLCJ_STATUS_PAYLOAD_TOO_LARGE_V1);
     }
-    let mut frame = Vec::with_capacity(HEADER_BYTES + payload.len());
-    push_u32(&mut frame, WLCJ_MAGIC_V1);
-    push_u32(&mut frame, WLCJ_ABI_VERSION_V1);
-    push_u32(&mut frame, op);
-    push_u32(&mut frame, payload.len() as u32);
-    frame.extend_from_slice(payload);
+    let mut frame = ScopedBytes(Vec::with_capacity(HEADER_BYTES + payload.len()));
+    push_u32(&mut frame.0, WLCJ_MAGIC_V1);
+    push_u32(&mut frame.0, WLCJ_ABI_VERSION_V1);
+    push_u32(&mut frame.0, op);
+    push_u32(&mut frame.0, payload.len() as u32);
+    frame.0.extend_from_slice(payload);
     Ok(frame)
 }
 
@@ -1121,18 +1191,22 @@ pub unsafe extern "C" fn wlcj_execute_impl_v1(
         let header = parse_header(&frame.0)?;
         let payload = &frame.0[HEADER_BYTES..HEADER_BYTES + header.payload_len];
         let response_payload = dispatch(header.op, payload).map_err(|error| error.status())?;
-        let response = build_response_frame(header.op, &response_payload)?;
-        let required = response.len() as u64;
+        let response = build_response_frame(header.op, &response_payload.0)?;
+        #[cfg(test)]
+        if header.op == WLCJ_OP_OPEN_OUTPUT_V1 {
+            maybe_inject_opening_panic(2);
+        }
+        let required = response.0.len() as u64;
         // SAFETY: The caller supplied one writable u64 and it does not overlap
         // inputs or the response buffer.
         unsafe { ptr::write(out_frame_length, required) };
 
-        if out_frame.is_null() || response.len() > out_frame_capacity {
+        if out_frame.is_null() || response.0.len() > out_frame_capacity {
             return Err(WLCJ_STATUS_OUTPUT_CAPACITY_V1);
         }
         // SAFETY: The caller supplied a non-overlapping writable buffer whose
         // checked capacity covers the complete response.
-        unsafe { ptr::copy_nonoverlapping(response.as_ptr(), out_frame, response.len()) };
+        unsafe { ptr::copy_nonoverlapping(response.0.as_ptr(), out_frame, response.0.len()) };
         Ok(WLCJ_STATUS_OK_V1)
     }));
 
@@ -1151,6 +1225,18 @@ pub unsafe extern "C" fn wlcj_execute_impl_v1(
 #[cfg(test)]
 std::thread_local! {
     static INJECT_TEST_PANIC: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+    static INJECT_OPENING_PANIC: core::cell::Cell<u8> = const { core::cell::Cell::new(0) };
+    static OPENING_DROP_AUDIT: core::cell::RefCell<Vec<(usize, bool)>> = const { core::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn maybe_inject_opening_panic(stage: u8) {
+    INJECT_OPENING_PANIC.with(|armed| {
+        if armed.get() == stage {
+            armed.set(0);
+            panic!("CoinJoin opening injected panic");
+        }
+    });
 }
 
 #[cfg(test)]

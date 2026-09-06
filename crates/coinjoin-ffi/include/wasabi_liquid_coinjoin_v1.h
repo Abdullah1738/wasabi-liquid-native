@@ -27,6 +27,7 @@ extern "C" {
 #define WLCJ_OP_PROVE_PARTIAL_BALANCE_V1 UINT32_C(10)
 #define WLCJ_OP_SIGNING_DIGESTS_V1 UINT32_C(11)
 #define WLCJ_OP_ASSEMBLE_SIGNATURES_V1 UINT32_C(12)
+#define WLCJ_OP_OPEN_OUTPUT_V1 UINT32_C(13)
 
 #define WLCJ_STATUS_OK_V1 INT32_C(0)
 #define WLCJ_STATUS_INVALID_FRAME_V1 (-INT32_C(1))
@@ -160,7 +161,35 @@ extern "C" {
  * -1; outer payload/field limits: -4. Capacity queries perform full validation;
  * repeat identical request bytes. Output-opening acquisition is not provided.
  *
- * Apart from the witness-class intermediate handoff below, response payloads are
+ * Op 13 is additive; ops 1-12 retain their wire contracts. PARTICIPANT-ONLY:
+ * never send its request or secret response to a coordinator. Fields, in order:
+ * exact serialized PSET, output index u32 BE (zero-based), receiver blinding
+ * secret key[32] (valid nonzero secp256k1 scalar), expected txid[32] in Elements
+ * byte-array order (NOT display hex), expected scriptPubKey bytes, expected
+ * asset id[32] in consensus order, expected value u64 BE in indivisible units.
+ * Payload cap: 2097152 bytes INCLUDING all seven field-length prefixes.
+ * Native extracts the transaction, matches txid/index/script, opens only that
+ * confidential output using the borrowed-key output-opening API, and matches
+ * asset/value. Success returns ONE 104-byte opening_record_v1 field:
+ * [asset_id 32][value u64 BE][asset_blinding_factor 32][value_blinding_factor 32].
+ * The complete response is 124 bytes. This is SECRET participant witness
+ * material, not a public proof. Consume locally and erase caller request and
+ * response buffers immediately after use; native cannot erase caller memory.
+ * Native-owned request/record/payload/frame buffers and the typed opening are
+ * zeroized on return or unwind, including capacity queries. The parsed key is
+ * erased using the dependency's best-effort non_secure_erase API; compiler and
+ * dependency-internal copies are not covered by a full-memory erasure guarantee.
+ * Bad PSET/key/index/txid/script/asset/value or failed opening returns -5;
+ * malformed field shape returns -1; bounds return -4. Failures write nothing;
+ * capacity queries fully validate/open, return -8 and publish 124. Repeat the
+ * identical request to retrieve the result. There is no round/replay context:
+ * txid does NOT commit witnesses/proofs or all PSET metadata. Op 13 does not
+ * validate surjection proofs, transaction balance, lifecycle, authorization,
+ * script/key ownership, chain inclusion/currentness, or unspentness. The caller
+ * must separately approve those facts. No coordinator endpoint, key derivation,
+ * wallet credentials, node access, signing, or broadcast is provided.
+ *
+ * Apart from op 13 and the witness-class intermediate handoff below, response payloads are
  * public canonical projections, 32-byte digests, serialized PSET handoffs,
  * fixed-size verification verdicts, and equality/partial-balance proofs. Caller-supplied witness material
  * (input blinding factors, the partial-balance residual blinding factor, and
