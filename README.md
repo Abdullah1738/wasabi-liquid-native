@@ -163,6 +163,45 @@ an explicit retry-or-discard decision. No arbitrary PSET import, signature
 injection, node policy check, transaction submission, or broadcast acceptance
 claim exists.
 
+## CoinJoin CI artifacts
+
+Successful pushes to `main` publish CoinJoin ABI v1 (operations 1-12) artifacts
+from the `Dependency capabilities` workflow, after both existing workspace
+gates pass. The output-only job builds fresh release libraries using Rust
+1.96.0 and the unchanged `ci/build-coinjoin-ffi-library.sh` export allowlists.
+It checks the sole `wlcj_execute_v1` export and runs the existing release FFI
+tests and dynamic C1/C2 fixtures before uploading. It does not commit files,
+change managed pins, publish a package, or contact a node or wallet.
+
+Supported CI targets are `x86_64-unknown-linux-gnu` on Ubuntu 24.04 (`.so`)
+and `aarch64-apple-darwin` on macOS 14 with Xcode 15.4 (`.dylib`). These are
+host-native builds, not universal binaries or a claim of support for other
+architectures, older Linux glibc versions, or Windows.
+
+Each GitHub Actions artifact is named
+`coinjoin-ffi-v1-<target>-<full-commit-sha>-<run-attempt>` and contains only the
+dynamic library, C header, `manifest.json`, and `SHA256SUMS`. The manifest
+records the exact source commit, repository, run URL/attempt, target, release
+profile, Rust compiler identity, lockfile/build-script hashes, ABI operations,
+and SHA-256 of the library/header. `SHA256SUMS` also covers the manifest.
+Fixture requests, signing test material, static archives, and intermediate
+objects are not uploaded.
+
+Download from the successful exact-commit workflow run (for example with
+`gh run download <run-id> --repo <owner>/wasabi-liquid-native --name <artifact-name>`).
+In the extracted directory, verify `sha256sum -c SHA256SUMS` on Linux or
+`shasum -a 256 -c SHA256SUMS` on macOS, and compare the manifest commit and
+target with the reviewed run. Checksums alone do not authenticate provenance.
+Artifacts have a requested 90-day retention, subject to repository policy;
+they are not permanent release assets. Preserve an approved artifact through
+a separately reviewed release/pinning step before retention expires.
+
+The managed loader must remain unavailable until a separately reviewed
+managed change admits the downloaded target-specific library hash and its
+source/run provenance. A local host build is not a production pin. Artifact
+publication alone gives no managed-runtime, live testnet round, broadcast,
+custody, or production-readiness credit.
+
 ## Product boundary
 
 The intended product is an ordinary noncustodial multiasset Liquid wallet,

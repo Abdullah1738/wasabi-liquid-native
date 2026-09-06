@@ -25,3 +25,108 @@ jobs:
         run: /usr/bin/env -i HOME="$HOME" TMPDIR="$RUNNER_TEMP" PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" ./ci/check-dependency-capabilities.sh
       - name: Test dependency capability gate
         run: /usr/bin/env -i HOME="$HOME" TMPDIR="$RUNNER_TEMP" PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" python3 ci/test-dependency-capability-gate.py
+
+  coinjoin-ffi-artifact:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: default-workspace
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            library: libwasabi_liquid_coinjoin_v1.so
+          - os: macos-14
+            target: aarch64-apple-darwin
+            library: libwasabi_liquid_coinjoin_v1.dylib
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/tmp/coinjoin-target
+      ARTIFACT_DIRECTORY: ${{ github.workspace }}/tmp/coinjoin-artifact
+      EXPECTED_TARGET: ${{ matrix.target }}
+      LIBRARY_NAME: ${{ matrix.library }}
+      BUILD_RUNNER: ${{ matrix.os }}
+    steps:
+      - name: Check out exact sources without persisted credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.96.0 --profile minimal
+      - name: Build and verify release library
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(rustc +1.96.0 -vV | sed -n 's/^host: //p')" = "$EXPECTED_TARGET"
+          if [ "$RUNNER_OS" = macOS ]; then
+            export DEVELOPER_DIR=/Applications/Xcode_15.4.app/Contents/Developer
+            export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+          fi
+          python3 -I ci/check-cargo-fetch-preflight.py "$GITHUB_WORKSPACE"
+          python3 -I ci/check-coinjoin-ffi-surface.py "$GITHUB_WORKSPACE"
+          mkdir -p "$ARTIFACT_DIRECTORY" tmp/coinjoin-c1-fixtures tmp/coinjoin-c2-fixtures
+          cargo +1.96.0 fetch --locked
+          cargo +1.96.0 build --locked --offline --release --lib -p wasabi-liquid-native-coinjoin-ffi
+          export WLCJ_C1_FIXTURE_DIR="$GITHUB_WORKSPACE/tmp/coinjoin-c1-fixtures"
+          export WLCJ_C2_FIXTURE_DIR="$GITHUB_WORKSPACE/tmp/coinjoin-c2-fixtures"
+          cargo +1.96.0 test --locked --offline --release -p wasabi-liquid-native-coinjoin-ffi
+          library="$(ci/build-coinjoin-ffi-library.sh "$GITHUB_WORKSPACE" "$CARGO_TARGET_DIR" "$ARTIFACT_DIRECTORY")"
+          test "$library" = "$ARTIFACT_DIRECTORY/$LIBRARY_NAME"
+          if [ "$RUNNER_OS" = macOS ]; then
+            nm -gjU "$library" > "$RUNNER_TEMP/coinjoin-symbols"
+          else
+            nm -D --defined-only "$library" | awk '{ print $3 }' > "$RUNNER_TEMP/coinjoin-symbols"
+          fi
+          python3 -I ci/check-coinjoin-ffi-surface.py "$GITHUB_WORKSPACE" --symbols "$(uname -s)" "$RUNNER_TEMP/coinjoin-symbols"
+          python3 -I ci/test-coinjoin-ffi-dynamic.py "$GITHUB_WORKSPACE" "$library" "$WLCJ_C1_FIXTURE_DIR" "$WLCJ_C2_FIXTURE_DIR"
+          cp crates/coinjoin-ffi/include/wasabi_liquid_coinjoin_v1.h "$ARTIFACT_DIRECTORY/"
+          git diff --exit-code
+          git diff --cached --exit-code
+      - name: Write commit-bound SHA-256 manifest
+        run: |
+          python3 -I - <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import subprocess
+
+          output = pathlib.Path(os.environ["ARTIFACT_DIRECTORY"])
+          digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+          files = [os.environ["LIBRARY_NAME"], "wasabi_liquid_coinjoin_v1.h"]
+          manifest = {
+              "schema_version": 1,
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "commit": os.environ["GITHUB_SHA"],
+              "run_url": f'{os.environ["GITHUB_SERVER_URL"]}/{os.environ["GITHUB_REPOSITORY"]}/actions/runs/{os.environ["GITHUB_RUN_ID"]}',
+              "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+              "runner": os.environ["BUILD_RUNNER"],
+              "target": os.environ["EXPECTED_TARGET"],
+              "profile": "release",
+              "rustc": subprocess.check_output(["rustc", "+1.96.0", "-vV"], text=True).strip(),
+              "abi_version": 1,
+              "operations": list(range(1, 13)),
+              "export": "wlcj_execute_v1",
+              "cargo_lock_sha256": digest(pathlib.Path("Cargo.lock")),
+              "build_script_sha256": digest(pathlib.Path("ci/build-coinjoin-ffi-library.sh")),
+              "files": {name: digest(output / name) for name in files},
+          }
+          (output / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+          files.append("manifest.json")
+          (output / "SHA256SUMS").write_text("".join(f"{digest(output / name)}  {name}\n" for name in files))
+          PY
+      - name: Upload verified CoinJoin ABI artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coinjoin-ffi-v1-${{ matrix.target }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.ARTIFACT_DIRECTORY }}/${{ matrix.library }}
+            ${{ env.ARTIFACT_DIRECTORY }}/wasabi_liquid_coinjoin_v1.h
+            ${{ env.ARTIFACT_DIRECTORY }}/manifest.json
+            ${{ env.ARTIFACT_DIRECTORY }}/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 90
