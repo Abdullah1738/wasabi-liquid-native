@@ -1443,7 +1443,7 @@ def main() -> int:
             expected_lock_digest = sys.argv[5]
             if expected_lock_digest not in {
                 FILES[Path("ci/ordinary-wallet-plan-public-proof.Cargo.lock")][1],
-                "1aca521a3b17172ee367b114c152c72b70777c0b6b0da8c02658e5165ef13e47",
+                "9f45865c3e3edfd33f684c8cc36643225a0a5774814eaaea543788b908cfd8f6",
             }:
                 reject("copied Cargo source lock authority is unreviewed")
             lock_bytes = stable_read(lock_file.parent, lock_file, 256 * 1024)
@@ -1468,7 +1468,7 @@ def main() -> int:
             expected_lock_digest = sys.argv[8]
             if expected_lock_digest not in {
                 FILES[Path("ci/ordinary-wallet-plan-public-proof.Cargo.lock")][1],
-                "1aca521a3b17172ee367b114c152c72b70777c0b6b0da8c02658e5165ef13e47",
+                "9f45865c3e3edfd33f684c8cc36643225a0a5774814eaaea543788b908cfd8f6",
             }:
                 reject("final Cargo source lock authority is unreviewed")
             lock_bytes = stable_read(lock_file.parent, lock_file, 256 * 1024)
